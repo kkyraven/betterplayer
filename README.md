@@ -11,8 +11,7 @@ Download from KinkyRaven.com/betterplayer or the releases in the right.
 --
 
 
-# BetterPlayer Engine
-Please note that the engine of BetterPlayer is the only part that is GPL and included in this repo. The layer which manages the UI and other extensions is not. The Engine exposes media playback, script handling, device output, tracking, detection, beat analysis, and generation through a Node N-API addon.
+# BetterPlayer Engine Source
 
 
 ## Build
