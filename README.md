@@ -1,6 +1,19 @@
-# BetterPlayer engine
+# BetterPlayer
+A better video player and media manager for interactive toys
 
-The GPL-3.0-or-later native engine used by BetterPlayer. It exposes media playback, script handling, device output, tracking, detection, beat analysis, and generation through a Node N-API addon.
+Download from KinkyRaven.com/betterplayer or the releases in the right.
+
+- Manage your Library of Videos
+- Start a play session
+- Connect and play with your devices
+- Watch crisp videos
+
+--
+
+
+# BetterPlayer Engine
+Please note that the engine of BetterPlayer is the only part that is GPL and included in this repo. The layer which manages the UI and other extensions is not. The Engine exposes media playback, script handling, device output, tracking, detection, beat analysis, and generation through a Node N-API addon.
+
 
 ## Build
 
@@ -21,12 +34,7 @@ sudo apt install libmpv-dev libudev-dev libdbus-1-dev pkg-config
 pnpm install --frozen-lockfile
 pnpm run build
 ```
-
-The generated addon and TypeScript declarations are written to the repository root. Windows builds need an mpv development package; the release workflow prepares one from the shinchiro mpv builds.
-
-## Releases
-
-Tags beginning with `v` build macOS, Windows, and Linux N-API addon archives and attach them to the matching GitHub Release. The archives contain the addon, loader, and declarations. libmpv is a runtime dependency: install or package it for the platform where the addon runs.
+Windows builds need an mpv development package; the release workflow prepares one from the shinchiro mpv builds.
 
 ## Licence
 
