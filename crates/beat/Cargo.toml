@@ -1,0 +1,9 @@
+[package]
+name = "bp-beat"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+bp-script.workspace = true

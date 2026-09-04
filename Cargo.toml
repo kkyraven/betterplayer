@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = ["crates/player", "crates/devices", "crates/script", "crates/axes", "crates/tracking", "crates/detect", "crates/beat", "crates/hero", "crates/core", "crates/napi"]
+
+[workspace.package]
+edition = "2024"
+version = "0.0.1"
+publish = false
+# GPLv3: the release builds link Homebrew's and shinchiro's libmpv, whose ffmpeg is built with
+# --enable-gpl --enable-version3. Every crate dependency is permissive or GPL-compatible.
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+bp-player = { path = "crates/player" }
+bp-devices = { path = "crates/devices" }
+bp-script = { path = "crates/script" }
+bp-axes = { path = "crates/axes" }
+bp-tracking = { path = "crates/tracking" }
+bp-detect = { path = "crates/detect" }
+bp-beat = { path = "crates/beat" }
+bp-hero = { path = "crates/hero" }
+bp-core = { path = "crates/core" }
+
+# Symbols stay in release builds so Instruments can attribute time. Thin LTO and one codegen
+# unit let the per-tick path inline across crates; panics stay unwinding (a cdylib in Electron).
+[profile.release]
+debug = 1
+lto = "thin"
+codegen-units = 1

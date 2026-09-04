@@ -1,0 +1,26 @@
+{
+  "name": "bp-engine",
+  "version": "0.0.1",
+  "private": true,
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "binaryName": "bp-engine",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu"
+    ]
+  },
+  "scripts": {
+    "build": "napi build --platform --release --package bp-engine --output-dir .",
+    "build:debug": "napi build --platform --package bp-engine --output-dir .",
+    "test": "cargo test --workspace"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.9.0"
+  },
+  "packageManager": "pnpm@11.22.0",
+  "license": "GPL-3.0-or-later"
+}
