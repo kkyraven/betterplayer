@@ -180,6 +180,14 @@ impl Script {
     pub fn index_at(&self, t_ms: f64) -> Option<usize> {
         self.actions.partition_point(|a| a.at <= t_ms).checked_sub(1)
     }
+
+
+    pub fn extent(&self) -> Option<(f64, f64)> {
+        self.actions.iter().map(|a| a.pos).fold(None, |acc, p| match acc {
+            None => Some((p, p)),
+            Some((lo, hi)) => Some((lo.min(p), hi.max(p))),
+        })
+    }
 }
 
 

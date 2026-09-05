@@ -164,6 +164,13 @@ pub struct Bookmark {
     pub at_ms: f64,
 }
 
+
+#[napi(object)]
+pub struct Span {
+    pub start_ms: f64,
+    pub end_ms: f64,
+}
+
 #[napi(object)]
 pub struct ScriptInfo {
     pub axis: String,
@@ -180,6 +187,8 @@ pub struct ScriptInfo {
     pub max_speed: f64,
 
     pub heatmap: Vec<f64>,
+
+    pub gaps: Vec<Span>,
     pub chapters: Vec<Chapter>,
     pub bookmarks: Vec<Bookmark>,
 }
@@ -219,6 +228,8 @@ pub struct AxisSettings {
     pub speed_limit: f64,
 
     pub smart_limit_input: Option<String>,
+
+    pub extend_range: Option<bool>,
 }
 
 fn axis(id: &str) -> Result<bp_script::Axis> {
@@ -256,6 +267,7 @@ impl AxisSettings {
                 .map(axis)
                 .transpose()?
                 .map(bp_core::SmartLimit::default_for),
+            extend_range: self.extend_range.unwrap_or(false),
         })
     }
 
@@ -283,6 +295,7 @@ impl AxisSettings {
             auto_home_duration_ms: s.auto_home_duration_ms,
             speed_limit: s.speed_limit,
             smart_limit_input: s.smart_limit.as_ref().map(|l| l.input.id().to_string()),
+            extend_range: Some(s.extend_range),
         }
     }
 }
@@ -2843,6 +2856,7 @@ fn script_info_js(s: bp_core::ScriptInfo) -> ScriptInfo {
         average_speed: s.average_speed,
         max_speed: s.max_speed,
         heatmap: s.heatmap,
+        gaps: s.gaps.into_iter().map(|(start_ms, end_ms)| Span { start_ms, end_ms }).collect(),
         chapters: s
             .chapters
             .into_iter()

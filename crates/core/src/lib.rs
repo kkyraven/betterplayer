@@ -92,6 +92,8 @@ pub struct ScriptInfo {
     pub max_speed: f64,
 
     pub heatmap: Vec<f64>,
+
+    pub gaps: Vec<(f64, f64)>,
     pub chapters: Vec<Chapter>,
     pub bookmarks: Vec<Bookmark>,
 }
@@ -638,6 +640,8 @@ pub struct Engine {
 }
 
 const HEATMAP_BUCKETS: usize = 240;
+
+const GAP_MIN_MS: f64 = 1000.0;
 
 const CUT_WATCH_GAP_MS: f64 = 1000.0;
 
@@ -2695,6 +2699,7 @@ fn script_info(axis: Axis, source: &Path, container: Container, script: &Script)
         average_speed: stats.average,
         max_speed: stats.max,
         heatmap: heatmap::heatmap(script, duration_ms, HEATMAP_BUCKETS).buckets,
+        gaps: heatmap::stills(script, GAP_MIN_MS),
         chapters: script.chapters.clone(),
         bookmarks: script.bookmarks.clone(),
     }

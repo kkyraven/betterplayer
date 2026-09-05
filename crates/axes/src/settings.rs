@@ -27,6 +27,9 @@ pub struct AxisSettings {
 
     pub speed_limit: f64,
     pub smart_limit: Option<SmartLimit>,
+
+
+    pub extend_range: bool,
 }
 
 impl AxisSettings {
@@ -63,6 +66,7 @@ impl Default for AxisSettings {
             auto_home_duration_ms: 3000.0,
             speed_limit: 0.0,
             smart_limit: None,
+            extend_range: false,
         }
     }
 }

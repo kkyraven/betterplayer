@@ -62,10 +62,52 @@ pub fn heatmap(script: &Script, duration_ms: f64, n: usize) -> Heatmap {
     Heatmap { buckets }
 }
 
+
+const STILL_STEP: f64 = 0.05;
+
+
+
+
+pub fn stills(script: &Script, min_ms: f64) -> Vec<(f64, f64)> {
+    let mut out = Vec::new();
+    let Some(first) = script.actions.first() else { return out };
+    let mut push = |start: f64, end: f64| {
+        if end - start >= min_ms {
+            out.push((start, end));
+        }
+    };
+    push(0.0, first.at);
+    let mut start: Option<f64> = None;
+    for w in script.actions.windows(2) {
+        let still = (w[1].pos - w[0].pos).abs() < STILL_STEP;
+        match (still, start) {
+            (true, None) => start = Some(w[0].at),
+            (false, Some(s)) => {
+                push(s, w[0].at);
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let (Some(s), Some(last)) = (start, script.actions.last()) {
+        push(s, last.at);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::funscript::Action;
+
+    #[test]
+    fn stills_find_lead_in_and_flat_runs() {
+        let pts = [(2000.0, 0.5), (2500.0, 0.52), (9000.0, 0.5), (9500.0, 1.0), (10_000.0, 0.0), (10_500.0, 0.0), (10_800.0, 0.0)];
+        let s = Script { actions: pts.iter().map(|&(at, pos)| Action { at, pos }).collect(), ..Default::default() };
+        assert_eq!(stills(&s, 1000.0), vec![(0.0, 2000.0), (2000.0, 9000.0)]);
+        assert_eq!(stills(&s, 500.0), vec![(0.0, 2000.0), (2000.0, 9000.0), (10_000.0, 10_800.0)]);
+        assert!(stills(&Script::default(), 1000.0).is_empty());
+    }
 
     #[test]
     fn stats_and_buckets() {

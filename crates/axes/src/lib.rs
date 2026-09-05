@@ -95,6 +95,8 @@ impl ScriptTable {
 pub struct Mixer {
     scripts: [Option<Arc<Script>>; Axis::COUNT],
 
+    extents: [Option<(f64, f64)>; Axis::COUNT],
+
     loaded: Vec<(Axis, Arc<Script>)>,
 
 
@@ -132,6 +134,7 @@ impl Mixer {
     pub fn new() -> Mixer {
         let mut m = Mixer {
             scripts: std::array::from_fn(|_| None),
+            extents: [None; Axis::COUNT],
             loaded: Vec::new(),
             derived: [false; Axis::COUNT],
             expand_stroke: false,
@@ -170,6 +173,7 @@ impl Mixer {
     pub fn install(&mut self, table: ScriptTable) {
         let ScriptTable { loaded, scripts, derived, expand_stroke, electrodes } = table;
         self.loaded = loaded;
+        self.extents = std::array::from_fn(|i| scripts[i].as_ref().and_then(|s| s.extent()));
         self.scripts = scripts;
         self.derived = derived;
         self.expand_stroke = expand_stroke;
@@ -201,6 +205,7 @@ impl Mixer {
         if axis == Axis::L0 && self.expand_stroke {
             self.rebuild();
         } else {
+            self.extents[axis.index()] = script.as_ref().and_then(|s| s.extent());
             self.scripts[axis.index()] = script;
         }
     }
@@ -385,7 +390,9 @@ impl Mixer {
         let source = cfg.link.unwrap_or(axis);
         let script = self.scripts[source.index()].as_deref();
         let external = self.external[i];
-        let sampled = external.or_else(|| script.and_then(|s| interp::sample(s, t, cfg.interpolation)));
+
+        let extent = self.extents[source.index()].filter(|(lo, hi)| cfg.extend_range && hi - lo > 1e-6);
+        let sampled = external.or_else(|| script.and_then(|s| interp::sample(s, t, cfg.interpolation)).map(|v| extent.map_or(v, |(lo, hi)| ((v - lo) / (hi - lo)).clamp(0.0, 1.0))));
 
 
         let in_gap = external.is_none() && cfg.provider != Provider::None && script.is_some_and(|s| gap_at(s, t) > cfg.fill_gaps_over_ms);
@@ -584,6 +591,22 @@ mod tests {
         m.set_source(Axis::L0, Some(0.9));
         let again = m.tick(0.0, 10.0)[0];
         assert!(again < 0.21, "eases from where it was: {again}");
+    }
+
+    #[test]
+    fn range_extender_stretches_a_narrow_script() {
+        let mut m = Mixer::new();
+        settled(&mut m);
+        m.set_scripts([(Axis::L0, script(&[(0.0, 0.3), (100.0, 0.7), (200.0, 0.5)]))]);
+        let mut s = AxisSettings::default();
+        s.speed_limit = 0.0;
+        m.set_settings(Axis::L0, s.clone());
+        assert!((m.tick(0.0, 10.0)[0] - 0.3).abs() < 1e-9, "plays as written");
+        s.extend_range = true;
+        m.set_settings(Axis::L0, s);
+        assert!((m.tick(0.0, 10.0)[0] - 0.0).abs() < 1e-9);
+        assert!((m.tick(100.0, 10.0)[0] - 1.0).abs() < 1e-9);
+        assert!((m.tick(200.0, 10.0)[0] - 0.5).abs() < 1e-9);
     }
 
     #[test]
