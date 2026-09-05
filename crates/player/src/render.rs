@@ -26,7 +26,9 @@ pub struct RenderConfig {
 
 pub enum Msg {
     Update,
-    #[cfg(target_os = "macos")]
+
+
+    #[cfg(any(target_os = "macos", windows))]
     Redraw,
 
 
@@ -229,12 +231,13 @@ pub fn spawn(
     cfg: RenderConfig,
     has_video: Arc<AtomicBool>,
     #[cfg(target_os = "macos")] apple: Arc<std::sync::Mutex<crate::enhance::AppleUpscaling>>,
+    #[cfg(windows)] dlss: Arc<std::sync::Mutex<crate::enhance::DlssShared>>,
 ) -> Result<(Box<Sender<Msg>>, JoinHandle<()>, String), String> {
     let (tx, rx) = channel::<Msg>();
     let tx = Box::new(tx);
     let cb_ctx = SendPtr(&*tx as *const Sender<Msg> as *mut c_void);
     let (ready_tx, ready_rx) = channel::<Result<String, String>>();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     let wake = (*tx).clone();
 
     let handle = thread::Builder::new()
@@ -251,6 +254,8 @@ pub fn spawn(
                 ready_tx,
                 #[cfg(target_os = "macos")]
                 crate::macos::Upscaler::new(apple, wake),
+                #[cfg(windows)]
+                crate::windows::dlss::DlssRender::new(dlss, wake),
             )
         })
         .map_err(|e| e.to_string())?;
@@ -275,6 +280,7 @@ fn run(
     has_video: Arc<AtomicBool>,
     ready: Sender<Result<String, String>>,
     #[cfg(target_os = "macos")] mut apple: crate::macos::Upscaler,
+    #[cfg(windows)] mut dlss: crate::windows::dlss::DlssRender,
 ) {
     let gl = match GlContext::new() {
         Ok(g) => Box::new(g),
@@ -372,6 +378,8 @@ fn run(
                                 pts,
                                 #[cfg(target_os = "macos")]
                                 &mut apple,
+                                #[cfg(windows)]
+                                &mut dlss,
                             );
                         }
                     } else {
@@ -392,6 +400,8 @@ fn run(
                         None,
                         #[cfg(target_os = "macos")]
                         &mut apple,
+                        #[cfg(windows)]
+                        &mut dlss,
                     );
                 }
             }
@@ -415,17 +425,29 @@ fn run(
                         None,
                         #[cfg(target_os = "macos")]
                         &mut apple,
+                        #[cfg(windows)]
+                        &mut dlss,
                     );
                 }
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             Some(Msg::Redraw) => {
                 if wanted(presenting) && !cfg.stamp {
 
                     while target.busy() {
                         target.poll(ctx, &frames, &stats, true);
                     }
-                    render_one(ctx, &mut target, &frames, &stats, None, &mut apple);
+                    render_one(
+                        ctx,
+                        &mut target,
+                        &frames,
+                        &stats,
+                        None,
+                        #[cfg(target_os = "macos")]
+                        &mut apple,
+                        #[cfg(windows)]
+                        &mut dlss,
+                    );
                 }
             }
             Some(Msg::Stop) => break,
@@ -441,6 +463,8 @@ fn run(
     drop(target);
     #[cfg(target_os = "macos")]
     drop(apple);
+    #[cfg(windows)]
+    drop(dlss);
     drop(gl);
 }
 
@@ -451,14 +475,18 @@ fn render_one(
     stats: &RenderStats,
     pts: Option<f64>,
     #[cfg(target_os = "macos")] apple: &mut crate::macos::Upscaler,
+    #[cfg(windows)] dlss: &mut crate::windows::dlss::DlssRender,
 ) {
     let t0 = Instant::now();
+
+
     #[cfg(target_os = "macos")]
-    let apple_target = apple.prepare();
-    #[cfg(target_os = "macos")]
-    let (draw_fbo, draw_w, draw_h) = apple_target.unwrap_or((target.fbo, target.w, target.h));
-    #[cfg(not(target_os = "macos"))]
-    let (draw_fbo, draw_w, draw_h) = (target.fbo, target.w, target.h);
+    let redirect = apple.prepare();
+    #[cfg(windows)]
+    let redirect = dlss.prepare();
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let redirect: Option<(u32, u32, u32)> = None;
+    let (draw_fbo, draw_w, draw_h) = redirect.unwrap_or((target.fbo, target.w, target.h));
     let mut fbo = mpv_opengl_fbo { fbo: draw_fbo as c_int, w: draw_w as c_int, h: draw_h as c_int, internal_format: 0 };
 
 
@@ -477,8 +505,12 @@ fn render_one(
         return;
     }
     #[cfg(target_os = "macos")]
-    if apple_target.is_some() {
+    if redirect.is_some() {
         apple.process(target.fbo, target.w, target.h);
+    }
+    #[cfg(windows)]
+    if redirect.is_some() {
+        dlss.process(target.fbo, target.w, target.h);
     }
     target.readback(ctx, frames, stats, ms(t0.elapsed()), pts);
     let gl_err = unsafe { gl::GetError() };

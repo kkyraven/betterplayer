@@ -358,6 +358,24 @@ pub(crate) struct AppleUpscaling {
     pub reason: Option<String>,
 }
 
+
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct DlssRequest {
+    pub enabled: bool,
+    pub source: (u32, u32),
+    pub options: DlssOptions,
+}
+
+
+
+#[derive(Default)]
+pub(crate) struct DlssShared {
+    pub request: DlssRequest,
+    pub factor: f64,
+    pub reason: Option<String>,
+}
+
 pub struct Enhance {
     options: EnhanceOptions,
     caps: EnhanceCapabilities,
@@ -365,6 +383,7 @@ pub struct Enhance {
     output: (u32, u32),
     applied: Applied,
     apple: Arc<Mutex<AppleUpscaling>>,
+    dlss: Arc<Mutex<DlssShared>>,
 }
 
 impl Enhance {
@@ -376,12 +395,18 @@ impl Enhance {
             output,
             applied: Applied { scale: DEFAULT_SCALE.into(), vf: String::new() },
             apple: Arc::default(),
+            dlss: Arc::default(),
         }
     }
 
     #[cfg(target_os = "macos")]
     pub(crate) fn apple(&self) -> Arc<Mutex<AppleUpscaling>> {
         self.apple.clone()
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn dlss(&self) -> Arc<Mutex<DlssShared>> {
+        self.dlss.clone()
     }
 
     pub fn capabilities(&self) -> EnhanceCapabilities {
@@ -416,6 +441,13 @@ impl Enhance {
                 *apple = AppleUpscaling { request, ..AppleUpscaling::default() };
             }
         }
+        {
+            let request = DlssRequest { enabled: self.options.upscaler == Upscaler::Dlss && self.caps.dlss, source: self.source, options: self.options.dlss };
+            let mut dlss = self.dlss.lock().unwrap();
+            if dlss.request != request {
+                *dlss = DlssShared { request, ..DlssShared::default() };
+            }
+        }
         let want = self.desired();
         if want.scale != self.applied.scale {
             mpv.set_property("scale", &want.scale)?;
@@ -448,6 +480,7 @@ impl Enhance {
     pub fn state(&self) -> EnhanceState {
         let mut reason = None;
         let apple = self.apple.lock().unwrap();
+        let dlss = self.dlss.lock().unwrap();
         let upscaler = match self.options.upscaler {
             Upscaler::Apple if !self.caps.apple_vsr => {
                 reason = self.caps.apple_vsr_reason.clone();
@@ -469,13 +502,21 @@ impl Enhance {
                 reason = self.caps.dlss_reason.clone();
                 Upscaler::Off
             }
+
+
+            Upscaler::Dlss => {
+                if dlss.factor == 0.0 {
+                    reason = dlss.reason.clone();
+                }
+                Upscaler::Dlss
+            }
             u => u,
         };
         let factor = match upscaler {
             Upscaler::Apple => apple.factor,
             Upscaler::Rtx => self.vsr_factor().unwrap_or(0.0),
 
-            Upscaler::Dlss if self.source.1 > 0 && self.options.dlss.factor > 1.0 => self.options.dlss.factor,
+            Upscaler::Dlss => dlss.factor,
             Upscaler::Sharp if self.source.1 > 0 && self.output.1 > self.source.1 => self.output.1 as f64 / self.source.1 as f64,
             _ => 0.0,
         };
@@ -556,10 +597,19 @@ mod tests {
 
         e.caps.dlss = true;
         e.caps.dlss_reason = None;
+        assert_eq!(e.state().upscaler, Upscaler::Dlss);
+        assert!(!e.state().upscaling, "no factor reported yet");
+        e.dlss.lock().unwrap().factor = 1.5;
         assert_eq!(e.state().factor, 1.5);
         assert!(e.state().upscaling);
-        e.options.dlss.factor = 1.0;
+        {
+            let mut dlss = e.dlss.lock().unwrap();
+            dlss.factor = 0.0;
+            dlss.reason = Some("Unsupported video size".into());
+        }
+        assert_eq!(e.state().upscaler, Upscaler::Dlss);
         assert!(!e.state().upscaling);
+        assert_eq!(e.state().reason.as_deref(), Some("Unsupported video size"));
     }
 
     #[test]

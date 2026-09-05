@@ -270,6 +270,8 @@ impl Player {
             has_video.clone(),
             #[cfg(target_os = "macos")]
             enhance.lock().unwrap().apple(),
+            #[cfg(windows)]
+            enhance.lock().unwrap().dlss(),
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -406,7 +408,7 @@ impl Player {
             .recv_timeout(std::time::Duration::from_secs(2))
             .map_err(|_| "resize timed out".to_string())?;
         self.enhance.lock().unwrap().set_output(&self.mpv, (width, height))?;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         tx.send(Msg::Redraw).map_err(|_| "render thread gone".to_string())?;
         Ok(())
     }
@@ -420,7 +422,7 @@ impl Player {
 
     pub fn set_enhance(&self, options: EnhanceOptions) -> Result<(), String> {
         self.enhance.lock().unwrap().set_options(&self.mpv, options)?;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         if let Some(tx) = &self.tx {
             tx.send(Msg::Redraw).map_err(|_| "render thread gone".to_string())?;
         }

@@ -1,3 +1,4 @@
+pub mod dlss;
 pub mod dlss5;
 pub mod egl;
 pub mod fruc;
@@ -82,14 +83,15 @@ pub fn capabilities() -> EnhanceCapabilities {
         let reason = format!("NVIDIA driver {:.2} is below {:.2}", gpu.driver, probe::VSR_MIN_DRIVER);
         return EnhanceCapabilities { gpu: Some(gpu.name.clone()), ..EnhanceCapabilities::none(&reason) };
     }
-    const NO_RENDER_PATH: &str = "needs the D3D11 render path, not built yet";
     let frame_gen_reason = match fruc::available() {
-        Ok(()) => format!("frame generation {NO_RENDER_PATH}"),
+        Ok(()) => "frame generation needs the D3D11 render path, not built yet".to_string(),
         Err(_) => format!("{} not found next to the engine", fruc::DLL),
     };
-    let dlss_reason = match dlss5::available() {
-        Ok(_) => NO_RENDER_PATH.to_string(),
-        Err(e) => e,
+
+
+    let (dlss, dlss_reason) = match dlss5::available() {
+        Ok(_) => (true, None),
+        Err(e) => (false, Some(e)),
     };
-    EnhanceCapabilities { vsr: true, vsr_reason: None, dlss_reason: Some(dlss_reason), gpu: Some(gpu.name), ..EnhanceCapabilities::none(&frame_gen_reason) }
+    EnhanceCapabilities { vsr: true, dlss, vsr_reason: None, dlss_reason, gpu: Some(gpu.name), ..EnhanceCapabilities::none(&frame_gen_reason) }
 }
