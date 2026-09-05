@@ -7,3 +7,7 @@ index.d.ts
 *.dll
 # Windows: the DLSS 5 runtime folder (worker, ReShade, RenoDX add-on, NVIDIA DLLs), placed by hand.
 dlss5/
+
+# napi-rs build transaction scratch
+.napi-rs-filesystem-transaction.swp/
+.index.*.tmp
