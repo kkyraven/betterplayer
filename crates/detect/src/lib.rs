@@ -3,7 +3,10 @@ use std::path::Path;
 pub mod tagger;
 pub use tagger::Tagger;
 
-use ort::session::{Session, builder::GraphOptimizationLevel};
+use ort::session::{
+    Session,
+    builder::{GraphOptimizationLevel, SessionBuilder},
+};
 use ort::value::TensorRef;
 
 
@@ -275,12 +278,7 @@ impl Detector {
 
 
     pub fn load(spec: &'static ModelSpec, path: &Path, cache_dir: Option<&Path>) -> Result<Detector, String> {
-        let mut builder = Session::builder()
-            .and_then(|b| b.with_optimization_level(GraphOptimizationLevel::Level3))
-            .and_then(|b| b.with_intra_threads(2))
-            .and_then(|b| b.with_intra_op_spinning(false))
-            .map_err(|e| e.to_string())?;
-        let provider = register_provider(&mut builder, cache_dir);
+        let (builder, provider) = register_provider(session_builder()?, cache_dir)?;
         let session = builder.commit_from_file(path).map_err(|e| e.to_string())?;
         let input_name = session.inputs.first().map(|i| i.name.clone()).ok_or("model has no inputs")?;
         Ok(Detector { session, input_name, spec, provider, input: Vec::new() })
@@ -323,23 +321,55 @@ impl Detector {
     }
 }
 
+
+
+
+
+fn session_builder() -> Result<SessionBuilder, String> {
+    Session::builder()
+        .and_then(|b| b.with_optimization_level(GraphOptimizationLevel::Level3))
+        .and_then(|b| b.with_intra_threads(2))
+        .and_then(|b| b.with_intra_op_spinning(false))
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(target_os = "macos")]
-fn register_provider(builder: &mut ort::session::builder::SessionBuilder, cache_dir: Option<&Path>) -> &'static str {
+fn register_provider(mut builder: SessionBuilder, cache_dir: Option<&Path>) -> Result<(SessionBuilder, &'static str), String> {
     use ort::execution_providers::ExecutionProvider;
     use ort::execution_providers::coreml::{CoreMLComputeUnits, CoreMLExecutionProvider, CoreMLModelFormat};
     let mut ep = CoreMLExecutionProvider::default().with_model_format(CoreMLModelFormat::MLProgram).with_compute_units(CoreMLComputeUnits::CPUAndNeuralEngine);
     if let Some(dir) = cache_dir {
         ep = ep.with_model_cache_dir(dir.display());
     }
-    match ep.register(builder) {
+    let provider = match ep.register(&mut builder) {
         Ok(()) => "coreml",
         Err(_) => "cpu",
+    };
+    Ok((builder, provider))
+}
+
+
+
+
+#[cfg(windows)]
+fn register_provider(builder: SessionBuilder, _cache_dir: Option<&Path>) -> Result<(SessionBuilder, &'static str), String> {
+    use ort::execution_providers::ExecutionProvider;
+    use ort::execution_providers::directml::DirectMLExecutionProvider;
+    let ep = DirectMLExecutionProvider::default();
+    if !ep.is_available().unwrap_or(false) {
+        return Ok((builder, "cpu"));
+    }
+    let mut builder = builder.with_memory_pattern(false).map_err(|e| e.to_string())?;
+    match ep.register(&mut builder) {
+        Ok(()) => Ok((builder, "directml")),
+
+        Err(_) => Ok((builder.with_memory_pattern(true).map_err(|e| e.to_string())?, "cpu")),
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn register_provider(_builder: &mut ort::session::builder::SessionBuilder, _cache_dir: Option<&Path>) -> &'static str {
-    "cpu"
+#[cfg(not(any(target_os = "macos", windows)))]
+fn register_provider(builder: SessionBuilder, _cache_dir: Option<&Path>) -> Result<(SessionBuilder, &'static str), String> {
+    Ok((builder, "cpu"))
 }
 
 

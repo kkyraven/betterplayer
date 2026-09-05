@@ -149,6 +149,61 @@ pub trait Conn: Send {
 }
 
 
+
+
+
+pub fn open_serial(path: &str, baud: u32, timeout: Duration) -> serialport::Result<Box<dyn serialport::SerialPort>> {
+    let mut port = serialport::new(path, baud).timeout(timeout).flow_control(serialport::FlowControl::None).open()?;
+    #[cfg(windows)]
+    {
+        port.write_data_terminal_ready(false)?;
+        port.write_request_to_send(false)?;
+    }
+    Ok(port)
+}
+
+
+
+
+
+pub fn serial_reader(port: Box<dyn serialport::SerialPort>, wait: Duration) -> Box<dyn Read + Send> {
+    #[cfg(windows)]
+    {
+        Box::new(PolledSerial { port, wait })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = wait;
+        Box::new(port)
+    }
+}
+
+#[cfg(windows)]
+struct PolledSerial {
+    port: Box<dyn serialport::SerialPort>,
+    wait: Duration,
+}
+
+#[cfg(windows)]
+impl Read for PolledSerial {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let deadline = Instant::now() + self.wait;
+        loop {
+            match self.port.bytes_to_read() {
+                Ok(0) => {
+                    if Instant::now() >= deadline {
+                        return Err(io::Error::new(ErrorKind::TimedOut, "no input"));
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Ok(_) => return self.port.read(buf),
+                Err(e) => return Err(io::Error::other(e.to_string())),
+            }
+        }
+    }
+}
+
+
 pub fn open(t: &Transport) -> io::Result<Link> {
     match t {
         Transport::Buttplug { url } => return Buttplug::connect(url).map(Link::Buttplug),
@@ -178,17 +233,9 @@ pub fn open(t: &Transport) -> io::Result<Link> {
         | Transport::Toy { .. } => unreachable!(),
         Transport::Ble { name } => Box::new(crate::ble::tcode(name)?),
         Transport::Serial { path, baud } => {
-            let port = serialport::new(path, *baud)
-                .timeout(Duration::from_millis(100))
-                .open()
-                .map_err(|e| io::Error::new(ErrorKind::NotFound, e.to_string()))?;
-            let reader = port
-                .try_clone()
-                .map_err(|e| io::Error::other(e.to_string()))?;
-            Box::new(StreamConn {
-                writer: MailboxWriter::spawn(Box::new(port)),
-                reader: LineReader::spawn(Box::new(reader)),
-            })
+            let port = open_serial(path, *baud, Duration::from_millis(100)).map_err(|e| io::Error::new(ErrorKind::NotFound, e.to_string()))?;
+            let reader = port.try_clone().map_err(|e| io::Error::other(e.to_string()))?;
+            Box::new(StreamConn { writer: MailboxWriter::spawn(Box::new(port)), reader: LineReader::spawn(serial_reader(reader, Duration::from_millis(100))) })
         }
         Transport::Tcp { host, port } => {
             let addr = (host.as_str(), *port)

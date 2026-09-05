@@ -16,13 +16,15 @@ pub struct Gpu {
 }
 
 
+
 pub fn gpu() -> Result<Gpu, String> {
     unsafe {
         let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(|e| format!("CreateDXGIFactory1: {e}"))?;
+        let mut first: Option<Gpu> = None;
         let mut i = 0;
-        loop {
-            let adapter: IDXGIAdapter1 = factory.EnumAdapters1(i).map_err(|_| "no display adapter".to_string())?;
+        while let Ok(adapter) = factory.EnumAdapters1(i) {
             i += 1;
+            let adapter: IDXGIAdapter1 = adapter;
             let desc = adapter.GetDesc1().map_err(|e| format!("GetDesc1: {e}"))?;
 
             if desc.Flags & 2 != 0 {
@@ -32,8 +34,13 @@ pub fn gpu() -> Result<Gpu, String> {
             let name = String::from_utf16_lossy(&desc.Description[..end]);
             let nvidia = desc.VendorId == VENDOR_NVIDIA;
             let driver = if nvidia { adapter.CheckInterfaceSupport(&IDXGIDevice::IID).map(nvidia_driver).unwrap_or(0.0) } else { 0.0 };
-            return Ok(Gpu { name, nvidia, driver });
+            let gpu = Gpu { name, nvidia, driver };
+            if nvidia {
+                return Ok(gpu);
+            }
+            first.get_or_insert(gpu);
         }
+        first.ok_or_else(|| "no display adapter".to_string())
     }
 }
 
@@ -51,5 +58,8 @@ mod tests {
     fn driver_number_from_umd_version() {
         let umd = (31i64 << 48) | (0 << 32) | (15 << 16) | 3742;
         assert_eq!(super::nvidia_driver(umd), 537.42);
+
+        let umd = (32i64 << 48) | (0 << 32) | (15 << 16) | 9186;
+        assert_eq!(super::nvidia_driver(umd), 591.86);
     }
 }

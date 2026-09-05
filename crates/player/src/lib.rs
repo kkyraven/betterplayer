@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-pub use enhance::{EnhanceCapabilities, EnhanceOptions, EnhanceState, Upscaler};
+pub use enhance::{DlssOptions, DlssRate, EnhanceCapabilities, EnhanceOptions, EnhanceState, GuideQuality, ModelPreset, NrPreset, NrStyle, Upscaler};
 pub use frames::{Acquired, External, FrameSlot};
 pub use stats::{Percentiles, RenderSnapshot};
 
@@ -98,7 +98,11 @@ pub struct PlayerOptions {
 
 impl Default for PlayerOptions {
     fn default() -> PlayerOptions {
-        PlayerOptions { hwdec: None, verbose: false, bgra: true, async_readback: true, stamp_frames: false, hold_frames: false, mpv_options: Vec::new() }
+
+
+
+
+        PlayerOptions { hwdec: None, verbose: false, bgra: !cfg!(windows), async_readback: true, stamp_frames: false, hold_frames: false, mpv_options: Vec::new() }
     }
 }
 
@@ -258,7 +262,7 @@ impl Player {
         let frames = Arc::new(Frames::new(width, height, opts.hold_frames));
         let stats = Arc::new(RenderStats::new());
         let cfg = RenderConfig { bgra: opts.bgra, async_readback: opts.async_readback, stamp: opts.stamp_frames };
-        let (tx, render) = render::spawn(
+        let (tx, render, context) = match render::spawn(
             mpv.clone(),
             frames.clone(),
             stats.clone(),
@@ -266,7 +270,17 @@ impl Player {
             has_video.clone(),
             #[cfg(target_os = "macos")]
             enhance.lock().unwrap().apple(),
-        )?;
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+
+
+                stop_events.store(true, Ordering::Relaxed);
+                let _ = events.join();
+                return Err(e);
+            }
+        };
+        push_log(&log, format!("render context: {context}"));
 
         Ok(Player {
             mpv,

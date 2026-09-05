@@ -1,5 +1,4 @@
 use std::ffi::{CStr, c_char, c_void};
-use std::path::PathBuf;
 use std::ptr;
 
 use libloading::{Library, Symbol};
@@ -37,9 +36,13 @@ type CreateContextFn = unsafe extern "system" fn(EGLDisplay, EGLConfig, EGLConte
 type MakeCurrentFn = unsafe extern "system" fn(EGLDisplay, EGLSurface, EGLSurface, EGLContext) -> EGLBoolean;
 type DestroyContextFn = unsafe extern "system" fn(EGLDisplay, EGLContext) -> EGLBoolean;
 type DestroySurfaceFn = unsafe extern "system" fn(EGLDisplay, EGLSurface) -> EGLBoolean;
-type TerminateFn = unsafe extern "system" fn(EGLDisplay) -> EGLBoolean;
 type GetErrorFn = unsafe extern "system" fn() -> EGLint;
 type GetProcAddressFn = unsafe extern "system" fn(*const c_char) -> *mut c_void;
+type QueryStringFn = unsafe extern "system" fn(EGLDisplay, EGLint) -> *const c_char;
+
+const EGL_EXTENSIONS: EGLint = 0x3055;
+const EGL_VENDOR: EGLint = 0x3053;
+const EGL_VERSION: EGLint = 0x3054;
 
 struct Egl {
     initialize: InitializeFn,
@@ -49,23 +52,16 @@ struct Egl {
     make_current: MakeCurrentFn,
     destroy_context: DestroyContextFn,
     destroy_surface: DestroySurfaceFn,
-    terminate: TerminateFn,
     get_error: GetErrorFn,
     get_proc_address: GetProcAddressFn,
+    query_string: QueryStringFn,
     _lib: Library,
 }
 
 impl Egl {
     fn load() -> Result<Egl, String> {
-        let candidates: Vec<PathBuf> = super::module_dir().into_iter().map(|d| d.join("libEGL.dll")).chain([PathBuf::from("libEGL.dll")]).collect();
-        let mut last = String::new();
-        for path in candidates {
-            match unsafe { Library::new(&path) } {
-                Ok(lib) => return Egl::resolve(lib),
-                Err(e) => last = format!("{}: {e}", path.display()),
-            }
-        }
-        Err(format!("ANGLE not found ({last})"))
+        let lib = super::load_dll("libEGL.dll").map_err(|e| format!("ANGLE (libEGL.dll with libGLESv2.dll, next to the engine addon) not loadable: {e}"))?;
+        Egl::resolve(lib)
     }
 
     fn resolve(lib: Library) -> Result<Egl, String> {
@@ -82,9 +78,9 @@ impl Egl {
                 make_current: sym(&lib, b"eglMakeCurrent\0")?,
                 destroy_context: sym(&lib, b"eglDestroyContext\0")?,
                 destroy_surface: sym(&lib, b"eglDestroySurface\0")?,
-                terminate: sym(&lib, b"eglTerminate\0")?,
                 get_error: sym(&lib, b"eglGetError\0")?,
                 get_proc_address: sym(&lib, b"eglGetProcAddress\0")?,
+                query_string: sym(&lib, b"eglQueryString\0")?,
                 _lib: lib,
             })
         }
@@ -92,6 +88,11 @@ impl Egl {
 
     fn err(&self, what: &str) -> String {
         format!("{what}: EGL error 0x{:x}", unsafe { (self.get_error)() })
+    }
+
+    fn query(&self, display: EGLDisplay, name: EGLint) -> String {
+        let p = unsafe { (self.query_string)(display, name) };
+        if p.is_null() { String::new() } else { unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned() }
     }
 }
 
@@ -106,6 +107,12 @@ impl Context {
 
     pub fn new() -> Result<Context, String> {
         let egl = Egl::load()?;
+
+
+        let client_exts = egl.query(ptr::null_mut(), EGL_EXTENSIONS);
+        if !client_exts.split(' ').any(|e| e == "EGL_ANGLE_platform_angle_d3d") {
+            return Err(format!("libEGL.dll is not ANGLE with a D3D11 backend (client extensions: {client_exts:?})"));
+        }
         let get_platform_display: GetPlatformDisplayFn = unsafe {
             let p = (egl.get_proc_address)(c"eglGetPlatformDisplayEXT".as_ptr());
             if p.is_null() {
@@ -140,30 +147,29 @@ impl Context {
         let mut config: EGLConfig = ptr::null_mut();
         let mut count = 0;
         if unsafe { (egl.choose_config)(display, config_attribs.as_ptr(), &mut config, 1, &mut count) } != EGL_TRUE || count == 0 {
-            let e = egl.err("eglChooseConfig");
-            unsafe { (egl.terminate)(display) };
-            return Err(e);
+            return Err(egl.err("eglChooseConfig"));
         }
         let surface_attribs = [EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE];
         let surface = unsafe { (egl.create_pbuffer)(display, config, surface_attribs.as_ptr()) };
         if surface.is_null() {
-            let e = egl.err("eglCreatePbufferSurface");
-            unsafe { (egl.terminate)(display) };
-            return Err(e);
+            return Err(egl.err("eglCreatePbufferSurface"));
         }
         let context_attribs = [EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE];
         let context = unsafe { (egl.create_context)(display, config, ptr::null_mut(), context_attribs.as_ptr()) };
         if context.is_null() {
             let e = egl.err("eglCreateContext");
-            unsafe {
-                (egl.destroy_surface)(display, surface);
-                (egl.terminate)(display);
-            }
+            unsafe { (egl.destroy_surface)(display, surface) };
             return Err(e);
         }
         let c = Context { egl, display, surface, context };
         c.make_current()?;
         Ok(c)
+    }
+
+
+
+    pub fn describe(&self) -> String {
+        format!("{} {}", self.egl.query(self.display, EGL_VENDOR), self.egl.query(self.display, EGL_VERSION))
     }
 
     pub fn make_current(&self) -> Result<(), String> {
@@ -185,7 +191,7 @@ impl Drop for Context {
             (self.egl.make_current)(self.display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
             (self.egl.destroy_context)(self.display, self.context);
             (self.egl.destroy_surface)(self.display, self.surface);
-            (self.egl.terminate)(self.display);
+
         }
     }
 }

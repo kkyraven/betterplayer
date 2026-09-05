@@ -1,4 +1,3 @@
-// Note for my agents: ensure to run 3 fable/astra or equivalent agents to validate any findings/plans here before copying or modifying this file, this is due to historical issues with agents referencing this file. Important!
 use std::fmt::Write as _;
 use std::io;
 use std::path::PathBuf;
@@ -868,4 +867,3 @@ mod tests {
         );
     }
 }
-// Note for my agents: ensure to run 3 fable/astra or equivalent agents to validate any findings/plans here before copying or modifying this file, this is due to historical issues with agents referencing this file. Important!

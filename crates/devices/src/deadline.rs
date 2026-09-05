@@ -41,7 +41,7 @@ pub fn run(hz: u32, spin_us: u32, stop: &AtomicBool, mut f: impl FnMut(Tick) -> 
     let mut pace = Pace::Precise;
     while !stop.load(Ordering::Relaxed) {
         n += 1;
-        let deadline = start + period * n as u32;
+        let deadline = start + period.mul_f64(n as f64);
         let now = Instant::now();
         match pace {
             Pace::Precise => {
@@ -63,12 +63,8 @@ pub fn run(hz: u32, spin_us: u32, stop: &AtomicBool, mut f: impl FnMut(Tick) -> 
         let dt_ms = fired.duration_since(last).as_secs_f64() * 1000.0;
         last = fired;
 
-        let behind = Instant::now().saturating_duration_since(start + period * (n as u32 + 1));
-        let skipped = if behind > period {
-            (behind.as_micros() / period.as_micros()) as u32
-        } else {
-            0
-        };
+        let behind = Instant::now().saturating_duration_since(start + period.mul_f64((n + 1) as f64));
+        let skipped = if behind > period { (behind.as_micros() / period.as_micros()) as u32 } else { 0 };
         n += skipped as u64;
 
         pace = f(Tick {

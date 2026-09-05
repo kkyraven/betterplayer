@@ -11,6 +11,8 @@ pub enum Upscaler {
 
     Rtx,
 
+    Dlss,
+
     Apple,
 }
 
@@ -20,6 +22,7 @@ impl Upscaler {
             Upscaler::Off => "off",
             Upscaler::Sharp => "sharp",
             Upscaler::Rtx => "rtx",
+            Upscaler::Dlss => "dlss",
             Upscaler::Apple => "apple",
         }
     }
@@ -29,10 +32,239 @@ impl Upscaler {
             "off" => Some(Upscaler::Off),
             "sharp" => Some(Upscaler::Sharp),
             "rtx" => Some(Upscaler::Rtx),
+            "dlss" => Some(Upscaler::Dlss),
             "apple" => Some(Upscaler::Apple),
             _ => None,
         }
     }
+}
+
+
+
+
+
+
+pub const DLSS_INPUT_HEIGHTS: [u32; 5] = [480, 720, 1080, 1440, 2160];
+pub const DLSS_STRENGTH_RANGE: (f32, f32) = (0.0, 2.0);
+
+pub const DLSS_SKIN_RANGE: (f32, f32) = (-1.0, 2.0);
+pub const DLSS_BUFFER_RANGE: (f64, f64) = (2.0, 30.0);
+
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NrPreset {
+    #[default]
+    Default,
+    One,
+    Two,
+    Three,
+}
+
+impl NrPreset {
+    pub fn parse(s: &str) -> Option<NrPreset> {
+        match s {
+            "default" => Some(NrPreset::Default),
+            "1" => Some(NrPreset::One),
+            "2" => Some(NrPreset::Two),
+            "3" => Some(NrPreset::Three),
+            _ => None,
+        }
+    }
+
+
+    pub fn code(self) -> u32 {
+        self as u32
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NrStyle {
+    #[default]
+    Default,
+    Natural,
+    Cinematic,
+}
+
+impl NrStyle {
+    pub fn parse(s: &str) -> Option<NrStyle> {
+        match s {
+            "default" => Some(NrStyle::Default),
+            "natural" => Some(NrStyle::Natural),
+            "cinematic" => Some(NrStyle::Cinematic),
+            _ => None,
+        }
+    }
+
+
+    pub fn code(self) -> u32 {
+        self as u32
+    }
+}
+
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ModelPreset {
+    #[default]
+    Default,
+    J,
+    K,
+    L,
+    M,
+}
+
+impl ModelPreset {
+    pub fn parse(s: &str) -> Option<ModelPreset> {
+        match s {
+            "default" => Some(ModelPreset::Default),
+            "j" => Some(ModelPreset::J),
+            "k" => Some(ModelPreset::K),
+            "l" => Some(ModelPreset::L),
+            "m" => Some(ModelPreset::M),
+            _ => None,
+        }
+    }
+
+
+    pub fn code(self) -> u32 {
+        match self {
+            ModelPreset::Default => 0,
+            ModelPreset::J => 10,
+            ModelPreset::K => 11,
+            ModelPreset::L => 12,
+            ModelPreset::M => 13,
+        }
+    }
+}
+
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum DlssRate {
+
+    #[default]
+    Auto,
+
+    Source,
+    Fixed(f64),
+}
+
+impl DlssRate {
+    pub fn parse(s: &str) -> Option<DlssRate> {
+        match s {
+            "auto" => Some(DlssRate::Auto),
+            "source" => Some(DlssRate::Source),
+            other => other.parse::<f64>().ok().filter(|f| *f > 0.0 && f.is_finite()).map(DlssRate::Fixed),
+        }
+    }
+}
+
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GuideQuality {
+
+    #[default]
+    Fast,
+
+    Quality,
+}
+
+impl GuideQuality {
+    pub fn parse(s: &str) -> Option<GuideQuality> {
+        match s {
+            "fast" => Some(GuideQuality::Fast),
+            "quality" => Some(GuideQuality::Quality),
+            _ => None,
+        }
+    }
+
+
+    pub fn flow_width(self) -> u32 {
+        match self {
+            GuideQuality::Fast => 320,
+            GuideQuality::Quality => 640,
+        }
+    }
+}
+
+
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DlssOptions {
+    pub nr_preset: NrPreset,
+    pub nr_style: NrStyle,
+
+    pub intensity: f32,
+
+    pub local_tone: f32,
+
+    pub local_structure: f32,
+
+    pub skin_structure: f32,
+
+    pub auto_mask: bool,
+    pub model_preset: ModelPreset,
+
+    pub factor: f64,
+
+    pub input_height: u32,
+    pub rate: DlssRate,
+    pub guide: GuideQuality,
+
+    pub buffer_seconds: f64,
+}
+
+impl Default for DlssOptions {
+    fn default() -> DlssOptions {
+        DlssOptions {
+            nr_preset: NrPreset::Default,
+            nr_style: NrStyle::Default,
+            intensity: 1.0,
+            local_tone: 1.0,
+            local_structure: 1.0,
+            skin_structure: -1.0,
+            auto_mask: false,
+            model_preset: ModelPreset::Default,
+            factor: 1.5,
+            input_height: 720,
+            rate: DlssRate::Auto,
+            guide: GuideQuality::Fast,
+            buffer_seconds: 6.0,
+        }
+    }
+}
+
+impl DlssOptions {
+
+    pub fn validate(&self) -> Result<(), String> {
+        fn within(name: &str, v: f32, (lo, hi): (f32, f32)) -> Result<(), String> {
+            if v.is_finite() && (lo..=hi).contains(&v) {
+                Ok(())
+            } else {
+                Err(format!("{name} must be between {lo} and {hi}, not {v}"))
+            }
+        }
+        within("intensity", self.intensity, DLSS_STRENGTH_RANGE)?;
+        within("local tone", self.local_tone, DLSS_STRENGTH_RANGE)?;
+        within("local structure", self.local_structure, DLSS_STRENGTH_RANGE)?;
+        within("skin structure", self.skin_structure, DLSS_SKIN_RANGE)?;
+        if dlss_mode(self.factor).is_none() {
+            return Err(format!("scaling factor {} is not one of NVIDIA's DLSS modes", self.factor));
+        }
+        if !DLSS_INPUT_HEIGHTS.contains(&self.input_height) {
+            return Err(format!("processing height {} is not one of the offered sizes", self.input_height));
+        }
+        let (lo, hi) = DLSS_BUFFER_RANGE;
+        if !(self.buffer_seconds.is_finite() && (lo..=hi).contains(&self.buffer_seconds)) {
+            return Err(format!("playback buffer must be between {lo} and {hi} seconds, not {}", self.buffer_seconds));
+        }
+        Ok(())
+    }
+}
+
+
+
+pub fn dlss_mode(factor: f64) -> Option<(&'static str, u32)> {
+    const MODES: [(f64, &str, u32); 5] = [(1.0, "DLAA", 5), (1.5, "Quality", 2), (1.724, "Balanced", 1), (2.0, "Performance", 0), (3.0, "Ultra Performance", 3)];
+    MODES.iter().find(|(f, _, _)| (f - factor).abs() < 1e-6).map(|(_, name, pq)| (*name, *pq))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -40,6 +272,8 @@ pub struct EnhanceOptions {
     pub upscaler: Upscaler,
 
     pub target_fps: Option<f64>,
+
+    pub dlss: DlssOptions,
 }
 
 
@@ -51,9 +285,12 @@ pub struct EnhanceCapabilities {
 
     pub frame_gen: bool,
 
+    pub dlss: bool,
+
     pub vsr_reason: Option<String>,
     pub apple_vsr_reason: Option<String>,
     pub frame_gen_reason: Option<String>,
+    pub dlss_reason: Option<String>,
 
     pub gpu: Option<String>,
 }
@@ -65,9 +302,11 @@ impl EnhanceCapabilities {
             vsr: false,
             apple_vsr: false,
             frame_gen: false,
+            dlss: false,
             vsr_reason: Some(reason.into()),
             apple_vsr_reason: Some("macOS only".into()),
             frame_gen_reason: Some(reason.into()),
+            dlss_reason: Some(reason.into()),
             gpu: None,
         }
     }
@@ -226,11 +465,17 @@ impl Enhance {
                 reason = Some(format!("RTX Video takes sources up to {VSR_MAX_SOURCE_ROWS}p"));
                 Upscaler::Off
             }
+            Upscaler::Dlss if !self.caps.dlss => {
+                reason = self.caps.dlss_reason.clone();
+                Upscaler::Off
+            }
             u => u,
         };
         let factor = match upscaler {
             Upscaler::Apple => apple.factor,
             Upscaler::Rtx => self.vsr_factor().unwrap_or(0.0),
+
+            Upscaler::Dlss if self.source.1 > 0 && self.options.dlss.factor > 1.0 => self.options.dlss.factor,
             Upscaler::Sharp if self.source.1 > 0 && self.output.1 > self.source.1 => self.output.1 as f64 / self.source.1 as f64,
             _ => 0.0,
         };
@@ -294,7 +539,55 @@ mod tests {
     }
 
     fn rtx() -> EnhanceCapabilities {
-        EnhanceCapabilities { vsr: true, vsr_reason: None, gpu: Some("RTX".into()), ..EnhanceCapabilities::none("no render path") }
+        EnhanceCapabilities { vsr: true, vsr_reason: None, dlss_reason: Some("runtime not installed".into()), gpu: Some("RTX".into()), ..EnhanceCapabilities::none("no render path") }
+    }
+
+    #[test]
+    fn dlss_without_the_runtime_falls_back_with_its_reason() {
+        let mut e = Enhance::new(rtx(), (2560, 1440));
+        e.source = (1920, 1080);
+        e.options.upscaler = Upscaler::Dlss;
+
+        assert_eq!(e.desired(), Applied { scale: DEFAULT_SCALE.into(), vf: String::new() });
+        let s = e.state();
+        assert_eq!(s.upscaler, Upscaler::Off);
+        assert!(!s.upscaling);
+        assert_eq!(s.reason.as_deref(), Some("runtime not installed"));
+
+        e.caps.dlss = true;
+        e.caps.dlss_reason = None;
+        assert_eq!(e.state().factor, 1.5);
+        assert!(e.state().upscaling);
+        e.options.dlss.factor = 1.0;
+        assert!(!e.state().upscaling);
+    }
+
+    #[test]
+    fn dlss_options_parse_and_validate_like_the_runtime() {
+        assert_eq!(NrPreset::parse("2"), Some(NrPreset::Two));
+        assert_eq!(NrPreset::Three.code(), 3);
+        assert_eq!(NrStyle::parse("cinematic").map(NrStyle::code), Some(2));
+        assert_eq!(ModelPreset::parse("k").map(ModelPreset::code), Some(11));
+        assert_eq!(ModelPreset::Default.code(), 0);
+        assert_eq!(DlssRate::parse("60"), Some(DlssRate::Fixed(60.0)));
+        assert_eq!(DlssRate::parse("source"), Some(DlssRate::Source));
+        assert_eq!(DlssRate::parse("-1"), None);
+        assert_eq!(GuideQuality::parse("quality").map(GuideQuality::flow_width), Some(640));
+        assert_eq!(dlss_mode(1.724), Some(("Balanced", 1)));
+        assert_eq!(dlss_mode(1.7), None);
+
+        let mut o = DlssOptions::default();
+        assert_eq!(o.validate(), Ok(()));
+        o.skin_structure = -1.0;
+        assert_eq!(o.validate(), Ok(()), "-1 is skin structure's native default");
+        o.intensity = -0.1;
+        assert!(o.validate().unwrap_err().starts_with("intensity"));
+        o = DlssOptions { factor: 1.7, ..DlssOptions::default() };
+        assert!(o.validate().unwrap_err().contains("scaling factor"));
+        o = DlssOptions { input_height: 900, ..DlssOptions::default() };
+        assert!(o.validate().unwrap_err().contains("processing height"));
+        o = DlssOptions { buffer_seconds: 31.0, ..DlssOptions::default() };
+        assert!(o.validate().unwrap_err().contains("playback buffer"));
     }
 
     #[test]
@@ -317,7 +610,7 @@ mod tests {
     fn unsupported_rtx_falls_back_with_the_reason() {
         let mut e = Enhance::new(unsupported(), (2560, 1440));
         e.source = (1920, 1080);
-        e.options = EnhanceOptions { upscaler: Upscaler::Rtx, target_fps: Some(60.0) };
+        e.options = EnhanceOptions { upscaler: Upscaler::Rtx, target_fps: Some(60.0), dlss: DlssOptions::default() };
         assert_eq!(e.desired().vf, "");
         let s = e.state();
         assert_eq!(s.upscaler, Upscaler::Off);

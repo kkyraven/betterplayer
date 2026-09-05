@@ -37,7 +37,30 @@ pub fn promote(period: Duration) -> Result<(), String> {
 
 
 
-#[cfg(not(target_os = "macos"))]
+
+
+
+
+
+#[cfg(windows)]
+pub fn promote(_period: Duration) -> Result<(), String> {
+    use std::sync::OnceLock;
+
+    use windows::Win32::Media::{TIMERR_NOERROR, timeBeginPeriod};
+    use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL};
+
+    static RESOLUTION: OnceLock<Result<(), String>> = OnceLock::new();
+    RESOLUTION
+        .get_or_init(|| {
+            let r = unsafe { timeBeginPeriod(1) };
+            if r == TIMERR_NOERROR { Ok(()) } else { Err(format!("timeBeginPeriod(1) returned {r}")) }
+        })
+        .clone()?;
+    unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL) }.map_err(|e| format!("SetThreadPriority: {e}"))
+}
+
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn promote(_period: Duration) -> Result<(), String> {
     Err("no realtime policy on this platform yet".into())
 }

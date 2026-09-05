@@ -3,3 +3,7 @@ node_modules/
 *.node
 index.js
 index.d.ts
+# Windows: libmpv-2.dll, ANGLE (libEGL.dll, libGLESv2.dll, z.dll) and NvOFFRUC.dll next to the addon.
+*.dll
+# Windows: the DLSS 5 runtime folder (worker, ReShade, RenoDX add-on, NVIDIA DLLs), placed by hand.
+dlss5/

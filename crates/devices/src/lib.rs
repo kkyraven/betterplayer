@@ -98,21 +98,21 @@ pub struct TickLoop {
     reader: Option<JoinHandle<()>>,
 }
 
+
+
+
 pub fn list_ports() -> Vec<String> {
     serialport::available_ports()
-        .map(|ps| ps.into_iter().map(|p| p.port_name).collect())
+        .map(|ps| ps.into_iter().filter(|p| !matches!(p.port_type, serialport::SerialPortType::BluetoothPort)).map(|p| p.port_name).collect())
         .unwrap_or_default()
 }
 
 impl TickLoop {
     pub fn open(path: &str, baud: u32, opts: TickOptions) -> Result<TickLoop, String> {
-        let port = serialport::new(path, baud)
-            .timeout(Duration::from_millis(100))
-            .open()
-            .map_err(|e| format!("open {path}: {e}"))?;
+        let port = transport::open_serial(path, baud, Duration::from_millis(100)).map_err(|e| format!("open {path}: {e}"))?;
 
         let reader = port.try_clone().map_err(|e| format!("clone {path}: {e}"))?;
-        Ok(Self::start(port, Some(reader), opts))
+        Ok(Self::start(port, Some(transport::serial_reader(reader, Duration::from_millis(100))), opts))
     }
 
 
@@ -131,11 +131,7 @@ impl TickLoop {
         Err("loopback needs a pty pair; use a real port on Windows".into())
     }
 
-    fn start(
-        port: Box<dyn SerialPort>,
-        reader: Option<Box<dyn SerialPort>>,
-        opts: TickOptions,
-    ) -> TickLoop {
+    fn start(port: Box<dyn SerialPort>, reader: Option<Box<dyn Read + Send>>, opts: TickOptions) -> TickLoop {
         let stop = Arc::new(AtomicBool::new(false));
         let samples = Arc::new(Mutex::new(Samples::default()));
         let bytes_received = Arc::new(AtomicU64::new(0));

@@ -49,6 +49,7 @@ pub struct EngineOptions {
     pub hwdec: Option<String>,
     pub verbose: Option<bool>,
 
+
     pub bgra: Option<bool>,
 
     pub async_readback: Option<bool>,
@@ -62,18 +63,53 @@ pub struct EnhanceCapabilities {
     pub vsr: bool,
     pub apple_vsr: bool,
     pub frame_gen: bool,
+    pub dlss: bool,
     pub vsr_reason: Option<String>,
     pub apple_vsr_reason: Option<String>,
     pub frame_gen_reason: Option<String>,
+    pub dlss_reason: Option<String>,
     pub gpu: Option<String>,
+}
+
+
+#[napi(object)]
+pub struct DlssOptions {
+
+    pub nr_preset: String,
+
+    pub nr_style: String,
+
+    pub intensity: f64,
+
+    pub local_tone: f64,
+
+    pub local_structure: f64,
+
+    pub skin_structure: f64,
+    pub auto_mask: bool,
+
+    pub model_preset: String,
+
+    pub factor: f64,
+
+    pub input_height: u32,
+
+    pub rate: String,
+
+    pub guide: String,
+
+    pub buffer_seconds: f64,
 }
 
 #[napi(object)]
 pub struct EnhanceOptions {
 
+
     pub upscaler: String,
 
     pub target_fps: Option<f64>,
+
+    pub dlss: Option<DlssOptions>,
 }
 
 
@@ -92,6 +128,27 @@ pub struct EnhanceState {
     pub target_fps: f64,
 
     pub reason: Option<String>,
+}
+
+
+fn parse_dlss(d: DlssOptions) -> std::result::Result<bp_player::DlssOptions, String> {
+    let options = bp_player::DlssOptions {
+        nr_preset: bp_player::NrPreset::parse(&d.nr_preset).ok_or_else(|| format!("unknown NR preset {}", d.nr_preset))?,
+        nr_style: bp_player::NrStyle::parse(&d.nr_style).ok_or_else(|| format!("unknown NR style {}", d.nr_style))?,
+        intensity: d.intensity as f32,
+        local_tone: d.local_tone as f32,
+        local_structure: d.local_structure as f32,
+        skin_structure: d.skin_structure as f32,
+        auto_mask: d.auto_mask,
+        model_preset: bp_player::ModelPreset::parse(&d.model_preset).ok_or_else(|| format!("unknown model preset {}", d.model_preset))?,
+        factor: d.factor,
+        input_height: d.input_height,
+        rate: bp_player::DlssRate::parse(&d.rate).ok_or_else(|| format!("unknown rate {}", d.rate))?,
+        guide: bp_player::GuideQuality::parse(&d.guide).ok_or_else(|| format!("unknown guide quality {}", d.guide))?,
+        buffer_seconds: d.buffer_seconds,
+    };
+    options.validate()?;
+    Ok(options)
 }
 
 #[napi(object)]
@@ -1963,9 +2020,11 @@ impl Engine {
             vsr: c.vsr,
             apple_vsr: c.apple_vsr,
             frame_gen: c.frame_gen,
+            dlss: c.dlss,
             vsr_reason: c.vsr_reason,
             apple_vsr_reason: c.apple_vsr_reason,
             frame_gen_reason: c.frame_gen_reason,
+            dlss_reason: c.dlss_reason,
             gpu: c.gpu,
         }
     }
@@ -1977,13 +2036,11 @@ impl Engine {
         let upscaler = bp_player::Upscaler::parse(&options.upscaler)
             .ok_or_else(|| err(format!("unknown upscaler {}", options.upscaler)))?;
         let target_fps = options.target_fps.filter(|f| *f > 0.0);
-        self.inner
-            .player
-            .set_enhance(bp_player::EnhanceOptions {
-                upscaler,
-                target_fps,
-            })
-            .map_err(err)
+        let dlss = match options.dlss {
+            Some(d) => parse_dlss(d).map_err(err)?,
+            None => bp_player::DlssOptions::default(),
+        };
+        self.inner.player.set_enhance(bp_player::EnhanceOptions { upscaler, target_fps, dlss }).map_err(err)
     }
 
 
@@ -3162,10 +3219,15 @@ impl VideoPlayer {
     pub fn set_enhance(&self, options: EnhanceOptions) -> Result<()> {
         let upscaler = bp_player::Upscaler::parse(&options.upscaler)
             .ok_or_else(|| err(format!("unknown upscaler {}", options.upscaler)))?;
+        let dlss = match options.dlss {
+            Some(d) => parse_dlss(d).map_err(err)?,
+            None => bp_player::DlssOptions::default(),
+        };
         self.inner
             .set_enhance(bp_player::EnhanceOptions {
                 upscaler,
                 target_fps: options.target_fps.filter(|f| *f > 0.0),
+                dlss,
             })
             .map_err(err)
     }

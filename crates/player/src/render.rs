@@ -221,6 +221,7 @@ impl Drop for Target {
 
 
 
+
 pub fn spawn(
     mpv: Arc<Mpv>,
     frames: Arc<Frames>,
@@ -228,11 +229,11 @@ pub fn spawn(
     cfg: RenderConfig,
     has_video: Arc<AtomicBool>,
     #[cfg(target_os = "macos")] apple: Arc<std::sync::Mutex<crate::enhance::AppleUpscaling>>,
-) -> Result<(Box<Sender<Msg>>, JoinHandle<()>), String> {
+) -> Result<(Box<Sender<Msg>>, JoinHandle<()>, String), String> {
     let (tx, rx) = channel::<Msg>();
     let tx = Box::new(tx);
     let cb_ctx = SendPtr(&*tx as *const Sender<Msg> as *mut c_void);
-    let (ready_tx, ready_rx) = channel::<Result<(), String>>();
+    let (ready_tx, ready_rx) = channel::<Result<String, String>>();
     #[cfg(target_os = "macos")]
     let wake = (*tx).clone();
 
@@ -255,7 +256,7 @@ pub fn spawn(
         .map_err(|e| e.to_string())?;
 
     match ready_rx.recv_timeout(Duration::from_secs(10)) {
-        Ok(Ok(())) => Ok((tx, handle)),
+        Ok(Ok(context)) => Ok((tx, handle, context)),
         Ok(Err(e)) => {
             let _ = handle.join();
             Err(e)
@@ -272,7 +273,7 @@ fn run(
     stats: Arc<RenderStats>,
     cfg: RenderConfig,
     has_video: Arc<AtomicBool>,
-    ready: Sender<Result<(), String>>,
+    ready: Sender<Result<String, String>>,
     #[cfg(target_os = "macos")] mut apple: crate::macos::Upscaler,
 ) {
     let gl = match GlContext::new() {
@@ -313,7 +314,7 @@ fn run(
     };
 
     unsafe { mpv_render_context_set_update_callback(ctx, Some(on_update), cb_ctx.0) };
-    let _ = ready.send(Ok(()));
+    let _ = ready.send(Ok(gl.describe()));
 
     let mut presenting = true;
 

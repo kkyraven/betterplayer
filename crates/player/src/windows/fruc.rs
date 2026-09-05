@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use std::ffi::c_void;
-use std::path::PathBuf;
 
 use libloading::{Library, Symbol};
 
@@ -106,15 +105,7 @@ pub struct Api {
 impl Api {
 
     pub fn load() -> Result<Api, String> {
-        let candidates: Vec<PathBuf> = super::module_dir().into_iter().map(|d| d.join(DLL)).chain([PathBuf::from(DLL)]).collect();
-        let mut last = String::new();
-        for path in candidates {
-            match unsafe { Library::new(&path) } {
-                Ok(lib) => return Api::resolve(lib),
-                Err(e) => last = format!("{}: {e}", path.display()),
-            }
-        }
-        Err(last)
+        Api::resolve(super::load_dll(DLL)?)
     }
 
     fn resolve(lib: Library) -> Result<Api, String> {

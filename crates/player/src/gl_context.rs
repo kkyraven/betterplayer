@@ -15,6 +15,12 @@ impl GlContext {
     pub fn get_proc_address(&self, name: &CStr) -> *mut c_void {
         self.ctx.get_proc_address(name)
     }
+
+
+
+    pub fn describe(&self) -> String {
+        self.ctx.describe()
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -95,6 +101,10 @@ mod platform {
         pub fn get_proc_address(&self, name: &CStr) -> *mut c_void {
             unsafe { libc::dlsym(self.lib, name.as_ptr()) }
         }
+
+        pub fn describe(&self) -> String {
+            "CGL OpenGL 4 core".into()
+        }
     }
 
     impl Drop for Context {
@@ -125,6 +135,10 @@ mod platform {
 
         pub fn get_proc_address(&self, _name: &CStr) -> *mut c_void {
             std::ptr::null_mut()
+        }
+
+        pub fn describe(&self) -> String {
+            "none".into()
         }
     }
 }

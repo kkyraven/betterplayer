@@ -47,16 +47,8 @@ pub(crate) fn is_identity(line: &str) -> bool {
 }
 
 fn probe_port(path: &str, wait: Duration) -> ProbedPort {
-    let mut out = ProbedPort {
-        path: path.to_string(),
-        device: None,
-        tcode: None,
-        error: None,
-    };
-    let mut port = match serialport::new(path, 115_200)
-        .timeout(Duration::from_millis(50))
-        .open()
-    {
+    let mut out = ProbedPort { path: path.to_string(), device: None, tcode: None, error: None };
+    let mut port = match crate::transport::open_serial(path, 115_200, Duration::from_millis(50)) {
         Ok(p) => p,
         Err(e) => {
             out.error = Some(e.to_string());
