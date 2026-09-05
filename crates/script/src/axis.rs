@@ -1,8 +1,3 @@
-//! Axis table from PLAN §4. Ids are TCode ids so device output, funscript suffix matching
-//! and restim compatibility share one vocabulary. Estim axes are a second namespace so a
-//! stroker profile and a restim profile can both be active; on the wire a restim output
-//! writes alpha, beta and volume as `L0`, `L1` and `V0`.
-
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -18,21 +13,21 @@ pub enum Axis {
     A0,
     A1,
     A2,
-    /// Estim alpha, position on the electrode disc.
+
     EA,
-    /// Estim beta.
+
     EB,
-    /// Estim volume, multiplied with restim's master.
+
     EV,
-    /// Carrier frequency.
+
     C0,
-    /// Pulse frequency.
+
     P0,
-    /// Pulse width.
+
     P1,
-    /// Pulse interval jitter.
+
     P2,
-    /// Pulse rise time.
+
     P3,
     E1,
     E2,
@@ -51,7 +46,7 @@ pub enum Kind {
     EstimParam,
 }
 
-/// Which device family an axis belongs to.
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Namespace {
     Tcode,
@@ -75,7 +70,7 @@ impl Axis {
         Self::ALL.get(i).copied()
     }
 
-    /// Internal id, `L0` or `EA`.
+
     pub fn id(self) -> &'static str {
         match self {
             Axis::L0 => "L0", Axis::L1 => "L1", Axis::L2 => "L2",
@@ -123,8 +118,8 @@ impl Axis {
         self.namespace() == Namespace::Estim
     }
 
-    /// Rest value, 0..1. Position, rotation and estim position rest in the middle, pulse
-    /// parameters in the middle of restim's range, intensities at zero.
+
+
     pub fn default_value(self) -> f64 {
         match self.kind() {
             Kind::Position | Kind::Rotation | Kind::EstimPosition | Kind::EstimParam => 0.5,
@@ -132,7 +127,7 @@ impl Axis {
         }
     }
 
-    /// Funscript file suffixes that select this axis, lowercase. `L0` also takes no suffix.
+
     pub fn suffixes(self) -> &'static [&'static str] {
         match self {
             Axis::L0 => &["stroke", "l0", "up", "raw"],
@@ -161,7 +156,7 @@ impl Axis {
         }
     }
 
-    /// Axis for a funscript suffix or bundle id, case-insensitive. Empty selects `L0`.
+
     pub fn from_suffix(s: &str) -> Option<Axis> {
         let s = s.trim().to_ascii_lowercase();
         if s.is_empty() {

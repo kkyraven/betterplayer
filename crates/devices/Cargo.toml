@@ -12,8 +12,17 @@ tungstenite = "0.30"
 serde_json = "1"
 ureq = "3"
 sha2 = "0.10"
+base64 = "0.23"
 bp-script.workspace = true
 btleplug = "0.13"
-tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 uuid = "1"
+# The embedded Buttplug server (Bluetooth toys without Intiface Central). Bluetooth only; the
+# client, server and core crates run on the tokio runtime `toys.rs` owns.
+buttplug_core = { version = "11", default-features = false, features = ["tokio-runtime"] }
+buttplug_client = { version = "11", default-features = false, features = ["tokio-runtime"] }
+buttplug_client_in_process = { version = "11", default-features = false, features = ["tokio-runtime", "btleplug-manager"] }
+buttplug_server = { version = "11", default-features = false, features = ["tokio-runtime"] }
+buttplug_server_hwmgr_btleplug = "11"
+buttplug_server_device_config = "11"

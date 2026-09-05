@@ -1,6 +1,3 @@
-//! Finds every script for a media file: sibling funscripts by suffix, a zip beside the
-//! media, and single-file bundles (EroScripts `axes`, XTPlayer `channels`).
-
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
@@ -31,18 +28,18 @@ impl Container {
 #[derive(Clone, Debug)]
 pub struct LoadedScript {
     pub axis: Axis,
-    /// Name of this script among several for the same axis (`mouth`, `alternative`,
-    /// `1`), None for the plain one.
+
+
     pub variant: Option<String>,
-    /// The file the script came from (the zip or bundle for packed scripts).
+
     pub source: PathBuf,
     pub container: Container,
     pub script: Script,
 }
 
-/// Every script for `media`, several per axis when variants exist, in a stable order:
-/// sibling files first (what the user most recently dropped next to the video), then the
-/// zip, then bundles, plain scripts before named variants.
+
+
+
 pub fn find_scripts(media: &Path) -> Vec<LoadedScript> {
     let Some(stem) = media.file_stem().and_then(|s| s.to_str()) else { return Vec::new() };
     let dir = media.parent().unwrap_or(Path::new("."));
@@ -74,9 +71,10 @@ pub fn find_scripts(media: &Path) -> Vec<LoadedScript> {
     found.into_values().collect()
 }
 
-/// The part between the media stem and `.funscript`, without its leading dot, when
-/// `path` is a script for this media. `Name.funscript` gives an empty suffix; the suffix
-/// may hold several dotted parts (`alternative.mouth.a`).
+
+
+
+
 fn suffix_for(path: &Path, stem: &str) -> Option<String> {
     let name = path.file_name()?.to_str()?;
     let rest = name.strip_prefix(stem)?;
@@ -84,14 +82,17 @@ fn suffix_for(path: &Path, stem: &str) -> Option<String> {
     if rest.is_empty() {
         return Some(String::new());
     }
-    rest.strip_prefix('.').map(str::to_string)
+    if let Some(inner) = rest.strip_prefix(" (").and_then(|r| r.strip_suffix(')')) {
+        return (!inner.is_empty()).then(|| inner.to_string());
+    }
+    rest.strip_prefix(['.', '_']).map(str::to_string)
 }
 
-/// Axis and variant for a file suffix. A part that names an axis picks it and the other
-/// parts become the variant (`alternative.roll` is roll, variant `alternative`); `vib1`
-/// and `vibe2` pick the first and second vibration axis; a part with an axis name and a
-/// trailing number (`stroke1`) keeps the number as the variant; anything else is a named
-/// variant of the stroke.
+
+
+
+
+
 pub fn classify_suffix(suffix: &str) -> (Axis, Option<String>) {
     let parts: Vec<&str> = suffix.split('.').filter(|p| !p.is_empty()).collect();
     let mut axis = None;
@@ -127,7 +128,7 @@ pub fn classify_suffix(suffix: &str) -> (Axis, Option<String>) {
     (axis.unwrap_or(Axis::L0), variant)
 }
 
-/// The scripts to play by default: per axis the plain one, else the first variant.
+
 pub fn select_default(scripts: &[LoadedScript]) -> Vec<&LoadedScript> {
     let mut out: Vec<&LoadedScript> = Vec::new();
     for s in scripts {
@@ -138,16 +139,16 @@ pub fn select_default(scripts: &[LoadedScript]) -> Vec<&LoadedScript> {
     out
 }
 
-/// One funscript file may be a plain script or a bundle; returns every script inside.
-/// The text is deserialised once into `Raw`, whichever shape it turns out to be.
+
+
 fn parse_any(text: &str, source: &Path, suffix: String) -> Vec<LoadedScript> {
     let Ok(raw) = Raw::parse(text) else { return Vec::new() };
     let mut out = Vec::new();
     let (file_axis, variant) = if suffix.is_empty() { (Axis::L0, None) } else { classify_suffix(&suffix) };
     let Raw { actions, inverted, metadata, axes, channels } = raw;
     if let Some(axes) = axes {
-        // EroScripts v1.1: root actions are the file's axis (L0 unless the suffix names one),
-        // `axes` carries the rest. A suffixed bundle file names a variant for everything inside it.
+
+
         let root = Script::from_raw(actions, inverted, metadata);
         out.push(LoadedScript { axis: file_axis, variant: variant.clone(), source: source.into(), container: Container::Axes, script: root });
         for a in axes {
@@ -178,7 +179,7 @@ fn read_zip(zip_path: &Path, stem: &str) -> Vec<LoadedScript> {
     names.sort();
     for name in names {
         let inner = Path::new(&name);
-        // Inside a zip the base name may differ from the media; fall back to the suffix alone.
+
         let suffix = suffix_for(inner, stem).or_else(|| {
             let n = inner.file_name()?.to_str()?.strip_suffix(".funscript")?;
             Some(n.split_once('.').map(|(_, rest)| rest).unwrap_or("").to_string())
@@ -221,9 +222,22 @@ mod tests {
         fs::write(d.join("clip (1).funscript"), ONE).unwrap();
         fs::write(d.join("other.pitch.funscript"), ONE).unwrap();
         let s = find_scripts(&d.join("clip.mp4"));
-        let axes: Vec<Axis> = s.iter().map(|x| x.axis).collect();
-        assert_eq!(axes, vec![Axis::L0, Axis::R0, Axis::R1]);
+        let names: Vec<(Axis, Option<&str>)> = s.iter().map(|x| (x.axis, x.variant.as_deref())).collect();
+        assert_eq!(names, vec![(Axis::L0, None), (Axis::L0, Some("1")), (Axis::R0, None), (Axis::R1, None)]);
         assert!(s.iter().all(|x| x.container == Container::Sibling));
+    }
+
+    #[test]
+    fn underscore_and_parenthesised_variants() {
+        let d = tmp("seps");
+        fs::write(d.join("v.funscript"), ONE).unwrap();
+        fs::write(d.join("v_simple.funscript"), ONE).unwrap();
+        fs::write(d.join("v (Less Vibration).funscript"), ONE).unwrap();
+        fs::write(d.join("v (roll).funscript"), ONE).unwrap();
+        fs::write(d.join("v ().funscript"), ONE).unwrap();
+        let s = find_scripts(&d.join("v.mp4"));
+        let names: Vec<(Axis, Option<&str>)> = s.iter().map(|x| (x.axis, x.variant.as_deref())).collect();
+        assert_eq!(names, vec![(Axis::L0, None), (Axis::L0, Some("Less Vibration")), (Axis::L0, Some("simple")), (Axis::R1, None)]);
     }
 
     #[test]

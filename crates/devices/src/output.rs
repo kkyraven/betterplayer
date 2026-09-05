@@ -1,13 +1,6 @@
-//! One connected device: connects off the tick thread, identifies the firmware with
-//! `D0`/`D1` (TCode) or the device list (Buttplug), sends dirty axes every tick,
-//! reconnects after errors. Lines the device sends that start with `#` (`#ok`, `#left`,
-//! `#right`, `#edge`) are queued as inputs for the host to bind to actions.
-//! Links that host the script themselves (the Handy) get the loaded scripts and the media
-//! clock instead of per-tick axis values. A restim output can scale its volume by a session
-//! ramp that counts playing time and restarts on every connect.
-
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::thread;
@@ -15,16 +8,18 @@ use std::time::{Duration, Instant};
 
 use bp_script::{Axis, Script};
 
+use crate::howl::HowlStatus;
 use crate::ramp::{Ramp, RampProgress};
 use crate::tcode::{self, AxisClamp, Profile, Units};
+use crate::toys::follows_speed;
 use crate::transport::{self, Link, Transport};
 use crate::{PercentilesUs, percentiles};
 
 const RETRY: Duration = Duration::from_secs(2);
 const IDENTIFY_WINDOW: Duration = Duration::from_secs(2);
-/// A freshly connected stroker is somewhere unknown; TCode has no position readback. The
-/// first line after a connect (or a profile switch) carries this interval so the firmware
-/// eases from wherever it is, and nothing else is written until it has had the time to.
+
+
+
 pub const CONNECT_GLIDE_MS: u32 = 1500;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -34,13 +29,22 @@ pub enum Status {
     Error(String),
 }
 
-/// What every output learns about the media on each tick.
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Media {
+
+    pub title: String,
+
+    pub hwl: Option<PathBuf>,
+}
+
+
 #[derive(Clone, Copy, Debug)]
 pub struct TickContext {
     pub media_ms: f64,
     pub playing: bool,
     pub rate: f64,
-    /// Measured time since the previous tick, whole ms.
+
     pub interval_ms: u32,
 }
 
@@ -55,31 +59,45 @@ pub struct Output {
     pub transport: Transport,
     pub profile: Profile,
     pub clamps: [AxisClamp; Axis::COUNT],
-    /// Session volume ramp, applied to restim outputs only.
+
     pub ramp: Ramp,
     state: State,
     last: Units,
     line: String,
     retry_at: Instant,
     connected_at: Option<Instant>,
-    /// Pending connect glide: when it ends, and whether its line has gone out yet.
+
     glide: Option<(Instant, bool)>,
-    /// First reply after connect that is not telemetry, the `D0` answer on TCode boards.
+
     pub device: Option<String>,
-    /// The `D1` answer, `TCode v0.3`.
+
     pub tcode: Option<String>,
     received: VecDeque<String>,
     inputs: VecDeque<String>,
-    /// The stroke script, kept for a link that hosts it itself (the Handy) so one that
-    /// connects mid-video still gets it.
-    stroke: Option<Arc<Script>>,
+
+
+    hosted: Option<(Vec<(Axis, Arc<Script>)>, Media)>,
     lines_sent: u64,
     write_us: VecDeque<u32>,
-    /// When the last line went to a line transport, for links with a minimum spacing.
+
     last_line_at: Option<Instant>,
+
+    feature_axes: HashMap<u32, Option<Axis>>,
 }
 
-/// What the UI shows about an output every frame.
+
+#[derive(Clone, Debug)]
+pub struct FeatureSnapshot {
+    pub index: u32,
+
+    pub kind: &'static str,
+    pub description: String,
+    pub axis: Option<Axis>,
+
+    pub speed: bool,
+}
+
+
 #[derive(Clone, Debug)]
 pub struct OutputSnapshot {
     pub id: u32,
@@ -89,17 +107,22 @@ pub struct OutputSnapshot {
     pub status: Status,
     pub device: Option<String>,
     pub tcode: Option<String>,
-    /// The session ramp's progress, while it is on and the profile is restim.
+
     pub ramp: Option<RampProgress>,
+
+    pub howl: Option<HowlStatus>,
+
+    pub features: Vec<FeatureSnapshot>,
+    pub battery: Option<u8>,
 }
 
-/// Counters and timings for a diagnostics view, on request: sorting the write samples is
-/// not something to do sixty times a second.
+
+
 #[derive(Clone, Debug)]
 pub struct OutputStats {
     pub lines_sent: u64,
     pub write: PercentilesUs,
-    /// Newest first.
+
     pub received: Vec<String>,
 }
 
@@ -121,10 +144,11 @@ impl Output {
             tcode: None,
             received: VecDeque::new(),
             inputs: VecDeque::new(),
-            stroke: None,
+            hosted: None,
             lines_sent: 0,
             write_us: VecDeque::new(),
             last_line_at: None,
+            feature_axes: HashMap::new(),
         };
         o.connect();
         o
@@ -139,7 +163,7 @@ impl Output {
         self.state = State::Connecting(rx);
     }
 
-    /// Switches the axis family this output speaks; the next tick resends everything.
+
     pub fn set_profile(&mut self, profile: Profile) {
         self.profile = profile;
         self.last = [None; Axis::COUNT];
@@ -147,11 +171,14 @@ impl Output {
     }
 
     fn begin_glide(&mut self) {
-        self.glide = Some((Instant::now() + Duration::from_millis(CONNECT_GLIDE_MS as u64), false));
+        self.glide = Some((
+            Instant::now() + Duration::from_millis(CONNECT_GLIDE_MS as u64),
+            false,
+        ));
     }
 
-    /// Interval for the next TCode line while a glide is pending: the glide length for its
-    /// first line, `None` (write nothing) until that has played out, then the tick's own.
+
+
     fn line_interval(&mut self, now: Instant, interval_ms: u32) -> Option<u32> {
         match self.glide {
             Some((until, false)) => {
@@ -167,7 +194,7 @@ impl Output {
         }
     }
 
-    /// Progresses the connection and reads replies. Call once per tick before `send`.
+
     pub fn poll(&mut self) {
         match &mut self.state {
             State::Connecting(rx) => match rx.try_recv() {
@@ -185,9 +212,16 @@ impl Output {
                         Link::Coyote(coyote) => self.device = Some(coyote.device()),
                         Link::Handy(h) => {
                             self.device = Some(h.device.clone());
-                            h.set_stroke(self.stroke.as_deref());
+                            h.set_stroke(stroke(self.hosted.as_ref()));
+                        }
+                        Link::Howl(h) => {
+                            self.device = Some("Howl".into());
+                            if let Some((scripts, media)) = &self.hosted {
+                                h.set_source(scripts, media);
+                            }
                         }
                         Link::Buttplug(_) => {}
+                        Link::Toy(toy) => toy.set_axes(&self.feature_axes),
                     }
                     self.state = State::Connected(link);
                 }
@@ -224,6 +258,16 @@ impl Output {
                 }
                 Err(e) => self.fail(format!("handy: {e}")),
             },
+            State::Connected(Link::Howl(h)) => {
+                if let Err(e) = h.poll() {
+                    self.fail(format!("howl: {e}"));
+                }
+            }
+            State::Connected(Link::Toy(toy)) => {
+                if !toy.alive() {
+                    self.fail("disconnected".into());
+                }
+            }
             State::Error(_) => {
                 if Instant::now() >= self.retry_at {
                     self.connect();
@@ -243,7 +287,9 @@ impl Output {
         if l.is_empty() {
             return;
         }
-        let fresh = self.connected_at.is_some_and(|t| t.elapsed() < IDENTIFY_WINDOW);
+        let fresh = self
+            .connected_at
+            .is_some_and(|t| t.elapsed() < IDENTIFY_WINDOW);
         if l.starts_with("TCode v") {
             self.tcode = Some(l.to_string());
         } else if fresh && self.device.is_none() && crate::probe::is_identity(l) {
@@ -260,24 +306,34 @@ impl Output {
         self.received.push_back(l.to_string());
     }
 
-    /// Sends the axes that changed since the last line. Returns whether a line went out.
-    pub fn send(&mut self, values: &[f64; Axis::COUNT], driven: &[bool; Axis::COUNT], ctx: &TickContext) -> bool {
+
+    pub fn send(
+        &mut self,
+        values: &[f64; Axis::COUNT],
+        driven: &[bool; Axis::COUNT],
+        ctx: &TickContext,
+    ) -> bool {
         let t0 = Instant::now();
-        // The ramp counts playing time while restim is connected and scales the volume it sends.
+
         let mut ramped = (*values, *driven);
-        let (values, driven) = if self.profile == Profile::Restim && matches!(self.state, State::Connected(_)) {
-            self.ramp.advance(ctx.playing, ctx.interval_ms as f64);
-            self.ramp.apply(&mut ramped.0, &mut ramped.1);
-            (&ramped.0, &ramped.1)
-        } else {
-            (values, driven)
-        };
-        // A link slower than the tick (BLE) gets lines at its own spacing, each carrying that
-        // interval; the axes that moved meanwhile go out together on the next one.
+        let (values, driven) =
+            if self.profile == Profile::Restim && matches!(self.state, State::Connected(_)) {
+                self.ramp.advance(ctx.playing, ctx.interval_ms as f64);
+                self.ramp.apply(&mut ramped.0, &mut ramped.1);
+                (&ramped.0, &ramped.1)
+            } else {
+                (values, driven)
+            };
+
+
         let interval_ms = match &self.state {
             State::Connected(Link::Lines(conn)) => {
                 let min = conn.min_interval_ms();
-                if min > 0 && self.last_line_at.is_some_and(|t| t0.duration_since(t) < Duration::from_millis(min as u64)) {
+                if min > 0
+                    && self
+                        .last_line_at
+                        .is_some_and(|t| t0.duration_since(t) < Duration::from_millis(min as u64))
+                {
                     return false;
                 }
                 match self.line_interval(t0, ctx.interval_ms.max(min)) {
@@ -290,7 +346,16 @@ impl Output {
         let mut write_us = None;
         let result = match &mut self.state {
             State::Connected(Link::Lines(conn)) => {
-                if tcode::encode(self.profile, values, driven, &self.clamps, &mut self.last, interval_ms, &mut self.line) == 0 {
+                if tcode::encode(
+                    self.profile,
+                    values,
+                    driven,
+                    &self.clamps,
+                    &mut self.last,
+                    interval_ms,
+                    &mut self.line,
+                ) == 0
+                {
                     return false;
                 }
                 self.last_line_at = Some(t0);
@@ -298,14 +363,26 @@ impl Output {
                 write_us = conn.last_write_us();
                 r
             }
-            State::Connected(Link::Buttplug(bp)) => match bp.send(values, &self.clamps, ctx.interval_ms) {
-                Ok(true) => Ok(()),
-                Ok(false) => return false,
-                Err(e) => Err(e),
-            },
+            State::Connected(Link::Buttplug(bp)) => {
+                match bp.send(values, &self.clamps, ctx.interval_ms) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => return false,
+                    Err(e) => Err(e),
+                }
+            }
             State::Connected(Link::Coyote(coyote)) => {
-                let volume = if driven[Axis::V0.index()] { values[Axis::V0.index()] } else { 1.0 };
-                match coyote.send(values[Axis::L0.index()], volume, driven[Axis::L0.index()], ctx.playing, ctx.interval_ms) {
+                let volume = if driven[Axis::V0.index()] {
+                    values[Axis::V0.index()]
+                } else {
+                    1.0
+                };
+                match coyote.send(
+                    values[Axis::L0.index()],
+                    volume,
+                    driven[Axis::L0.index()],
+                    ctx.playing,
+                    ctx.interval_ms,
+                ) {
                     Ok(true) => Ok(()),
                     Ok(false) => return false,
                     Err(e) => Err(e),
@@ -315,6 +392,17 @@ impl Output {
                 h.tick(ctx, &self.clamps);
                 return false;
             }
+            State::Connected(Link::Howl(h)) => {
+                h.tick(ctx);
+                return false;
+            }
+            State::Connected(Link::Toy(toy)) => {
+                match toy.send(values, &self.clamps, ctx.interval_ms) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => return false,
+                    Err(e) => Err(e),
+                }
+            }
             _ => return false,
         };
         match result {
@@ -323,8 +411,9 @@ impl Output {
                 if self.write_us.len() == 1000 {
                     self.write_us.pop_front();
                 }
-                // Transports with their own writer thread report the write itself, once it is done.
-                self.write_us.push_back(write_us.unwrap_or(t0.elapsed().as_micros() as u32));
+
+                self.write_us
+                    .push_back(write_us.unwrap_or(t0.elapsed().as_micros() as u32));
                 true
             }
             Err(e) => {
@@ -334,15 +423,20 @@ impl Output {
         }
     }
 
-    /// Device button lines received since the last call, without their `#`.
+
     pub fn take_inputs(&mut self) -> Vec<String> {
         self.inputs.drain(..).collect()
     }
 
-    /// Live strength change on a Coyote link. Returns whether this output took it.
+
     pub fn set_strength(&mut self, a: u8, b: u8) -> bool {
-        if let Transport::Coyote { strength_a, strength_b, .. } = &mut self.transport {
-            // Kept on the transport so a reconnect comes back at the same cap.
+        if let Transport::Coyote {
+            strength_a,
+            strength_b,
+            ..
+        } = &mut self.transport
+        {
+
             (*strength_a, *strength_b) = (a, b);
         } else {
             return false;
@@ -353,15 +447,45 @@ impl Output {
         true
     }
 
-    /// Hands the stroke script to a link that hosts it itself. Other links read the mixer
-    /// output every tick and ignore this.
-    pub fn set_scripts(&mut self, scripts: &[(Axis, Arc<Script>)]) {
-        if !matches!(self.transport, Transport::Handy { .. }) {
+
+
+    pub fn set_feature_axis(&mut self, index: u32, axis: Option<Axis>) -> bool {
+        if !matches!(self.transport, Transport::Toy { .. }) {
+            return false;
+        }
+        self.feature_axes.insert(index, axis);
+        if let State::Connected(Link::Toy(toy)) = &mut self.state {
+            toy.set_axes(&self.feature_axes);
+        }
+        true
+    }
+
+
+
+    pub fn set_scripts(&mut self, scripts: &[(Axis, Arc<Script>)], media: &Media) {
+        if !matches!(
+            self.transport,
+            Transport::Handy { .. } | Transport::Howl { .. }
+        ) {
             return;
         }
-        self.stroke = scripts.iter().find(|(a, s)| *a == Axis::L0 && !s.is_empty()).map(|(_, s)| s.clone());
-        if let State::Connected(Link::Handy(h)) = &mut self.state {
-            h.set_stroke(self.stroke.as_deref());
+        self.hosted = Some((scripts.to_vec(), media.clone()));
+        match &mut self.state {
+            State::Connected(Link::Handy(h)) => h.set_stroke(stroke(self.hosted.as_ref())),
+            State::Connected(Link::Howl(h)) => h.set_source(scripts, media),
+            _ => {}
+        }
+    }
+
+
+
+    pub fn test(&mut self) -> bool {
+        match &mut self.state {
+            State::Connected(Link::Howl(h)) => {
+                h.test();
+                true
+            }
+            _ => false,
         }
     }
 
@@ -378,6 +502,21 @@ impl Output {
     }
 
     pub fn snapshot(&self) -> OutputSnapshot {
+        let (features, battery) = match &self.state {
+            State::Connected(Link::Toy(toy)) => (
+                toy.axes()
+                    .map(|(f, axis)| FeatureSnapshot {
+                        index: f.index,
+                        kind: f.kind.as_str(),
+                        description: f.description.clone(),
+                        axis,
+                        speed: axis.is_some_and(|a| follows_speed(f, a)),
+                    })
+                    .collect(),
+                toy.battery(),
+            ),
+            _ => (Vec::new(), None),
+        };
         OutputSnapshot {
             id: self.id,
             kind: self.transport.kind(),
@@ -386,18 +525,39 @@ impl Output {
             status: self.status(),
             device: self.device.clone(),
             tcode: self.tcode.clone(),
-            ramp: (self.profile == Profile::Restim).then(|| self.ramp.progress()).flatten(),
+            ramp: (self.profile == Profile::Restim)
+                .then(|| self.ramp.progress())
+                .flatten(),
+            howl: match &self.state {
+                State::Connected(Link::Howl(h)) => Some(h.status.clone()),
+                _ => None,
+            },
+            features,
+            battery,
         }
     }
 
     pub fn stats(&self) -> OutputStats {
-        OutputStats { lines_sent: self.lines_sent, write: percentiles(&self.write_us), received: self.received.iter().rev().take(10).cloned().collect() }
+        OutputStats {
+            lines_sent: self.lines_sent,
+            write: percentiles(&self.write_us),
+            received: self.received.iter().rev().take(10).cloned().collect(),
+        }
     }
 
-    /// Drops the connection on another thread so the tick never waits on a reader join.
+
     pub fn disconnect(self) {
         thread::spawn(move || drop(self));
     }
+}
+
+
+fn stroke(hosted: Option<&(Vec<(Axis, Arc<Script>)>, Media)>) -> Option<&Script> {
+    hosted?
+        .0
+        .iter()
+        .find(|(a, s)| *a == Axis::L0 && !s.is_empty())
+        .map(|(_, s)| s.as_ref())
 }
 
 #[cfg(test)]
@@ -406,12 +566,25 @@ mod tests {
 
     #[test]
     fn glide_sends_one_long_line_then_holds() {
-        let mut o = Output::new(1, Transport::Udp { host: "127.0.0.1".into(), port: 1 }, Profile::Stroker);
+        let mut o = Output::new(
+            1,
+            Transport::Udp {
+                host: "127.0.0.1".into(),
+                port: 1,
+            },
+            Profile::Stroker,
+        );
         o.begin_glide();
         let t0 = Instant::now();
         assert_eq!(o.line_interval(t0, 10), Some(CONNECT_GLIDE_MS));
         assert_eq!(o.line_interval(t0 + Duration::from_millis(500), 10), None);
-        assert_eq!(o.line_interval(t0 + Duration::from_millis(CONNECT_GLIDE_MS as u64 + 1), 10), Some(10));
-        assert_eq!(o.line_interval(t0 + Duration::from_millis(CONNECT_GLIDE_MS as u64 + 20), 10), Some(10));
+        assert_eq!(
+            o.line_interval(t0 + Duration::from_millis(CONNECT_GLIDE_MS as u64 + 1), 10),
+            Some(10)
+        );
+        assert_eq!(
+            o.line_interval(t0 + Duration::from_millis(CONNECT_GLIDE_MS as u64 + 20), 10),
+            Some(10)
+        );
     }
 }

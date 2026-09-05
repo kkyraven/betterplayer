@@ -12,6 +12,7 @@ bp-axes.workspace = true
 bp-tracking.workspace = true
 bp-detect.workspace = true
 bp-beat.workspace = true
+bp-model.workspace = true
 bp-hero.workspace = true
 bp-devices.workspace = true
 serde = { version = "1", features = ["derive"] }

@@ -1,17 +1,9 @@
-//! Stroke to alpha/beta expansion, restim's own conversion (research 05): every stroke
-//! segment between two direction changes becomes a half circle on the electrode disc,
-//! `alpha = c + r cos θ`, `beta = 0.5 + r·dir·sin θ` for θ over 0..π, so alpha still
-//! follows the stroke while beta swings out and back. The orbit direction flips with
-//! probability 0.1 per segment, chosen from the segment index so seeks replay the same path.
-//! Alpha and beta also decompose into four electrode intensities for FOC-Stim's four-phase
-//! mode, restim's `abc_to_e1234` with gamma at the centre.
-
 use crate::funscript::{Action, Script};
 
-/// Points per second in the derived scripts.
+
 const RATE_HZ: f64 = 25.0;
 
-/// Derives `(alpha, beta)` scripts from a stroke script. Empty in, empty out.
+
 pub fn stroke_to_alpha_beta(stroke: &Script) -> (Script, Script) {
     let mut alpha = Vec::new();
     let mut beta = Vec::new();
@@ -41,10 +33,10 @@ pub fn stroke_to_alpha_beta(stroke: &Script) -> (Script, Script) {
     (Script { actions: alpha, ..Default::default() }, Script { actions: beta, ..Default::default() })
 }
 
-/// Four electrode intensities, 0..1, for a point on the disc: restim's four-phase
-/// decomposition (`stim_math/transforms_4.py`) with gamma at the centre. A point and its
-/// mirror through the centre give the same electrodes, the centre gives all zeros, and one
-/// electrode is always zero. No clamp is needed: the maximum over the disc is 0.977.
+
+
+
+
 pub fn electrodes(alpha: f64, beta: f64) -> [f64; 4] {
     let a = 2.0 * alpha - 1.0;
     let b = 2.0 * beta - 1.0;
@@ -63,8 +55,16 @@ pub fn electrodes(alpha: f64, beta: f64) -> [f64; 4] {
     e
 }
 
-/// Indices of the actions where the stroke changes direction, plus the first and last.
-/// Runs of equal positions count as one flat segment.
+
+
+
+pub fn contrast(e: [f64; 4], contrast: f64) -> [f64; 4] {
+    let gamma = 1.0 - 0.75 * contrast.clamp(0.0, 1.0);
+    e.map(|v| v.clamp(0.0, 1.0).powf(gamma))
+}
+
+
+
 fn extrema(actions: &[Action]) -> Vec<usize> {
     let mut out = Vec::new();
     if actions.is_empty() {
@@ -111,11 +111,11 @@ mod tests {
         assert_eq!(alpha.actions.first().unwrap().pos, 1.0);
         assert_eq!(alpha.actions.last().unwrap().pos, 1.0);
         assert_eq!(alpha.duration_ms(), 2000.0);
-        // Alpha crosses the middle halfway through a segment; beta is furthest out there.
+
         let mid = alpha.actions.iter().position(|a| (a.at - 500.0).abs() <= 20.0).unwrap();
         assert!((alpha.actions[mid].pos - 0.5).abs() < 0.05, "{}", alpha.actions[mid].pos);
         assert!((beta.actions[mid].pos - 0.5).abs() > 0.45, "{}", beta.actions[mid].pos);
-        // Beta returns to the centre at every extremum.
+
         for a in beta.actions.iter().filter(|a| a.at == 0.0 || a.at == 1000.0 || a.at == 2000.0) {
             assert!((a.pos - 0.5).abs() < 1e-9);
         }
@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn electrodes_match_restim_reference_values() {
-        // (a, b) in −1..1 to e1..e4, from restim's own Python.
+
         let rows: [((f64, f64), [f64; 4]); 5] = [
             ((1.0, 0.0), [1.0, 0.0, 0.0, 0.0]),
             ((0.0, 1.0), [0.0, 0.707, 0.354, 0.354]),
@@ -138,7 +138,7 @@ mod tests {
                 assert!((got[i] - want[i]).abs() < 1e-3, "({a}, {b}) e{}: {} vs {}", i + 1, got[i], want[i]);
             }
         }
-        // Mirror through the centre: the same electrodes.
+
         assert_eq!(electrodes(0.8, 0.3), electrodes(0.2, 0.7));
     }
 
@@ -153,6 +153,20 @@ mod tests {
                 assert!((e[2] - e[3]).abs() < 1e-12, "gamma at the centre: e3 and e4 match");
             }
         }
+    }
+
+    #[test]
+    fn contrast_lifts_the_middle_and_keeps_the_ends() {
+        let e = [0.0, 0.3, 0.6, 1.0];
+        assert_eq!(contrast(e, 0.0), e, "no contrast plays the decomposition as is");
+        let up = contrast(e, 1.0);
+        assert_eq!(up[0], 0.0, "silent stays silent");
+        assert!((up[3] - 1.0).abs() < 1e-12);
+        assert!(up[1] > 0.7 && up[2] > 0.85, "{up:?}");
+        assert!(up[1] < up[2], "still in order");
+        let half = contrast(e, 0.5);
+        assert!(half[1] > e[1] && half[1] < up[1]);
+        assert_eq!(contrast(e, 2.0), up, "clamped");
     }
 
     #[test]

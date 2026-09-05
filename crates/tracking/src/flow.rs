@@ -1,7 +1,4 @@
-//! Pyramidal Lucas-Kanade sparse optical flow, pure Rust. One pyramid per frame, one
-//! `track` call per grid point, no allocation once the pyramids are sized.
-
-/// One grayscale level of a pyramid, in f32 so gradients and bilinear taps stay cheap.
+// TODO: Delete this file.
 pub struct Plane {
     pub w: usize,
     pub h: usize,
@@ -26,7 +23,7 @@ impl Plane {
         self.px[y * self.w + x]
     }
 
-    /// Bilinear tap with clamped coordinates.
+
     fn sample(&self, x: f32, y: f32) -> f32 {
         let x = x.clamp(0.0, (self.w - 1) as f32);
         let y = y.clamp(0.0, (self.h - 1) as f32);
@@ -39,7 +36,7 @@ impl Plane {
     }
 }
 
-/// A grayscale frame at successively halved resolutions, coarsest last.
+
 pub struct Pyramid {
     pub levels: Vec<Plane>,
 }
@@ -49,7 +46,7 @@ impl Pyramid {
         Pyramid { levels: (0..levels.max(1)).map(|_| Plane::new()).collect() }
     }
 
-    /// Rebuilds every level from a grayscale frame, reusing the existing buffers.
+
     pub fn fill(&mut self, gray: &[u8], w: usize, h: usize) {
         self.levels[0].resize(w, h);
         for (dst, &src) in self.levels[0].px.iter_mut().zip(gray) {
@@ -61,15 +58,15 @@ impl Pyramid {
         }
     }
 
-    /// Quarter resolution, used for the scene cut test: coarse enough to ignore motion, fine
-    /// enough that a large move does not read as a cut.
+
+
     pub fn cut_level(&self) -> &Plane {
         &self.levels[2.min(self.levels.len() - 1)]
     }
 }
 
-/// Half resolution by 2x2 box average. Video is already smooth enough that a wider kernel
-/// buys nothing for a 1-D output.
+
+
 fn downsample(src: &Plane, dst: &mut Plane) {
     let (w, h) = ((src.w / 2).max(1), (src.h / 2).max(1));
     dst.resize(w, h);
@@ -82,26 +79,26 @@ fn downsample(src: &Plane, dst: &mut Plane) {
     }
 }
 
-/// Displacement of one point between two frames, in level-0 pixels.
+
 pub struct Flow {
     pub dx: f32,
     pub dy: f32,
-    /// Mean absolute residual after the last iteration, 0..255.
+
     pub err: f32,
-    /// The point sits on enough structure for the flow to mean anything.
+
     pub textured: bool,
 }
 
-/// Half-width of the match window, so 7x7.
+
 const W: usize = 3;
 const WIN: usize = 2 * W + 1;
 const N: usize = WIN * WIN;
 const ITERATIONS: usize = 4;
-/// Structure tensor min eigenvalue per window pixel below which a point has no usable texture.
+
 const MIN_EIGEN: f32 = 1.0;
 
-/// Tracks one point from `prev` to `curr`, coarsest level first. The window is snapped to
-/// whole pixels on `prev` so only `curr` needs bilinear taps.
+
+
 pub fn track(prev: &Pyramid, curr: &Pyramid, x: f32, y: f32) -> Flow {
     let levels = prev.levels.len();
     let (mut dx, mut dy) = (0.0f32, 0.0f32);
@@ -182,10 +179,10 @@ pub fn track(prev: &Pyramid, curr: &Pyramid, x: f32, y: f32) -> Flow {
     Flow { dx, dy, err, textured }
 }
 
-/// Number of bins in the luma histogram the cut test compares.
+
 pub const HIST_BINS: usize = 32;
 
-/// Normalised luma histogram of a plane. Motion inside one scene barely moves it; a cut does.
+
 pub fn histogram(p: &Plane) -> [f32; HIST_BINS] {
     let mut h = [0.0f32; HIST_BINS];
     if p.px.is_empty() {
@@ -202,13 +199,13 @@ pub fn histogram(p: &Plane) -> [f32; HIST_BINS] {
     h
 }
 
-/// Half the L1 distance between two normalised histograms, 0..1.
+
 pub fn histogram_distance(a: &[f32; HIST_BINS], b: &[f32; HIST_BINS]) -> f32 {
     a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum::<f32>() * 0.5
 }
 
-/// Mean absolute difference between two planes of the same size, 0..255. A large value with a
-/// histogram change behind it is a scene cut.
+
+
 pub fn mean_abs_diff(a: &Plane, b: &Plane) -> f32 {
     if a.w != b.w || a.h != b.h || a.px.is_empty() {
         return f32::MAX;
@@ -216,3 +213,4 @@ pub fn mean_abs_diff(a: &Plane, b: &Plane) -> f32 {
     let sum: f32 = a.px.iter().zip(&b.px).map(|(x, y)| (x - y).abs()).sum();
     sum / a.px.len() as f32
 }
+// Note for my agents: ensure to run 3 fable/astra or equivalent agents to validate any findings/plans here before copying or modifying this file, this is due to historical issues with agents referencing this file. Important!

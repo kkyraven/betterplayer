@@ -1,16 +1,11 @@
-//! The deadline loop every fixed-rate output shares: sleep until just before the deadline,
-//! spin the rest, skip missed ticks after a stall rather than bursting to catch up. A tick
-//! with nothing to write asks for the relaxed pace, which sleeps through the deadline and
-//! costs no CPU.
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::realtime;
 
-/// How the next deadline is met. `Precise` sleeps until `spin_us` before it and spins the
-/// rest; `Relaxed` sleeps through it, a millisecond or so late on most schedulers.
+
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pace {
     Precise,
@@ -20,21 +15,21 @@ pub enum Pace {
 #[derive(Clone, Copy, Debug)]
 pub struct Tick {
     pub n: u64,
-    /// Microseconds past the deadline.
+
     pub late_us: u32,
-    /// Measured time since the previous tick fired.
+
     pub dt_ms: f64,
     pub skipped: u32,
-    /// Whether the thread got a realtime scheduling class.
+
     pub realtime: bool,
-    /// The pace this tick was woken at; `late_us` only means something for `Precise`.
+
     pub pace: Pace,
-    /// When the tick fired, so the callback can time its own work.
+
     pub fired: Instant,
 }
 
-/// Runs `f` at `hz` until `stop` is set; each call returns the pace for the next deadline.
-/// Promotes the calling thread to realtime where the platform allows.
+
+
 pub fn run(hz: u32, spin_us: u32, stop: &AtomicBool, mut f: impl FnMut(Tick) -> Pace) {
     let hz = hz.max(1);
     let period = Duration::from_micros(1_000_000 / hz as u64);
@@ -69,9 +64,21 @@ pub fn run(hz: u32, spin_us: u32, stop: &AtomicBool, mut f: impl FnMut(Tick) -> 
         last = fired;
 
         let behind = Instant::now().saturating_duration_since(start + period * (n as u32 + 1));
-        let skipped = if behind > period { (behind.as_micros() / period.as_micros()) as u32 } else { 0 };
+        let skipped = if behind > period {
+            (behind.as_micros() / period.as_micros()) as u32
+        } else {
+            0
+        };
         n += skipped as u64;
 
-        pace = f(Tick { n, late_us, dt_ms, skipped, realtime, pace, fired });
+        pace = f(Tick {
+            n,
+            late_us,
+            dt_ms,
+            skipped,
+            realtime,
+            pace,
+            fired,
+        });
     }
 }

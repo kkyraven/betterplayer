@@ -1,8 +1,3 @@
-//! The live tracker's home in the engine: a worker thread that runs `bp_tracking::Tracker`
-//! on frames handed over from the host, and a small timeline the tick thread reads some lag
-//! behind the wall clock. The media clock is not involved; `lookahead.rs` is the path that
-//! keys motion by media time.
-
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -10,11 +5,11 @@ use std::time::{Duration, Instant};
 
 use bp_tracking::{Motion, Sample, TrackOptions, Tracker};
 
-/// Frames stop arriving (the page paused, the tab went away) and the axis is released.
+
 const STALE_MS: u64 = 500;
 
-/// The newest frame waiting for the worker. A frame that arrives before the worker has
-/// taken the last one replaces it, so the tracker always works on the freshest picture.
+
+
 pub struct Mailbox {
     slot: Mutex<Slot>,
     ready: Condvar,
@@ -23,7 +18,7 @@ pub struct Mailbox {
 #[derive(Default)]
 struct Slot {
     bytes: Vec<u8>,
-    /// 1 for grayscale, 3 for packed RGB.
+
     channels: usize,
     width: usize,
     height: usize,
@@ -34,7 +29,10 @@ struct Slot {
 
 impl Mailbox {
     pub fn new() -> Mailbox {
-        Mailbox { slot: Mutex::new(Slot::default()), ready: Condvar::new() }
+        Mailbox {
+            slot: Mutex::new(Slot::default()),
+            ready: Condvar::new(),
+        }
     }
 
     pub fn put(&self, bytes: &[u8], channels: usize, width: usize, height: usize, time_ms: f64) {
@@ -58,7 +56,7 @@ impl Mailbox {
         self.ready.notify_all();
     }
 
-    /// Blocks until a frame arrives, swapping it into `buffer`. `None` once stopped.
+
     fn take(&self, buffer: &mut Vec<u8>) -> Option<(usize, usize, usize, f64)> {
         let mut slot = self.slot.lock().unwrap();
         while !slot.filled && !slot.stop {
@@ -73,20 +71,24 @@ impl Mailbox {
     }
 }
 
-/// Motion keyed by the wall clock instant it arrived, read by the tick thread some lag
-/// behind now. Kept apart from the tracker itself so the tick thread never waits on a frame
-/// being processed.
+
+
+
+
 pub struct Timeline {
     pub active: bool,
     points: VecDeque<(Instant, Motion)>,
 }
 
-/// How much is kept, so any offset an axis is likely to carry can be read back.
+
 const KEEP: Duration = Duration::from_secs(5);
 
 impl Timeline {
     pub fn new() -> Timeline {
-        Timeline { active: false, points: VecDeque::new() }
+        Timeline {
+            active: false,
+            points: VecDeque::new(),
+        }
     }
 
     pub fn clear(&mut self) {
@@ -100,8 +102,8 @@ impl Timeline {
         }
     }
 
-    /// The tracked motion `lag_ms` ago, by linear interpolation. `None` before the first
-    /// frame or once frames have stopped arriving.
+
+
     pub fn value_at(&self, now: Instant, lag_ms: f64) -> Option<Motion> {
         let last = *self.points.back()?;
         if now.duration_since(last.0) > Duration::from_millis(STALE_MS) {
@@ -120,25 +122,39 @@ impl Timeline {
             let (b, vb) = self.points[i];
             if a <= target && target < b {
                 let span = b.duration_since(a).as_secs_f64();
-                let u = if span > 0.0 { target.duration_since(a).as_secs_f64() / span } else { 0.0 };
+                let u = if span > 0.0 {
+                    target.duration_since(a).as_secs_f64() / span
+                } else {
+                    0.0
+                };
                 return Some(std::array::from_fn(|i| va[i] + (vb[i] - va[i]) * u));
             }
         }
         Some(last.1)
     }
 
-    /// Frame rate measured from the arrivals still in the timeline.
+
     pub fn fps(&self) -> f64 {
         if self.points.len() < 2 {
             return 0.0;
         }
-        let span = self.points.back().unwrap().0.duration_since(self.points.front().unwrap().0).as_secs_f64();
-        if span > 0.0 { (self.points.len() - 1) as f64 / span } else { 0.0 }
+        let span = self
+            .points
+            .back()
+            .unwrap()
+            .0
+            .duration_since(self.points.front().unwrap().0)
+            .as_secs_f64();
+        if span > 0.0 {
+            (self.points.len() - 1) as f64 / span
+        } else {
+            0.0
+        }
     }
 }
 
-/// A running tracker: the worker thread plus the tracker it owns. The tracker outlives a
-/// stop so the host can still read the samples and save a funscript.
+
+
 pub struct Track {
     pub tracker: Arc<Mutex<Tracker>>,
     pub mailbox: Arc<Mailbox>,
@@ -147,10 +163,17 @@ pub struct Track {
 }
 
 impl Track {
-    /// Spawns the worker; `on_sample` hands each new position to the timeline, `on_frame` gets
-    /// every colour frame after the tracker has seen it, with its media time and the tracker's
-    /// cut count, for the detector and the Hero watcher.
-    pub fn start(options: TrackOptions, on_sample: impl Fn(Sample) + Send + 'static, on_frame: impl Fn(&[u8], usize, usize, f64, u64) + Send + 'static) -> Track {
+
+
+
+
+
+    pub fn start(
+        options: TrackOptions,
+        on_sample: impl Fn(Sample) + Send + 'static,
+        on_frame: impl Fn(&[u8], usize, usize, f64, u64) + Send + 'static,
+        mut on_tracked: impl FnMut(&Tracker, Option<Sample>, &[u8], usize, usize, f64) + Send + 'static,
+    ) -> Track {
         let tracker = Arc::new(Mutex::new(Tracker::new(options)));
         let mailbox = Arc::new(Mailbox::new());
         let thread = {
@@ -169,7 +192,9 @@ impl Track {
                         };
                         let (sample, cuts) = {
                             let mut t = tracker.lock().unwrap();
-                            (t.push(plane, w, h, time_ms), t.cuts())
+                            let sample = t.push(plane, w, h, time_ms);
+                            on_tracked(&t, sample, plane, w, h, time_ms);
+                            (sample, t.cuts())
                         };
                         if let Some(s) = sample {
                             on_sample(s);
@@ -181,7 +206,12 @@ impl Track {
                 })
                 .ok()
         };
-        Track { tracker, mailbox, thread, active: true }
+        Track {
+            tracker,
+            mailbox,
+            thread,
+            active: true,
+        }
     }
 
     pub fn stop(&mut self) {
@@ -193,10 +223,14 @@ impl Track {
     }
 }
 
-/// Rec. 601 luma from packed RGB, into a reused buffer.
+
 pub(crate) fn to_gray(rgb: &[u8], width: usize, height: usize, out: &mut Vec<u8>) {
     let n = width * height;
     out.clear();
     out.reserve(n);
-    out.extend(rgb.chunks_exact(3).take(n).map(|p| ((p[0] as u32 * 77 + p[1] as u32 * 150 + p[2] as u32 * 29) >> 8) as u8));
+    out.extend(
+        rgb.chunks_exact(3)
+            .take(n)
+            .map(|p| ((p[0] as u32 * 77 + p[1] as u32 * 150 + p[2] as u32 * 29) >> 8) as u8),
+    );
 }

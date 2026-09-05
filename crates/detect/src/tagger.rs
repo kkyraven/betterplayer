@@ -1,14 +1,9 @@
-//! Image tagger: SmilingWolf's WD tagger (a ViT trained on Danbooru tags) run through ONNX
-//! Runtime on a few stills of a video. The model takes a batch of 448 by 448 BGR images as
-//! float 0..255 and answers one probability per tag; the host owns the tag list, the
-//! threshold and which stills to use. Weights are downloaded and verified by the host.
-
 use std::path::Path;
 
 use ort::session::{Session, builder::GraphOptimizationLevel};
 use ort::value::TensorRef;
 
-/// Square input size the WD v3 models were exported at.
+
 pub const INPUT: usize = 448;
 const CHANNELS: usize = 3;
 
@@ -20,9 +15,9 @@ pub struct Tagger {
 }
 
 impl Tagger {
-    /// Loads `path` on the CPU provider, on two threads: this is background work. CoreML rejects
-    /// the ViT's unbounded attention shapes and falls back per op, ending up no faster than the
-    /// CPU and much slower to load.
+
+
+
     pub fn load(path: &Path) -> Result<Tagger, String> {
         let builder = Session::builder()
             .and_then(|b| b.with_optimization_level(GraphOptimizationLevel::Level3))
@@ -35,8 +30,8 @@ impl Tagger {
         Ok(Tagger { session, input_name, output_name, input: Vec::new() })
     }
 
-    /// Runs every still (packed BGR, `INPUT` square, already padded by the host) as one batch
-    /// and returns each one's probabilities in the model's tag order.
+
+
     pub fn tag(&mut self, stills: &[&[u8]]) -> Result<Vec<Vec<f32>>, String> {
         let per_image = INPUT * INPUT * CHANNELS;
         if stills.is_empty() {

@@ -1,8 +1,3 @@
-//! Buttplug v3 client over WebSocket (Intiface Central at `ws://127.0.0.1:12345`).
-//! Stroke goes to every linear actuator, vibrate to every vibrator, twist to every
-//! rotator. Commands go out every 100 ms, the rate BLE toys cope with, with `LinearCmd`
-//! durations matching so motion stays continuous.
-
 use std::collections::VecDeque;
 use std::io::{self, ErrorKind};
 use std::net::TcpStream;
@@ -13,6 +8,7 @@ use serde_json::{Value, json};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 
+use crate::intiface;
 use crate::output::CONNECT_GLIDE_MS;
 use crate::tcode::AxisClamp;
 use crate::transport::{websocket, ws_send};
@@ -26,7 +22,7 @@ struct Device {
     vibrate: Vec<usize>,
     rotate: usize,
     last: [Option<u16>; 3],
-    /// A device's first `LinearCmd` glides over `CONNECT_GLIDE_MS`; no stroke is sent until then.
+
     glide_until: Option<Instant>,
 }
 
@@ -42,8 +38,8 @@ pub struct Buttplug {
 }
 
 impl Buttplug {
-    /// Connects, completes the handshake, asks for the device list and starts scanning.
-    /// Blocks up to a few seconds; call off the tick thread.
+
+
     pub fn connect(url: &str) -> io::Result<Buttplug> {
         let ws = websocket(url)?;
         let mut bp = Buttplug {
@@ -56,20 +52,35 @@ impl Buttplug {
             last_ping: Instant::now(),
             since_send_ms: 0.0,
         };
-        bp.send_msg("RequestServerInfo", json!({ "ClientName": "Better Player", "MessageVersion": 3 }))?;
+        bp.send_msg(
+            "RequestServerInfo",
+            json!({ "ClientName": "Better Player", "MessageVersion": 3 }),
+        )?;
         let deadline = Instant::now() + Duration::from_secs(3);
         let mut ready = false;
         while !ready {
             if Instant::now() > deadline {
-                return Err(io::Error::new(ErrorKind::TimedOut, "no ServerInfo from the Buttplug server"));
+                return Err(io::Error::new(
+                    ErrorKind::TimedOut,
+                    "no ServerInfo from the Buttplug server",
+                ));
             }
             for msg in bp.read_all()? {
                 if let Some(info) = msg.get("ServerInfo") {
+
+                    if info.get("ServerName").and_then(Value::as_str) == Some(intiface::SERVER_NAME) {
+                        return Err(io::Error::other("this is the app's own Intiface server"));
+                    }
                     let ms = info.get("MaxPingTime").and_then(Value::as_u64).unwrap_or(0);
                     bp.max_ping = Duration::from_millis(ms);
                     ready = true;
                 } else if let Some(e) = msg.get("Error") {
-                    return Err(io::Error::other(e.get("ErrorMessage").and_then(Value::as_str).unwrap_or("handshake refused").to_string()));
+                    return Err(io::Error::other(
+                        e.get("ErrorMessage")
+                            .and_then(Value::as_str)
+                            .unwrap_or("handshake refused")
+                            .to_string(),
+                    ));
                 }
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -94,7 +105,12 @@ impl Buttplug {
                         out.extend(msgs);
                     }
                 }
-                Ok(Message::Close(_)) => return Err(io::Error::new(ErrorKind::ConnectionAborted, "server closed")),
+                Ok(Message::Close(_)) => {
+                    return Err(io::Error::new(
+                        ErrorKind::ConnectionAborted,
+                        "server closed",
+                    ));
+                }
                 Ok(_) => {}
                 Err(tungstenite::Error::Io(e)) if e.kind() == ErrorKind::WouldBlock => break,
                 Err(e) => return Err(io::Error::new(ErrorKind::BrokenPipe, e.to_string())),
@@ -103,10 +119,14 @@ impl Buttplug {
         Ok(out)
     }
 
-    /// Reads device events and keeps the server's ping alive. Call every tick.
+
     pub fn poll(&mut self) -> io::Result<()> {
         for msg in self.read_all()? {
-            if let Some(list) = msg.get("DeviceList").and_then(|d| d.get("Devices")).and_then(Value::as_array) {
+            if let Some(list) = msg
+                .get("DeviceList")
+                .and_then(|d| d.get("Devices"))
+                .and_then(Value::as_array)
+            {
                 self.devices = list.iter().filter_map(parse_device).collect();
                 self.changed = true;
             } else if let Some(d) = msg.get("DeviceAdded") {
@@ -117,11 +137,17 @@ impl Buttplug {
                     self.changed = true;
                 }
             } else if let Some(d) = msg.get("DeviceRemoved") {
-                let index = d.get("DeviceIndex").and_then(Value::as_u64).unwrap_or(u64::MAX);
+                let index = d
+                    .get("DeviceIndex")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(u64::MAX);
                 self.devices.retain(|x| x.index != index);
                 self.changed = true;
             } else if let Some(e) = msg.get("Error") {
-                self.log.push_back(format!("error: {}", e.get("ErrorMessage").and_then(Value::as_str).unwrap_or("?")));
+                self.log.push_back(format!(
+                    "error: {}",
+                    e.get("ErrorMessage").and_then(Value::as_str).unwrap_or("?")
+                ));
             }
         }
         if !self.max_ping.is_zero() && self.last_ping.elapsed() > self.max_ping / 2 {
@@ -131,7 +157,7 @@ impl Buttplug {
         Ok(())
     }
 
-    /// True once after the device set changed.
+
     pub fn devices_changed(&mut self) -> bool {
         std::mem::take(&mut self.changed)
     }
@@ -140,7 +166,11 @@ impl Buttplug {
         if self.devices.is_empty() {
             "no devices".to_string()
         } else {
-            self.devices.iter().map(|d| d.name.as_str()).collect::<Vec<_>>().join(", ")
+            self.devices
+                .iter()
+                .map(|d| d.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         }
     }
 
@@ -148,9 +178,14 @@ impl Buttplug {
         self.log.drain(..).collect()
     }
 
-    /// Sends stroke, vibrate and twist to every device that changed. Returns whether
-    /// anything was sent this tick.
-    pub fn send(&mut self, values: &[f64; Axis::COUNT], clamps: &[AxisClamp; Axis::COUNT], interval_ms: u32) -> io::Result<bool> {
+
+
+    pub fn send(
+        &mut self,
+        values: &[f64; Axis::COUNT],
+        clamps: &[AxisClamp; Axis::COUNT],
+        interval_ms: u32,
+    ) -> io::Result<bool> {
         self.since_send_ms += interval_ms as f64;
         if self.since_send_ms < SEND_EVERY_MS {
             return Ok(false);
@@ -159,7 +194,9 @@ impl Buttplug {
         self.since_send_ms = 0.0;
         let clamped = |axis: Axis| {
             let c = clamps[axis.index()];
-            c.enabled.then(|| (c.min + values[axis.index()].clamp(0.0, 1.0) * (c.max - c.min)).clamp(0.0, 1.0))
+            c.enabled.then(|| {
+                (c.min + values[axis.index()].clamp(0.0, 1.0) * (c.max - c.min)).clamp(0.0, 1.0)
+            })
         };
         let stroke = clamped(Axis::L0);
         let vibrate = clamped(Axis::V0);
@@ -169,7 +206,10 @@ impl Buttplug {
         for d in &mut self.devices {
             let unit = |v: f64| (v * 1000.0).round() as u16;
             let gliding = d.glide_until.is_some_and(|t| now < t);
-            if let Some(v) = stroke.filter(|_| d.linear > 0 && !gliding).filter(|v| d.last[0] != Some(unit(*v))) {
+            if let Some(v) = stroke
+                .filter(|_| d.linear > 0 && !gliding)
+                .filter(|v| d.last[0] != Some(unit(*v)))
+            {
                 let duration = if d.last[0].is_none() {
                     d.glide_until = Some(now + Duration::from_millis(CONNECT_GLIDE_MS as u64));
                     CONNECT_GLIDE_MS as u64
@@ -177,19 +217,42 @@ impl Buttplug {
                     duration
                 };
                 d.last[0] = Some(unit(v));
-                let vectors: Vec<Value> = (0..d.linear).map(|i| json!({ "Index": i, "Duration": duration, "Position": v })).collect();
-                batch.push(("LinearCmd", json!({ "DeviceIndex": d.index, "Vectors": vectors })));
+                let vectors: Vec<Value> = (0..d.linear)
+                    .map(|i| json!({ "Index": i, "Duration": duration, "Position": v }))
+                    .collect();
+                batch.push((
+                    "LinearCmd",
+                    json!({ "DeviceIndex": d.index, "Vectors": vectors }),
+                ));
             }
-            if let Some(v) = vibrate.filter(|_| !d.vibrate.is_empty()).filter(|v| d.last[1] != Some(unit(*v))) {
+            if let Some(v) = vibrate
+                .filter(|_| !d.vibrate.is_empty())
+                .filter(|v| d.last[1] != Some(unit(*v)))
+            {
                 d.last[1] = Some(unit(v));
-                let scalars: Vec<Value> = d.vibrate.iter().map(|i| json!({ "Index": i, "Scalar": v, "ActuatorType": "Vibrate" })).collect();
-                batch.push(("ScalarCmd", json!({ "DeviceIndex": d.index, "Scalars": scalars })));
+                let scalars: Vec<Value> = d
+                    .vibrate
+                    .iter()
+                    .map(|i| json!({ "Index": i, "Scalar": v, "ActuatorType": "Vibrate" }))
+                    .collect();
+                batch.push((
+                    "ScalarCmd",
+                    json!({ "DeviceIndex": d.index, "Scalars": scalars }),
+                ));
             }
-            if let Some(v) = twist.filter(|_| d.rotate > 0).filter(|v| d.last[2] != Some(unit(*v))) {
+            if let Some(v) = twist
+                .filter(|_| d.rotate > 0)
+                .filter(|v| d.last[2] != Some(unit(*v)))
+            {
                 d.last[2] = Some(unit(v));
                 let speed = ((v - 0.5).abs() * 2.0).min(1.0);
-                let rotations: Vec<Value> = (0..d.rotate).map(|i| json!({ "Index": i, "Speed": speed, "Clockwise": v >= 0.5 })).collect();
-                batch.push(("RotateCmd", json!({ "DeviceIndex": d.index, "Rotations": rotations })));
+                let rotations: Vec<Value> = (0..d.rotate)
+                    .map(|i| json!({ "Index": i, "Speed": speed, "Clockwise": v >= 0.5 }))
+                    .collect();
+                batch.push((
+                    "RotateCmd",
+                    json!({ "DeviceIndex": d.index, "Rotations": rotations }),
+                ));
             }
         }
         if batch.is_empty() {
@@ -232,7 +295,15 @@ fn parse_device(v: &Value) -> Option<Device> {
                 .collect()
         })
         .unwrap_or_default();
-    Some(Device { index, name, linear: count("LinearCmd"), vibrate, rotate: count("RotateCmd"), last: [None; 3], glide_until: None })
+    Some(Device {
+        index,
+        name,
+        linear: count("LinearCmd"),
+        vibrate,
+        rotate: count("RotateCmd"),
+        last: [None; 3],
+        glide_until: None,
+    })
 }
 
 #[cfg(test)]
@@ -250,7 +321,22 @@ mod tests {
             }
         });
         let d = parse_device(&v).unwrap();
-        assert_eq!((d.index, d.name.as_str(), d.linear, d.rotate), (2, "Kiiroo Keon", 1, 0));
+        assert_eq!(
+            (d.index, d.name.as_str(), d.linear, d.rotate),
+            (2, "Kiiroo Keon", 1, 0)
+        );
         assert_eq!(d.vibrate, vec![0]);
+    }
+
+    #[test]
+    fn refuses_the_apps_own_intiface_server() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let _server = intiface::IntifaceServer::start(port).unwrap();
+        let err = Buttplug::connect(&format!("ws://127.0.0.1:{port}")).err().unwrap();
+        assert!(err.to_string().contains("own Intiface server"), "{err}");
     }
 }

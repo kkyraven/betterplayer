@@ -1,22 +1,17 @@
-//! Offscreen GL context for the render thread. No window, no main thread requirement.
-//! macOS uses CGL directly; Windows uses ANGLE's D3D11 backend through EGL (see
-//! `windows/egl.rs`), which is what libmpv's zero-copy D3D11 interop and the `d3d11vpp`
-//! filter need. Linux (surfaceless EGL) comes when that machine is available.
-
 use std::ffi::{CStr, c_void};
 
 pub struct GlContext {
-    /// Kept alive for its Drop; the context stays current on the render thread.
+
     ctx: platform::Context,
 }
 
 impl GlContext {
-    /// Creates a context and makes it current on the calling thread.
+
     pub fn new() -> Result<GlContext, String> {
         Ok(GlContext { ctx: platform::Context::new()? })
     }
 
-    /// Symbol lookup for both the `gl` crate and mpv.
+
     pub fn get_proc_address(&self, name: &CStr) -> *mut c_void {
         self.ctx.get_proc_address(name)
     }
@@ -52,7 +47,7 @@ mod platform {
 
     pub struct Context {
         ctx: CGLContextObj,
-        /// The OpenGL framework, for symbol lookup.
+
         lib: *mut c_void,
     }
 

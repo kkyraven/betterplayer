@@ -1,23 +1,10 @@
-//! Live motion tracker: optical flow inside a region of a video frame, decomposed into six
-//! motion components and integrated into positions (PLAN §6, Phase 4b). Flow only, no
-//! detector: the region is user-picked, the centre of the frame, or whatever the host's
-//! detector hands in through `set_region`.
-//!
-//! One `push` per frame. Sparse pyramidal Lucas-Kanade on a fixed grid gives a displacement
-//! per point. Stroke and sway are the magnitude-weighted medians of the vertical and horizontal
-//! displacement, which follow the fastest-moving mass rather than the average of everything in
-//! the region. A robust weighted affine fit of the same field (`dx = a + b·u + c·v`,
-//! `dy = d + e·u + f·v` over region-normalised coordinates) yields divergence (surge), curl
-//! (roll), differential stretch (pitch) and shear (twist). Each component is integrated,
-//! high-passed, normalised to its recent p10..p90 span, smoothed and soft limited into 0..1.
-
 mod flow;
 
 use std::collections::VecDeque;
 
 use flow::Pyramid;
 
-/// A rectangle of the frame in 0..1, top-left origin.
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Region {
     pub x: f64,
@@ -27,7 +14,7 @@ pub struct Region {
 }
 
 impl Default for Region {
-    /// The centre 60 percent by 60 percent, used when the user has not picked one.
+
     fn default() -> Region {
         Region { x: 0.2, y: 0.2, w: 0.6, h: 0.6 }
     }
@@ -41,21 +28,21 @@ impl Region {
     }
 }
 
-/// Tunables the host can change while tracking.
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TrackOptions {
-    /// Scale on the per-frame pixel displacement before integration.
+
     pub sensitivity: f64,
-    /// Mean absolute frame difference, 0..255, that counts as a scene cut. Lower is touchier.
+
     pub cut_threshold: f64,
-    /// After a cut (or a region change) the output holds and eases into the new signal over this long.
+
     pub ease_ms: f64,
-    /// Time constant of the output smoothing per component, in `Motion` order; 0 turns it off.
+
     pub smoothing_ms: [f64; Component::COUNT],
-    /// Bounce at the bottom of a stroke that dips past the usual bottom, more the deeper it goes.
+
     pub flourishes: bool,
-    /// Clamp a per-frame signal far larger than the recent motion (a camera move, a crash zoom)
-    /// instead of integrating it.
+
+
     pub clamp_jumps: bool,
 }
 
@@ -65,20 +52,20 @@ impl Default for TrackOptions {
     }
 }
 
-/// The six motion components a flow field decomposes into, in `Motion` order.
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Component {
-    /// Vertical translation. Down on screen is toward 0.
+
     Stroke,
-    /// Horizontal translation.
+
     Sway,
-    /// Divergence: the picture growing or shrinking.
+
     Surge,
-    /// Curl: rotation in the picture plane.
+
     Roll,
-    /// Vertical stretch against horizontal: a tilt toward the camera.
+
     Pitch,
-    /// Shear.
+
     Twist,
 }
 
@@ -102,11 +89,11 @@ impl Component {
     }
 }
 
-/// One position per component, 0..1, in `Component::ALL` order.
+
 pub type Motion = [f64; Component::COUNT];
 
-/// One tracked frame keyed by the source's media time. `pos` is the stroke, kept beside the
-/// full motion for hosts that only want one number.
+
+
 #[derive(Clone, Copy, Debug)]
 pub struct Sample {
     pub time_ms: f64,
@@ -114,8 +101,8 @@ pub struct Sample {
     pub motion: Motion,
 }
 
-/// Idle before the first frame, Locating while warming up or short of texture, Tracking once
-/// the position means something.
+
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Idle,
@@ -133,49 +120,49 @@ impl Phase {
     }
 }
 
-/// Grid points across the region.
+
 const GRID_X: usize = 16;
 const GRID_Y: usize = 12;
-/// Frames of rolling mean subtracted from the integrator to remove drift.
+
 const DRIFT_FRAMES: usize = 90;
-/// Frames the p10..p90 amplitude window looks back over.
+
 const SPAN_FRAMES: usize = 180;
-/// Frames before the span window is trusted over the fixed fallback.
+
 const SPAN_MIN: usize = 30;
-/// Integrator units the fixed fallback span covers.
+
 const FIXED_SPAN: f64 = 24.0;
-/// Smallest p10..p90 span, in integrator units, the normaliser will stretch to full range. A
-/// component that is not really moving stays near the middle instead of amplifying noise.
+
+
 const MIN_SPAN: f64 = 8.0;
-/// Default output smoothing time constant. The output reaches 63% of a step in this long.
+
 pub const SMOOTHING_MS: f64 = 100.0;
-/// Default smoothing on surge, sway, roll and pitch, where detection jitter shows most.
+
 pub const SMOOTHING_SIDE_MS: f64 = 300.0;
-/// Frames after a start or a cut before the tracker calls itself locked on.
+
 const WARMUP_FRAMES: u64 = 15;
-/// The flourish: two bounces from the bottom, this high at full strength, one leg each way per
-/// bounce. Traced from a hand-made script's hard downstrokes.
+
+
 const FLOURISH_BOUNCES: [f64; 2] = [0.58, 0.40];
 const FLOURISH_LEG_MS: f64 = 97.0;
-/// A trough this far past the recent bottom, as a fraction of the stroke span, is a full-strength
-/// flourish; it scales down from there and does not fire under `FLOURISH_MIN`.
+
+
 const FLOURISH_FULL: f64 = 0.5;
 const FLOURISH_MIN: f64 = 0.08;
-/// Fraction of grid points that must have texture to leave Locating.
+
 const MIN_TEXTURED: f64 = 0.2;
-/// Mean absolute frame difference, 0..255, that counts as a scene cut by default.
+
 pub const CUT_DIFF: f64 = 18.0;
-/// Luma histogram distance (0..1) a frame difference also needs before it counts as a cut,
-/// so a big fast motion inside one shot is not mistaken for one.
+
+
 const CUT_HIST: f32 = 0.2;
-/// The scene cut test: the picture has to change in content, not only move.
+
 fn is_cut(prev: &Pyramid, curr: &Pyramid, threshold: f64) -> bool {
     flow::mean_abs_diff(prev.cut_level(), curr.cut_level()) as f64 > threshold
         && flow::histogram_distance(&flow::histogram(prev.cut_level()), &flow::histogram(curr.cut_level())) > CUT_HIST
 }
 
-/// Scene cuts on their own, the same test the tracker runs, for a host that wants them while
-/// no tracker is running.
+
+
 pub struct CutDetector {
     prev: Pyramid,
     curr: Pyramid,
@@ -193,8 +180,8 @@ impl CutDetector {
         CutDetector { prev: Pyramid::new(4), curr: Pyramid::new(4), primed: false }
     }
 
-    /// Feeds a grayscale frame; true when it is a cut from the previous one. The first frame
-    /// after `new` or `reset` never is.
+
+
     pub fn push(&mut self, gray: &[u8], w: usize, h: usize) -> bool {
         std::mem::swap(&mut self.prev, &mut self.curr);
         self.curr.fill(gray, w, h);
@@ -205,38 +192,38 @@ impl CutDetector {
         is_cut(&self.prev, &self.curr, CUT_DIFF)
     }
 
-    /// Forgets the previous frame, for a gap (a seek, a pause) that would read as a cut.
+
     pub fn reset(&mut self) {
         self.primed = false;
     }
 }
 
-/// A per-frame signal past this many times the recent peak, plus the floor in pixels, is a jump.
-/// Real strokes are impulsive (a fast thrust, a slow return), so the reference is a decaying
-/// peak rather than a mean, which a stroke reversal would trip.
+
+
+
 const JUMP_FACTOR: f64 = 2.5;
 const JUMP_FLOOR: f64 = 4.0;
-/// Per-frame decay of the peak the jump clamp compares against, about two seconds at 30 fps.
+
 const PEAK_DECAY: f64 = 0.985;
-/// Frame interval assumed when a frame has no predecessor to time against.
+
 const DEFAULT_DT_MS: f64 = 33.0;
-/// Rolling flow error above which a point is treated as an outlier and dropped.
+
 const MAX_ERROR: f32 = 30.0;
-/// Textured points the affine fit needs before it is trusted.
+
 const MIN_FIT_POINTS: usize = 6;
-/// Median residual, in pixels, past which the flow field is not one motion at all (the flow
-/// lost the picture, or two things move their own way) and the frame is dropped.
+
+
 const MAX_RESIDUAL: f64 = 4.0;
-/// Seconds of trace the host draws.
+
 const TRACE_MS: f64 = 2000.0;
-/// Samples held before the older ones are thinned.
+
 const SAMPLE_CAP: usize = 300_000;
-/// Everything older than this is thinned to `THIN_STEP_MS` spacing.
+
 const THIN_TAIL_MS: f64 = 60_000.0;
 const THIN_STEP_MS: f64 = 100.0;
 
-/// One point of the flow field in region-normalised coordinates: `u`, `v` in -1..1, the
-/// displacement in level-0 pixels, and a weight.
+
+
 #[derive(Clone, Copy, Debug)]
 struct Point {
     u: f64,
@@ -246,10 +233,10 @@ struct Point {
     w: f64,
 }
 
-/// One grid point of the last pushed frame, as the flow saw it. `u`, `v` are the point's
-/// position in frame pixels, `dx`, `dy` its displacement since the previous frame in the same
-/// pixels, `err` the mean absolute residual after the last Lucas-Kanade iteration (0..255) and
-/// `textured` 1 when the point sits on enough structure for the flow to mean anything.
+
+
+
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FlowPoint {
     pub u: f32,
@@ -260,20 +247,20 @@ pub struct FlowPoint {
     pub textured: f32,
 }
 
-/// Integrate, detrend, normalise, smooth: one per component.
+
 struct Chain {
     level: f64,
     drift: VecDeque<f64>,
     drift_sum: f64,
     span: VecDeque<f64>,
-    /// Last normalised value before smoothing and limiting; below 0 is past the recent bottom.
+
     normalised: f64,
     smooth: f64,
-    /// Last output, so a restart knows where to hold.
+
     out: f64,
-    /// Output held at the last restart and how far the ease from it has run.
+
     held: Option<(f64, f64)>,
-    /// Decaying peak of the absolute signal, for the jump clamp.
+
     peak: f64,
 }
 
@@ -282,7 +269,7 @@ impl Chain {
         Chain { level: 0.0, drift: VecDeque::new(), drift_sum: 0.0, span: VecDeque::new(), normalised: 0.5, smooth: 0.5, out: 0.5, held: None, peak: 0.0 }
     }
 
-    /// Clamps a signal far past the recent peak. Returns whether it did.
+
     fn clamp_jump(&self, signal: &mut f64) -> bool {
         let limit = JUMP_FACTOR * self.peak + JUMP_FLOOR;
         if signal.abs() > limit {
@@ -292,9 +279,9 @@ impl Chain {
         false
     }
 
-    /// Adds one frame's signal and returns the position, 0..1, smoothed with a first-order
-    /// filter of time constant `smoothing_ms`. After a restart the output eases from where it
-    /// was held into the new signal over `ease_ms`.
+
+
+
     fn push(&mut self, signal: f64, dt_ms: f64, smoothing_ms: f64, ease_ms: f64, sorted: &mut Vec<f64>) -> f64 {
         self.peak = signal.abs().max(self.peak * PEAK_DECAY);
         self.level += signal;
@@ -316,7 +303,7 @@ impl Chain {
         self.out
     }
 
-    /// High-pass: the integrator minus its rolling mean.
+
     fn detrend(&mut self, level: f64) -> f64 {
         self.drift.push_back(level);
         self.drift_sum += level;
@@ -326,8 +313,8 @@ impl Chain {
         level - self.drift_sum / self.drift.len() as f64
     }
 
-    /// Maps the recent p10..p90 span, centred on its midpoint and never narrower than
-    /// `MIN_SPAN`, onto 0..1; a fixed span until there is enough history.
+
+
     fn normalise(&mut self, detrended: f64, sorted: &mut Vec<f64>) -> f64 {
         self.span.push_back(detrended);
         if self.span.len() > SPAN_FRAMES {
@@ -345,8 +332,8 @@ impl Chain {
         0.5 + detrended / FIXED_SPAN
     }
 
-    /// Drops the integrator and the rolling windows and holds the output where it is; the next
-    /// pushes ease into the new signal.
+
+
     fn restart(&mut self) {
         self.level = 0.0;
         self.drift.clear();
@@ -359,18 +346,18 @@ impl Chain {
     }
 }
 
-/// Watches the stroke for a trough past the usual bottom and plays the bounces after it.
+
 #[derive(Default)]
 struct Flourish {
-    /// Lowest normalised value since the stroke last left the lower half, and whether the
-    /// bounces have already played for it.
+
+
     low: Option<(f64, bool)>,
-    /// Strength and time into the bounces while they play.
+
     playing: Option<(f64, f64)>,
 }
 
 impl Flourish {
-    /// The offset to add to the stroke this frame.
+
     fn push(&mut self, normalised: f64, dt_ms: f64) -> f64 {
         if normalised > 0.5 {
             self.low = None;
@@ -409,20 +396,20 @@ pub struct Tracker {
     curr: Pyramid,
     have_prev: bool,
     size: (usize, usize),
-    /// Grid points in frame pixels, rebuilt when the region or the frame size changes.
+
     points: Vec<(f32, f32)>,
-    /// Per-point rolling flow error; a point that stays wrong stops contributing.
+
     errors: Vec<f32>,
-    /// Scratch for the affine fit.
+
     field: Vec<Point>,
-    /// Every grid point of the last pushed frame, in `points` order.
+
     grid: Vec<FlowPoint>,
-    /// The last frame's six raw component signals, before sensitivity and the chains.
+
     signals: Motion,
-    /// Scratch for the p10..p90 windows and the residual median.
+
     sorted: Vec<f64>,
     frames: u64,
-    /// Frames since the last start or scene cut.
+
     since_cut: u64,
     cuts: u64,
     jumps: u64,
@@ -466,7 +453,7 @@ impl Tracker {
         }
     }
 
-    /// `None` means the centre 60 percent by 60 percent. Changing it restarts the signal.
+
     pub fn set_region(&mut self, region: Option<Region>) {
         let region = region.map(Region::clamped);
         if self.region != region {
@@ -492,26 +479,26 @@ impl Tracker {
         self.phase
     }
 
-    /// Newest stroke position, 0..1.
+
     pub fn position(&self) -> f64 {
         self.motion[Component::Stroke.index()]
     }
 
-    /// Newest position per component.
+
     pub fn motion(&self) -> Motion {
         self.motion
     }
 
-    /// The whole flow field of the last pushed frame: `GRID_X * GRID_Y` points across the
-    /// region, row-major, in the order `build_points` laid them out. Displacements are zero on
-    /// a frame the flow could not run on (the first one, and the first after a scene cut).
+
+
+
     pub fn field(&self) -> &[FlowPoint] {
         &self.grid
     }
 
-    /// The last pushed frame's six raw component signals, in `Component::ALL` order, in pixels
-    /// at the region's edge: what the flow field decomposed into, before sensitivity, the jump
-    /// clamp and the integrator chains.
+
+
+
     pub fn signals(&self) -> Motion {
         self.signals
     }
@@ -520,29 +507,29 @@ impl Tracker {
         self.frames
     }
 
-    /// Scene cuts seen since the start.
+
     pub fn cuts(&self) -> u64 {
         self.cuts
     }
 
-    /// Frames on which a component's signal was clamped as a jump.
+
     pub fn jumps(&self) -> u64 {
         self.jumps
     }
 
-    /// Frames whose flow field no single motion explained, so the higher-order components got
-    /// nothing.
+
+
     pub fn drops(&self) -> u64 {
         self.drops
     }
 
-    /// Every sample since the tracker was created, in arrival order.
+
     pub fn samples(&self) -> &[Sample] {
         &self.samples
     }
 
-    /// Samples from `time_ms` onward. Stored in arrival order, so this walks back from the
-    /// newest rather than searching.
+
+
     pub fn samples_since(&self, time_ms: f64) -> &[Sample] {
         let mut i = self.samples.len();
         while i > 0 && self.samples[i - 1].time_ms >= time_ms {
@@ -551,7 +538,7 @@ impl Tracker {
         &self.samples[i..]
     }
 
-    /// The last two seconds, for the host's trace.
+
     pub fn trace(&self) -> &[Sample] {
         match self.samples.last() {
             Some(last) => self.samples_since(last.time_ms - TRACE_MS),
@@ -559,8 +546,8 @@ impl Tracker {
         }
     }
 
-    /// One frame, grayscale and row-major. Returns the motion for this frame, or `None` for
-    /// the first frame after a start when there is nothing to compare against.
+
+
     pub fn push(&mut self, gray: &[u8], width: usize, height: usize, time_ms: f64) -> Option<Sample> {
         if width < 16 || height < 16 || gray.len() < width * height {
             return None;
@@ -583,8 +570,8 @@ impl Tracker {
             return None;
         }
 
-        // A cut makes the flow between the two frames meaningless: drop the integrators and
-        // warm up again from this frame. The picture has to change in content, not only move.
+
+
         if is_cut(&self.prev, &self.curr, self.options.cut_threshold) {
             self.cuts += 1;
             self.restart();
@@ -624,8 +611,8 @@ impl Tracker {
         Some(sample)
     }
 
-    /// The six per-frame signals in pixels at the region's edge. Zero when too few points have
-    /// texture; the higher-order four are zero when no single motion explains the field.
+
+
     fn frame_signal(&mut self) -> [f64; Component::COUNT] {
         let (w, h) = self.size;
         let r = self.region.unwrap_or_default();
@@ -653,24 +640,24 @@ impl Tracker {
         if self.field.len() < MIN_FIT_POINTS {
             return out;
         }
-        // Down on screen is stroke down, so a positive vertical displacement lowers the level.
+
         out[Component::Stroke.index()] = -weighted_median(&mut self.field, |p| p.dy);
         out[Component::Sway.index()] = weighted_median(&mut self.field, |p| p.dx);
         let Some(a) = fit_affine(&mut self.field, &mut self.sorted) else {
             self.drops += 1;
             return out;
         };
-        // Half the region's size in pixels, so every component is in pixels at the edge.
+
         let s = (hw + hh) / 2.0;
         out[Component::Surge.index()] = (a.b + a.f) / 2.0 * s;
         out[Component::Roll.index()] = (a.e - a.c) / 2.0 * s;
-        // Scripted pitch runs the other way from the raw stretch on the clips checked (Pixie, Judy).
+
         out[Component::Pitch.index()] = (a.b - a.f) / 2.0 * s;
         out[Component::Twist.index()] = (a.c + a.e) / 2.0 * s;
         out
     }
 
-    /// Drops the integrators and the rolling windows, keeping the samples already collected.
+
     fn restart(&mut self) {
         for c in &mut self.chains {
             c.restart();
@@ -700,15 +687,15 @@ impl Tracker {
         self.clear_field();
     }
 
-    /// The grid at rest: every point in place with no displacement, and no signal.
+
     fn clear_field(&mut self) {
         self.grid.clear();
         self.grid.extend(self.points.iter().map(|&(u, v)| FlowPoint { u, v, ..FlowPoint::default() }));
         self.signals = [0.0; Component::COUNT];
     }
 
-    /// Keeps the last minute at full rate and thins everything older to 10 Hz, so hours of
-    /// tracking stay in a few megabytes.
+
+
     fn thin(&mut self) {
         let Some(last) = self.samples.last().copied() else { return };
         let cutoff = last.time_ms - THIN_TAIL_MS;
@@ -726,7 +713,7 @@ impl Tracker {
     }
 }
 
-/// The value of `key` with half the field's weight either side of it.
+
 fn weighted_median(field: &mut [Point], key: impl Fn(&Point) -> f64) -> f64 {
     field.sort_unstable_by(|a, b| key(a).total_cmp(&key(b)));
     let total: f64 = field.iter().map(|p| p.w).sum();
@@ -740,7 +727,7 @@ fn weighted_median(field: &mut [Point], key: impl Fn(&Point) -> f64) -> f64 {
     field.last().map_or(0.0, key)
 }
 
-/// `dx = a + b·u + c·v`, `dy = d + e·u + f·v`.
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Affine {
     a: f64,
@@ -751,14 +738,14 @@ struct Affine {
     f: f64,
 }
 
-/// Rounds the reweighting runs after the first plain fit.
+
 const FIT_ROUNDS: usize = 3;
 
-/// Weighted least squares over the field, then a few rounds with points far from the last
-/// fit down-weighted (Tukey's biweight on the residual against its median, so anything past
-/// three scales drops out), so a hand or a background patch moving its own way does not pull
-/// the whole fit. `None` with too few points, a degenerate spread, or a field no single
-/// motion explains.
+
+
+
+
+
 fn fit_affine(field: &mut [Point], sorted: &mut Vec<f64>) -> Option<Affine> {
     if field.len() < MIN_FIT_POINTS {
         return None;
@@ -789,7 +776,7 @@ fn residual(fit: &Affine, p: &Point) -> f64 {
     (rx * rx + ry * ry).sqrt()
 }
 
-/// One weighted normal-equation solve; the same 3x3 serves both rows of the fit.
+
 fn solve<'a>(points: impl Iterator<Item = (&'a Point, f64)>) -> Option<Affine> {
     let mut m = [[0.0f64; 3]; 3];
     let mut rx = [0.0f64; 3];
@@ -819,8 +806,8 @@ fn solve<'a>(points: impl Iterator<Item = (&'a Point, f64)>) -> Option<Affine> {
     Some(Affine { a: x[0], b: x[1], c: x[2], d: y[0], e: y[1], f: y[2] })
 }
 
-/// Identity across the middle, a tanh knee into 0 and 1 at the ends. Peaks past the
-/// normalised span compress instead of flattening against a hard clamp.
+
+
 fn soft_limit(x: f64) -> f64 {
     const KNEE: f64 = 0.15;
     if x > KNEE && x < 1.0 - KNEE {
@@ -836,8 +823,8 @@ fn soft_limit(x: f64) -> f64 {
 mod tests {
     use super::*;
 
-    /// A soft-edged textured rectangle over a static textured background, the stand-in for a
-    /// moving body part, centred on `(cx, cy)`.
+
+
     fn frame(w: usize, h: usize, cx: f64, cy: f64, out: &mut Vec<u8>) {
         out.clear();
         out.resize(w * h, 0);
@@ -847,9 +834,9 @@ mod tests {
                 let (fx, fy) = (x as f64, y as f64);
                 let bg = 110.0 + 40.0 * (fx * 0.21).sin() * (fy * 0.17).cos() + 25.0 * ((fx + fy) * 0.07).sin();
                 let (u, v) = (fx - cx, fy - cy);
-                // Fine and coarse detail, so every pyramid level sees structure.
+
                 let fg = 140.0 + 35.0 * (u * 0.31).sin() * (v * 0.29).cos() + 30.0 * (u * 0.07 + v * 0.05).sin();
-                // Soft edges over four pixels so the rectangle has no aliased boundary.
+
                 let mask = edge(rw / 2.0 - u.abs()) * edge(rh / 2.0 - v.abs());
                 out[y * w + x] = (bg + (fg - bg) * mask).clamp(0.0, 255.0) as u8;
             }
@@ -861,7 +848,7 @@ mod tests {
         t * t * (3.0 - 2.0 * t)
     }
 
-    /// A frame with nothing in common with `frame`, for the scene cut test.
+
     fn other_frame(w: usize, h: usize, out: &mut Vec<u8>) {
         out.clear();
         out.resize(w * h, 0);
@@ -873,7 +860,7 @@ mod tests {
         }
     }
 
-    /// Pearson correlation, for checking sign and phase without pinning exact values.
+
     fn correlation(a: &[f64], b: &[f64]) -> f64 {
         let n = a.len() as f64;
         let (ma, mb) = (a.iter().sum::<f64>() / n, b.iter().sum::<f64>() / n);
@@ -889,11 +876,11 @@ mod tests {
 
     const W: usize = 384;
     const H: usize = 216;
-    /// Frames per oscillation, roughly one stroke per second at 30 fps.
+
     const PERIOD: f64 = 30.0;
 
-    /// The rectangle oscillating along one axis: returns the tracker, its motion per frame and
-    /// the rectangle's offset per frame.
+
+
     fn oscillate(vertical: bool, frames: usize) -> (Tracker, Vec<Motion>, Vec<f64>) {
         let mut t = Tracker::new(TrackOptions::default());
         let mut buf = Vec::new();
@@ -918,11 +905,11 @@ mod tests {
     fn follows_the_moving_rectangle() {
         let (t, motion, down) = oscillate(true, 200);
         assert_eq!(t.phase(), Phase::Tracking);
-        // Skip the warm-up while the span window fills.
+
         let pos = &component(&motion, Component::Stroke)[60..];
         let down = &down[60..];
         assert!(swing(pos) > 0.3, "position should swing with the rectangle: {}", swing(pos));
-        // Down on screen is toward 0, so the position runs against the rectangle's y.
+
         let corr = correlation(pos, down);
         assert!(corr < -0.8, "position should follow the rectangle inverted: {corr}");
     }
@@ -955,7 +942,7 @@ mod tests {
             }
         };
         close(fit_affine(&mut field.clone(), &mut Vec::new()).unwrap(), 1e-6);
-        // A patch of outliers moving its own way must not drag the fit.
+
         for p in field.iter_mut().take(20) {
             p.dx += 30.0;
             p.dy -= 25.0;
@@ -969,7 +956,7 @@ mod tests {
         let mut buf = Vec::new();
         frame(W, H, W as f64 / 2.0, H as f64 / 2.0, &mut buf);
         t.push(&buf, W, H, 0.0);
-        // The first frame has nothing to compare against: the grid is in place and still.
+
         assert_eq!(t.field().len(), GRID_X * GRID_Y);
         assert!(t.field().iter().all(|p| p.dx == 0.0 && p.dy == 0.0));
         assert_eq!(t.signals(), [0.0; Component::COUNT]);
@@ -979,7 +966,7 @@ mod tests {
         assert_eq!(t.field().len(), GRID_X * GRID_Y);
         let inside = t.field().iter().filter(|p| p.textured > 0.0 && p.dy > 3.0).count();
         assert!(inside > 20, "the moved rectangle should show in the field: {inside} points");
-        // Down on screen is toward 0, so a rectangle moving down gives a negative stroke signal.
+
         assert!(t.signals()[Component::Stroke.index()] < -1.0, "stroke signal {:?}", t.signals());
     }
 
@@ -1028,13 +1015,13 @@ mod tests {
         assert_eq!(t.phase(), Phase::Locating);
     }
 
-    /// After a cut the output holds and eases toward the new scene's rest instead of stepping.
+
     #[test]
     fn a_scene_cut_eases_instead_of_stepping() {
         let mut t = Tracker::new(TrackOptions::default());
         let mut buf = Vec::new();
         let mut last = 0.5;
-        // Stop at the top of a stroke so there is somewhere to ease from.
+
         for i in 0..68 {
             let cy = H as f64 / 2.0 + 25.0 * (i as f64 / PERIOD * std::f64::consts::TAU).sin();
             frame(W, H, W as f64 / 2.0, cy, &mut buf);
@@ -1058,15 +1045,15 @@ mod tests {
         assert!((prev - 0.5).abs() < 0.05, "a still scene rests at the middle after the ease: {prev}");
     }
 
-    /// One frame where the rectangle leaps more than ten times its usual per-frame motion: the
-    /// stroke is clamped to a fraction of the leap, and the higher-order components do not run away.
+
+
     #[test]
     fn a_sudden_jump_is_clamped() {
         let run = |clamp: bool| {
             let mut t = Tracker::new(TrackOptions { clamp_jumps: clamp, ..TrackOptions::default() });
             let mut buf = Vec::new();
             let (mut before, mut after) = ([0.5; Component::COUNT], [0.5; Component::COUNT]);
-            // A gentle stroke (about 2 px a frame at its fastest), then a leap of 25 px.
+
             for i in 0..92 {
                 let mut cy = H as f64 / 2.0 + 10.0 * (i as f64 / PERIOD * std::f64::consts::TAU).sin();
                 if i >= 90 {
@@ -1095,12 +1082,12 @@ mod tests {
         }
     }
 
-    /// A stroke twice as deep as the ones before it bounces twice at the bottom; the usual
-    /// strokes, and any stroke with flourishes off, rise straight back up.
+
+
     #[test]
     fn a_deep_stroke_bounces_at_the_bottom() {
-        // Half strokes of 10 px each way, then one trough at 20 px (down on screen is toward 0)
-        // with a slow rise after it.
+
+
         let mut keys: Vec<(f64, f64)> = vec![(0.0, 0.0)];
         let (mut f, mut v) = (8.0, 10.0);
         while f < 240.0 {
@@ -1126,14 +1113,14 @@ mod tests {
             let peaks = |from: usize, to: usize| {
                 pos.windows(3).filter(|w| (from..to).contains(&w[1].0) && w[1].1 > w[0].1 + 0.01 && w[1].1 > w[2].1 + 0.01).count()
             };
-            // After a usual trough (frame 128) and after the deep one (frame 158).
+
             (peaks(129, 142), peaks(159, 173))
         };
         assert_eq!(bumps(true), (0, 2), "two bounces after the deep trough only");
         assert_eq!(bumps(false), (0, 0), "no bounces with flourishes off");
     }
 
-    /// The whole rectangle leaping a third of the frame moves a lot of pixels but is not a cut.
+
     #[test]
     fn a_big_move_is_not_a_cut() {
         let mut t = Tracker::new(TrackOptions::default());
@@ -1157,7 +1144,7 @@ mod tests {
         assert!(trace.len() <= 61 && !trace.is_empty(), "two seconds at 30 fps: {}", trace.len());
     }
 
-    /// Not an assertion, a measurement: per-frame cost at the size the browser preload sends.
+
     #[test]
     fn per_frame_cost() {
         let mut t = Tracker::new(TrackOptions::default());

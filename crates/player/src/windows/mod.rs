@@ -1,5 +1,3 @@
-//! Windows only: the ANGLE context, the GPU probe and the NvOFFRUC bindings.
-
 pub mod egl;
 pub mod fruc;
 pub mod probe;
@@ -12,7 +10,7 @@ use windows::core::PCWSTR;
 
 use crate::enhance::EnhanceCapabilities;
 
-/// The folder this addon was loaded from, where optional DLLs are looked for first.
+
 pub fn module_dir() -> Option<PathBuf> {
     unsafe {
         let mut module = HMODULE::default();
@@ -27,8 +25,8 @@ pub fn module_dir() -> Option<PathBuf> {
     }
 }
 
-/// What this GPU offers: VSR on an NVIDIA card with a new enough driver; frame generation
-/// once the DLL is present and the D3D11 render path exists (it does not yet).
+
+
 pub fn capabilities() -> EnhanceCapabilities {
     let gpu = match probe::gpu() {
         Ok(g) => g,
@@ -45,5 +43,5 @@ pub fn capabilities() -> EnhanceCapabilities {
         Ok(()) => "frame generation needs the D3D11 render path, not built yet".to_string(),
         Err(_) => format!("{} not found next to the engine", fruc::DLL),
     };
-    EnhanceCapabilities { vsr: true, frame_gen: false, vsr_reason: None, frame_gen_reason: Some(frame_gen_reason), gpu: Some(gpu.name) }
+    EnhanceCapabilities { vsr: true, vsr_reason: None, gpu: Some(gpu.name), ..EnhanceCapabilities::none(&frame_gen_reason) }
 }

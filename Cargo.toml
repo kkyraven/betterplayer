@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/player", "crates/devices", "crates/script", "crates/axes", "crates/tracking", "crates/detect", "crates/beat", "crates/hero", "crates/core", "crates/napi"]
+members = ["crates/player", "crates/devices", "crates/script", "crates/axes", "crates/tracking", "crates/detect", "crates/beat", "crates/model", "crates/hero", "crates/core", "crates/napi"]
 
 [workspace.package]
 edition = "2024"
@@ -18,6 +18,7 @@ bp-axes = { path = "crates/axes" }
 bp-tracking = { path = "crates/tracking" }
 bp-detect = { path = "crates/detect" }
 bp-beat = { path = "crates/beat" }
+bp-model = { path = "crates/model" }
 bp-hero = { path = "crates/hero" }
 bp-core = { path = "crates/core" }
 

@@ -11,6 +11,7 @@ libc = "0.2"
 
 [build-dependencies]
 pkg-config = "0.3"
+cc = "1"
 
 # Windows: DXGI for the GPU probe and the addon path, libloading for ANGLE and NvOFFRUC.
 [target.'cfg(windows)'.dependencies]

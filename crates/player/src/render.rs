@@ -1,6 +1,3 @@
-//! The render thread: owns the GL context and the mpv render context, renders each new
-//! video frame into an FBO at output size and reads it back into the shared frame slots.
-
 use std::collections::VecDeque;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
@@ -17,32 +14,34 @@ use crate::stats::RenderStats;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RenderConfig {
-    /// Read back as BGRA (the native order on most GPUs) instead of RGBA.
+
     pub bgra: bool,
-    /// Queue the readback through pixel buffers behind a fence and publish as soon as the GPU
-    /// has finished (a few ms) instead of waiting for it on the render thread.
+
+
     pub async_readback: bool,
-    /// Publish each frame with mpv's position at the time, for a reader that keys frames by
-    /// media time. Costs a property read per frame, so off for the on-screen player.
+
+
     pub stamp: bool,
 }
 
 pub enum Msg {
     Update,
-    /// New output size and optionally host memory; the sender is signalled once the new
-    /// slots are in place.
+    #[cfg(target_os = "macos")]
+    Redraw,
+
+
     Resize(u32, u32, Option<External>, Sender<()>),
-    /// Whether frames are wanted. While not, mpv skips drawing and nothing is read back.
+
     Presenting(bool),
     Stop,
 }
 
-/// How often the loop checks the GPU for a finished readback while one is queued.
+
 const POLL: Duration = Duration::from_micros(500);
-/// How long a forced wait on a queued readback may take before the frame is dropped.
+
 const WAIT_NS: u64 = 200_000_000;
 
-/// mpv calls this from its own threads whenever a new frame (or other work) is pending.
+
 unsafe extern "C" fn on_update(ctx: *mut c_void) {
     let tx = unsafe { &*(ctx as *const Sender<Msg>) };
     let _ = tx.send(Msg::Update);
@@ -56,7 +55,7 @@ unsafe extern "C" fn get_proc(ctx: *mut c_void, name: *const c_char) -> *mut c_v
 struct SendPtr(*mut c_void);
 unsafe impl Send for SendPtr {}
 
-/// A readback the GPU is still copying into a pixel buffer.
+
 #[derive(Clone, Copy)]
 struct Inflight {
     pbo: usize,
@@ -66,7 +65,7 @@ struct Inflight {
     pts: Option<f64>,
 }
 
-/// Colour texture plus framebuffer at output size, and the readback buffers.
+
 struct Target {
     fbo: u32,
     tex: u32,
@@ -75,9 +74,9 @@ struct Target {
     len: usize,
     cfg: RenderConfig,
     pbos: [u32; 2],
-    /// The pixel buffer the next readback goes into.
+
     cur: usize,
-    /// Queued readbacks, oldest first; at most one per pixel buffer.
+
     inflight: VecDeque<Inflight>,
 }
 
@@ -117,8 +116,8 @@ impl Target {
         Ok(Target { fbo, tex, w, h, len, cfg, pbos, cur: 0, inflight: VecDeque::with_capacity(2) })
     }
 
-    /// GLES (ANGLE on Windows) has no packed `8_8_8_8_REV` type; `BGRA` with plain bytes is the
-    /// same memory order on a little-endian machine, through `GL_EXT_read_format_bgra`.
+
+
     fn format(&self) -> (u32, u32) {
         if !self.cfg.bgra {
             (gl::RGBA, gl::UNSIGNED_BYTE)
@@ -133,8 +132,8 @@ impl Target {
         !self.inflight.is_empty()
     }
 
-    /// Copies the FBO into a frame slot. Synchronous readback publishes here; the queued kind
-    /// fences the copy and `poll` publishes it once the GPU is done.
+
+
     fn readback(&mut self, ctx: *mut mpv_render_context, frames: &Frames, stats: &RenderStats, render_ms: f32, pts: Option<f64>) {
         let (fmt, ty) = self.format();
         unsafe {
@@ -150,7 +149,7 @@ impl Target {
             stats.record(render_ms, ms(t0.elapsed()), dropped);
             return;
         }
-        // Both buffers queued: the older copy into this one has to be out before it is reused.
+
         if self.inflight.iter().any(|f| f.pbo == self.cur) {
             self.poll(ctx, frames, stats, true);
         }
@@ -165,8 +164,8 @@ impl Target {
         self.cur = 1 - self.cur;
     }
 
-    /// Publishes every queued readback the GPU has finished, oldest first. With `wait` the
-    /// oldest is waited for (and dropped if the GPU does not answer in time).
+
+
     fn poll(&mut self, ctx: *mut mpv_render_context, frames: &Frames, stats: &RenderStats, wait: bool) {
         let mut waited = false;
         while let Some(&f) = self.inflight.front() {
@@ -192,8 +191,8 @@ impl Target {
                     }
                     gl::BindBuffer(gl::PIXEL_PACK_BUFFER, 0);
                 } else {
-                    // The GPU did not finish in time: drop the frame. GL orders the next copy
-                    // into this buffer after the stuck one, so reusing it is safe.
+
+
                     stats.gl_error(r);
                 }
                 gl::DeleteSync(f.fence);
@@ -218,25 +217,41 @@ impl Drop for Target {
     }
 }
 
-/// Starts the render thread and blocks until its GL and mpv render contexts exist.
-/// The returned Sender is boxed because mpv holds a raw pointer to it until the thread exits.
-/// `has_video` is the events thread's word on whether a picture is configured: while it is
-/// not (between files), mpv's blank redraws are skipped so the host keeps the last frame.
+
+
+
+
 pub fn spawn(
     mpv: Arc<Mpv>,
     frames: Arc<Frames>,
     stats: Arc<RenderStats>,
     cfg: RenderConfig,
     has_video: Arc<AtomicBool>,
+    #[cfg(target_os = "macos")] apple: Arc<std::sync::Mutex<crate::enhance::AppleUpscaling>>,
 ) -> Result<(Box<Sender<Msg>>, JoinHandle<()>), String> {
     let (tx, rx) = channel::<Msg>();
     let tx = Box::new(tx);
     let cb_ctx = SendPtr(&*tx as *const Sender<Msg> as *mut c_void);
     let (ready_tx, ready_rx) = channel::<Result<(), String>>();
+    #[cfg(target_os = "macos")]
+    let wake = (*tx).clone();
 
     let handle = thread::Builder::new()
         .name("bp-render".into())
-        .spawn(move || run(mpv, rx, cb_ctx, frames, stats, cfg, has_video, ready_tx))
+        .spawn(move || {
+            run(
+                mpv,
+                rx,
+                cb_ctx,
+                frames,
+                stats,
+                cfg,
+                has_video,
+                ready_tx,
+                #[cfg(target_os = "macos")]
+                crate::macos::Upscaler::new(apple, wake),
+            )
+        })
         .map_err(|e| e.to_string())?;
 
     match ready_rx.recv_timeout(Duration::from_secs(10)) {
@@ -258,6 +273,7 @@ fn run(
     cfg: RenderConfig,
     has_video: Arc<AtomicBool>,
     ready: Sender<Result<(), String>>,
+    #[cfg(target_os = "macos")] mut apple: crate::macos::Upscaler,
 ) {
     let gl = match GlContext::new() {
         Ok(g) => Box::new(g),
@@ -271,10 +287,7 @@ fn run(
         gl.get_proc_address(&name) as *const c_void
     });
 
-    let mut init = mpv_opengl_init_params {
-        get_proc_address: Some(get_proc),
-        get_proc_address_ctx: &*gl as *const GlContext as *mut c_void,
-    };
+    let mut init = mpv_opengl_init_params { get_proc_address: Some(get_proc), get_proc_address_ctx: &*gl as *const GlContext as *mut c_void };
     let mut advanced: c_int = 1;
     let mut params = [
         mpv_render_param { type_: MPV_RENDER_PARAM_API_TYPE, data: c"opengl".as_ptr() as *mut c_void },
@@ -303,11 +316,11 @@ fn run(
     let _ = ready.send(Ok(()));
 
     let mut presenting = true;
-    // Frames are wanted, and there is a picture to draw. Between files mpv would redraw its
-    // background, which the host must not see over the last frame.
+
+
     let wanted = |presenting: bool| presenting && has_video.load(Ordering::Relaxed);
     loop {
-        // While a readback is queued, wake regularly to publish it the moment the GPU is done.
+
         let msg = if target.busy() {
             match rx.recv_timeout(POLL) {
                 Ok(m) => Some(m),
@@ -325,10 +338,41 @@ fn run(
                 let flags = unsafe { mpv_render_context_update(ctx) };
                 if flags & MPV_RENDER_UPDATE_FRAME != 0 {
                     if wanted(presenting) {
-                        // Read before drawing: the pending frame's position is already
-                        // reported, the one after cannot be until this one is drawn.
-                        let pts = if cfg.stamp { mpv.get_double("time-pos") } else { None };
-                        render_one(ctx, &mut target, &frames, &stats, pts);
+
+
+                        let pts = if cfg.stamp {
+                            let mut info = mpv_render_frame_info::default();
+                            unsafe {
+                                mpv_render_context_get_info(
+                                    ctx,
+                                    mpv_render_param { type_: MPV_RENDER_PARAM_NEXT_FRAME_INFO, data: &mut info as *mut _ as *mut c_void },
+                                );
+                            }
+                            if info.flags & MPV_RENDER_FRAME_INFO_PRESENT != 0
+                                && info.flags & (MPV_RENDER_FRAME_INFO_REDRAW | MPV_RENDER_FRAME_INFO_REPEAT) == 0
+                            {
+                                Some(f64::from_bits(mpv.observed_time.load(Ordering::Relaxed)))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        if cfg.stamp && pts.is_none() {
+
+
+                            skip_one(ctx);
+                        } else {
+                            render_one(
+                                ctx,
+                                &mut target,
+                                &frames,
+                                &stats,
+                                pts,
+                                #[cfg(target_os = "macos")]
+                                &mut apple,
+                            );
+                        }
                     } else {
                         skip_one(ctx);
                     }
@@ -337,9 +381,17 @@ fn run(
             Some(Msg::Presenting(on)) => {
                 let resumed = on && !presenting;
                 presenting = on;
-                // Back on screen: redraw the current frame, else a paused video stays blank.
+
                 if resumed && wanted(on) {
-                    render_one(ctx, &mut target, &frames, &stats, None);
+                    render_one(
+                        ctx,
+                        &mut target,
+                        &frames,
+                        &stats,
+                        None,
+                        #[cfg(target_os = "macos")]
+                        &mut apple,
+                    );
                 }
             }
             Some(Msg::Resize(w, h, external, done)) => {
@@ -351,10 +403,28 @@ fn run(
                     Err(e) => eprintln!("bp-player: resize failed: {e}"),
                 }
                 let _ = done.send(());
-                // mpv redraws the current frame when none is pending, so a paused video is
-                // not blank at the new size.
+
+
                 if wanted(presenting) {
-                    render_one(ctx, &mut target, &frames, &stats, None);
+                    render_one(
+                        ctx,
+                        &mut target,
+                        &frames,
+                        &stats,
+                        None,
+                        #[cfg(target_os = "macos")]
+                        &mut apple,
+                    );
+                }
+            }
+            #[cfg(target_os = "macos")]
+            Some(Msg::Redraw) => {
+                if wanted(presenting) && !cfg.stamp {
+
+                    while target.busy() {
+                        target.poll(ctx, &frames, &stats, true);
+                    }
+                    render_one(ctx, &mut target, &frames, &stats, None, &mut apple);
                 }
             }
             Some(Msg::Stop) => break,
@@ -368,21 +438,31 @@ fn run(
         mpv_render_context_free(ctx);
     }
     drop(target);
+    #[cfg(target_os = "macos")]
+    drop(apple);
     drop(gl);
 }
 
-fn render_one(ctx: *mut mpv_render_context, target: &mut Target, frames: &Frames, stats: &RenderStats, pts: Option<f64>) {
+fn render_one(
+    ctx: *mut mpv_render_context,
+    target: &mut Target,
+    frames: &Frames,
+    stats: &RenderStats,
+    pts: Option<f64>,
+    #[cfg(target_os = "macos")] apple: &mut crate::macos::Upscaler,
+) {
     let t0 = Instant::now();
-    let mut fbo = mpv_opengl_fbo {
-        fbo: target.fbo as c_int,
-        w: target.w as c_int,
-        h: target.h as c_int,
-        internal_format: 0,
-    };
-    // glReadPixels starts at the bottom GL row, which is the top of an unflipped picture,
-    // so the buffer comes out top-down with flip off.
+    #[cfg(target_os = "macos")]
+    let apple_target = apple.prepare();
+    #[cfg(target_os = "macos")]
+    let (draw_fbo, draw_w, draw_h) = apple_target.unwrap_or((target.fbo, target.w, target.h));
+    #[cfg(not(target_os = "macos"))]
+    let (draw_fbo, draw_w, draw_h) = (target.fbo, target.w, target.h);
+    let mut fbo = mpv_opengl_fbo { fbo: draw_fbo as c_int, w: draw_w as c_int, h: draw_h as c_int, internal_format: 0 };
+
+
     let mut flip: c_int = 0;
-    // The host presents on its own schedule, so do not sleep until the frame's target time.
+
     let mut block: c_int = 0;
     let mut params = [
         mpv_render_param { type_: MPV_RENDER_PARAM_OPENGL_FBO, data: &mut fbo as *mut _ as *mut c_void },
@@ -395,6 +475,10 @@ fn render_one(ctx: *mut mpv_render_context, target: &mut Target, frames: &Frames
         stats.render_error();
         return;
     }
+    #[cfg(target_os = "macos")]
+    if apple_target.is_some() {
+        apple.process(target.fbo, target.w, target.h);
+    }
     target.readback(ctx, frames, stats, ms(t0.elapsed()), pts);
     let gl_err = unsafe { gl::GetError() };
     if gl_err != gl::NO_ERROR {
@@ -402,8 +486,8 @@ fn render_one(ctx: *mut mpv_render_context, target: &mut Target, frames: &Frames
     }
 }
 
-/// Lets mpv drop the pending frame without drawing it, so its timing and audio carry on
-/// while nobody is looking.
+
+
 fn skip_one(ctx: *mut mpv_render_context) {
     let mut skip: c_int = 1;
     let mut params = [

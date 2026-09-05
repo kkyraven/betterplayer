@@ -1,11 +1,9 @@
-//! Motion providers fill axes that have no script and gaps in scripts that do.
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum Provider {
     None,
-    /// Smooth wander between random targets, `speed` targets per second.
+
     Random { speed: f64 },
-    /// Full-range sine.
+
     Sine { period_ms: f64 },
 }
 
@@ -41,7 +39,7 @@ impl Provider {
     }
 }
 
-/// xorshift, seeded from the clock on first use so two axes do not move in step.
+
 pub(crate) fn next_random(seed: &mut u64) -> f64 {
     if *seed == 0 {
         *seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) | 1;

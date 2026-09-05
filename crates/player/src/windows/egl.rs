@@ -1,12 +1,3 @@
-//! Offscreen GL context on Windows through ANGLE's D3D11 backend. libmpv wants ANGLE here:
-//! its zero-copy `d3d11va` interop (`d3d11-egl`) and the `d3d11vpp` filter both need the
-//! EGL display to sit on a D3D11 device. A 1 by 1 pbuffer keeps the context current on the
-//! render thread; mpv draws into our framebuffer, never the surface.
-//!
-//! `libEGL.dll` (and the `libGLESv2.dll` it pulls in) come from next to the addon when a copy
-//! is there, else from the loader's search path, which under Electron finds the ones shipped
-//! with electron.exe. Untested until a Windows machine runs it (`PLAN-rtx-video.md`, W0).
-
 use std::ffi::{CStr, c_char, c_void};
 use std::path::PathBuf;
 use std::ptr;
@@ -33,7 +24,7 @@ const EGL_ALPHA_SIZE: EGLint = 0x3021;
 const EGL_WIDTH: EGLint = 0x3057;
 const EGL_HEIGHT: EGLint = 0x3056;
 const EGL_CONTEXT_CLIENT_VERSION: EGLint = 0x3098;
-// EGL_ANGLE_platform_angle and its D3D11 backend.
+
 const EGL_PLATFORM_ANGLE_ANGLE: u32 = 0x3202;
 const EGL_PLATFORM_ANGLE_TYPE_ANGLE: EGLint = 0x3203;
 const EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE: EGLint = 0x3208;
@@ -112,7 +103,7 @@ pub struct Context {
 }
 
 impl Context {
-    /// Creates a GLES 3 context on ANGLE's D3D11 backend and makes it current on this thread.
+
     pub fn new() -> Result<Context, String> {
         let egl = Egl::load()?;
         let get_platform_display: GetPlatformDisplayFn = unsafe {
@@ -182,7 +173,7 @@ impl Context {
         Ok(())
     }
 
-    /// GL and EGL entry points alike; ANGLE's `eglGetProcAddress` resolves both.
+
     pub fn get_proc_address(&self, name: &CStr) -> *mut c_void {
         unsafe { (self.egl.get_proc_address)(name.as_ptr()) }
     }

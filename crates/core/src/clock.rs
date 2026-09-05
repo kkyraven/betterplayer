@@ -1,8 +1,3 @@
-//! Media clock for the tick thread. mpv reports `time-pos` once per video frame; between
-//! reports the position is dead-reckoned while mpv says it is advancing (`core-idle`
-//! false), and reports are approached by slewing (90 to 110 percent speed) so the script
-//! never jumps backwards. A discrepancy over a second is a seek and snaps.
-
 use std::time::Instant;
 
 pub struct Clock {
@@ -19,7 +14,16 @@ pub struct Clock {
 impl Clock {
     pub fn new() -> Clock {
         let now = Instant::now();
-        Clock { reported_ms: 0.0, reported_at: now, paused: true, idle: true, speed: 1.0, internal_ms: 0.0, last_now: now, duration_ms: 0.0 }
+        Clock {
+            reported_ms: 0.0,
+            reported_at: now,
+            paused: true,
+            idle: true,
+            speed: 1.0,
+            internal_ms: 0.0,
+            last_now: now,
+            duration_ms: 0.0,
+        }
     }
 
     pub fn report(&mut self, ms: f64) {
@@ -27,17 +31,17 @@ impl Clock {
         self.reported_at = Instant::now();
     }
 
-    /// Drops the slew state so the next `now` lands on the reported position.
+
     pub fn snap(&mut self) {
         self.internal_ms = self.reported_ms;
     }
 
-    /// The user-facing pause flag; the clock itself follows `set_idle`.
+
     pub fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
     }
 
-    /// Freezes or releases dead reckoning at the extrapolated position.
+
     pub fn set_idle(&mut self, idle: bool) {
         self.reported_ms = self.target();
         self.reported_at = Instant::now();
@@ -54,7 +58,7 @@ impl Clock {
         self.paused
     }
 
-    /// Whether the position is advancing right now.
+
     pub fn running(&self) -> bool {
         !self.idle
     }
@@ -71,7 +75,7 @@ impl Clock {
         self.reported_ms + self.reported_at.elapsed().as_secs_f64() * 1000.0 * self.rate()
     }
 
-    /// Slewed media position in ms. Call once per tick.
+
     pub fn now(&mut self) -> f64 {
         let now = Instant::now();
         let dt = now.duration_since(self.last_now).as_secs_f64() * 1000.0;
@@ -92,9 +96,13 @@ impl Clock {
         self.internal_ms
     }
 
-    /// Position without advancing the slew, for the state snapshot.
+
     pub fn peek(&self) -> f64 {
-        if self.rate() == 0.0 { self.target() } else { self.internal_ms }
+        if self.rate() == 0.0 {
+            self.target()
+        } else {
+            self.internal_ms
+        }
     }
 }
 
@@ -112,14 +120,13 @@ mod tests {
         sleep(Duration::from_millis(20));
         let a = c.now();
         assert!(a > 1010.0 && a < 1100.0, "{a}");
-        // A report slightly behind the extrapolation is approached, not jumped to.
+
         c.report(a - 30.0);
         sleep(Duration::from_millis(10));
         let b = c.now();
         assert!(b > a, "never runs backwards: {b} after {a}");
-        // A report far away is a seek.
+
         c.report(50_000.0);
         assert!(c.now() >= 50_000.0);
     }
-
 }

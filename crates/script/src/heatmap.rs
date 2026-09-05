@@ -1,6 +1,3 @@
-//! Speed statistics for cards and the scrubber. Speed is in position units (0..100) per
-//! second, the number funscript tools show, so 400 reads as "fast" everywhere.
-
 use crate::funscript::Script;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -9,7 +6,7 @@ pub struct SpeedStats {
     pub max: f64,
 }
 
-/// Time-weighted average speed per bucket across the media duration.
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Heatmap {
     pub buckets: Vec<f64>,
@@ -32,7 +29,7 @@ pub fn speed_stats(script: &Script) -> SpeedStats {
     SpeedStats { average: if time > 0.0 { total / time } else { 0.0 }, max }
 }
 
-/// `n` buckets spanning `0..duration_ms` (the media length, so gaps read as gaps).
+
 pub fn heatmap(script: &Script, duration_ms: f64, n: usize) -> Heatmap {
     let mut buckets = vec![0.0; n];
     if n == 0 || duration_ms <= 0.0 {

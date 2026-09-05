@@ -1,12 +1,8 @@
-//! Tolerant funscript parsing. Reads what OFS, funscript.io, FunGen and hand-edited files
-//! produce: float or integer times, unsorted or duplicate actions, out-of-range positions,
-//! `inverted`, OFS chapters and bookmarks. `range` is ignored, matching every player.
-
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-/// One keyframe: time in ms, position 0..1.
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Action {
     pub at: f64,
@@ -26,8 +22,8 @@ pub struct Bookmark {
     pub at_ms: f64,
 }
 
-/// A parsed script: actions sorted by time with duplicates removed, values 0..1 with
-/// `inverted` already applied.
+
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Script {
     pub actions: Vec<Action>,
@@ -35,8 +31,8 @@ pub struct Script {
     pub bookmarks: Vec<Bookmark>,
 }
 
-/// The JSON of one funscript file, bundle fields included, so a file is deserialised once
-/// whatever shape it turns out to be. Missing fields default; unknown ones are ignored.
+
+
 #[derive(Deserialize)]
 pub(crate) struct Raw {
     #[serde(default)]
@@ -45,10 +41,10 @@ pub(crate) struct Raw {
     pub inverted: bool,
     #[serde(default)]
     pub metadata: Option<RawMeta>,
-    /// EroScripts v1.1 bundle: the other axes beside the root actions.
+
     #[serde(default)]
     pub axes: Option<Vec<RawAxis>>,
-    /// XTPlayer bundle: scripts keyed by channel name.
+
     #[serde(default)]
     pub channels: Option<BTreeMap<String, RawChannel>>,
 }
@@ -114,8 +110,8 @@ impl Script {
         Ok(Self::from_raw(raw.actions, raw.inverted, raw.metadata))
     }
 
-    /// The file's JSON: `at` in whole milliseconds, `pos` 0..100, chapters and bookmarks
-    /// under `metadata` as OFS writes them. Actions are written as they are; sort first.
+
+
     pub fn to_json(&self) -> String {
         let actions: Vec<serde_json::Value> = self.actions.iter().map(|a| serde_json::json!({ "at": a.at.round() as i64, "pos": (a.pos.clamp(0.0, 1.0) * 100.0).round() as i64 })).collect();
         let mut root = serde_json::json!({ "version": "1.0", "inverted": false, "range": 100, "actions": actions });
@@ -132,7 +128,7 @@ impl Script {
         root.to_string()
     }
 
-    /// Builds a script from raw actions (`pos` 0..100), used by every container shape.
+
     pub(crate) fn from_raw(actions: Vec<RawAction>, inverted: bool, meta: Option<RawMeta>) -> Script {
         let mut actions: Vec<Action> = actions
             .into_iter()
@@ -146,7 +142,7 @@ impl Script {
             })
             .collect();
         actions.sort_by(|a, b| a.at.total_cmp(&b.at));
-        // Later entries win on duplicate times so spans are never zero.
+
         actions.dedup_by(|later, earlier| {
             if later.at == earlier.at {
                 earlier.pos = later.pos;
@@ -175,18 +171,18 @@ impl Script {
         self.actions.is_empty()
     }
 
-    /// Time of the last action in ms, 0 for an empty script.
+
     pub fn duration_ms(&self) -> f64 {
         self.actions.last().map_or(0.0, |a| a.at)
     }
 
-    /// Index of the last action at or before `t_ms`, if any.
+
     pub fn index_at(&self, t_ms: f64) -> Option<usize> {
         self.actions.partition_point(|a| a.at <= t_ms).checked_sub(1)
     }
 }
 
-/// `HH:MM:SS.mmm`, `MM:SS.mmm` or plain seconds, to ms.
+
 fn parse_time(s: &str) -> Option<f64> {
     let s = s.trim();
     if s.is_empty() {

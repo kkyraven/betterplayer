@@ -1,7 +1,3 @@
-//! Keyframe interpolation. Pchip is the default because OSR firmware interpolates linearly
-//! between the last two commands, so resampling a smooth curve at the tick rate is what
-//! removes the jerk at fast keyframes (research 06).
-
 use crate::funscript::{Action, Script};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -31,8 +27,8 @@ impl Interpolation {
     }
 }
 
-/// Script value at `t_ms`, or `None` outside the script (before the first or after the last
-/// action), so the caller can fill with a provider or the axis default.
+
+
 pub fn sample(script: &Script, t_ms: f64, kind: Interpolation) -> Option<f64> {
     let a = &script.actions;
     let i = script.index_at(t_ms)?;
@@ -57,8 +53,8 @@ pub fn sample(script: &Script, t_ms: f64, kind: Interpolation) -> Option<f64> {
     })
 }
 
-/// Fritsch and Carlson monotone slope at `p` given its neighbours. Without a previous
-/// keyframe the three-point end formula is used; without a second next one, the secant.
+
+
 fn slope(prev: Option<&Action>, p: Action, next: Action, next2: Option<Action>) -> f64 {
     let delta = |a: Action, b: Action| {
         let h = b.at - a.at;
@@ -143,9 +139,9 @@ mod tests {
             assert!((0.0..=1.0).contains(&v), "t {t} v {v}");
             t += 1.0;
         }
-        // Flat span stays flat (monotone: no bump between two equal keyframes).
+
         assert!((sample(&s, 150.0, Interpolation::Pchip).unwrap() - 1.0).abs() < 1e-9);
-        // Curve is smooth: midpoint of a rise is near the linear value, not at a keyframe.
+
         let mid = sample(&s, 50.0, Interpolation::Pchip).unwrap();
         assert!(mid > 0.3 && mid < 0.7, "mid {mid}");
     }

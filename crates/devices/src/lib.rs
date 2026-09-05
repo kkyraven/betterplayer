@@ -1,8 +1,3 @@
-//! Device output: TCode encoding, serial, UDP, TCP, WebSocket and BLE transports, a Buttplug
-//! v3 client, the DG-Lab Coyote v3, the Handy over HSSP, and the `Output` state machine that connects, identifies
-//! and reconnects.
-//! `TickLoop` is the Phase 0 bench (a sine on L0 at a fixed rate) kept for jitter measurements.
-
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::io::{ErrorKind, Read, Write};
@@ -18,22 +13,26 @@ pub mod buttplug;
 pub mod coyote;
 pub mod deadline;
 pub mod handy;
+pub mod howl;
 pub mod intiface;
 pub mod output;
 pub mod probe;
 pub mod ramp;
 mod realtime;
 pub mod tcode;
+pub mod toys;
 pub mod transport;
 
 pub use ble::{BleDevice, scan as ble_scan};
-pub use handy::HandyHosting;
-pub use intiface::{IntifaceServer, IntifaceStatus};
 pub use deadline::Pace;
-pub use output::{Output, OutputSnapshot, OutputStats, Status, TickContext};
+pub use handy::HandyHosting;
+pub use howl::HowlStatus;
+pub use intiface::{IntifaceServer, IntifaceStatus, SERVER_NAME as INTIFACE_SERVER_NAME};
+pub use output::{Media, Output, OutputSnapshot, OutputStats, Status, TickContext};
 pub use probe::{ProbedPort, probe_ports};
 pub use ramp::{Ramp, RampConfig, RampProgress};
 pub use tcode::{AxisClamp, Profile};
+pub use toys::{FeatureKind, ToyFeature, ToyInfo, hub as toy_hub};
 pub use transport::Transport;
 
 const WINDOW: usize = 10_000;
@@ -41,13 +40,16 @@ const WINDOW: usize = 10_000;
 #[derive(Clone, Copy, Debug)]
 pub struct TickOptions {
     pub hz: u32,
-    /// How long before each deadline to stop sleeping and spin. Trades CPU for precision.
+
     pub spin_us: u32,
 }
 
 impl Default for TickOptions {
     fn default() -> TickOptions {
-        TickOptions { hz: 100, spin_us: 500 }
+        TickOptions {
+            hz: 100,
+            spin_us: 500,
+        }
     }
 }
 
@@ -68,11 +70,11 @@ pub struct TickSnapshot {
     pub bytes_written: u64,
     pub bytes_received: u64,
     pub lines_received: u64,
-    /// Whether the tick thread got a realtime scheduling class.
+
     pub realtime: bool,
-    /// How late each tick fired past its deadline.
+
     pub late: PercentilesUs,
-    /// Time spent inside the serial write call.
+
     pub write: PercentilesUs,
 }
 
@@ -108,16 +110,19 @@ impl TickLoop {
             .timeout(Duration::from_millis(100))
             .open()
             .map_err(|e| format!("open {path}: {e}"))?;
-        // Devices talk back (TCode replies, telemetry), so a clone of the handle feeds the reader.
+
         let reader = port.try_clone().map_err(|e| format!("clone {path}: {e}"))?;
         Ok(Self::start(port, Some(reader), opts))
     }
 
-    /// A pty pair: ticks write to one end, a reader thread drains the other and counts lines.
+
     #[cfg(unix)]
     pub fn loopback(opts: TickOptions) -> Result<TickLoop, String> {
-        let (master, mut slave) = serialport::TTYPort::pair().map_err(|e| format!("pty pair: {e}"))?;
-        slave.set_timeout(Duration::from_millis(100)).map_err(|e| e.to_string())?;
+        let (master, mut slave) =
+            serialport::TTYPort::pair().map_err(|e| format!("pty pair: {e}"))?;
+        slave
+            .set_timeout(Duration::from_millis(100))
+            .map_err(|e| e.to_string())?;
         Ok(Self::start(Box::new(master), Some(Box::new(slave)), opts))
     }
 
@@ -126,7 +131,11 @@ impl TickLoop {
         Err("loopback needs a pty pair; use a real port on Windows".into())
     }
 
-    fn start(port: Box<dyn SerialPort>, reader: Option<Box<dyn SerialPort>>, opts: TickOptions) -> TickLoop {
+    fn start(
+        port: Box<dyn SerialPort>,
+        reader: Option<Box<dyn SerialPort>>,
+        opts: TickOptions,
+    ) -> TickLoop {
         let stop = Arc::new(AtomicBool::new(false));
         let samples = Arc::new(Mutex::new(Samples::default()));
         let bytes_received = Arc::new(AtomicU64::new(0));
@@ -138,7 +147,7 @@ impl TickLoop {
             let lines = lines_received.clone();
             thread::spawn(move || {
                 let mut buf = [0u8; 4096];
-                // Keeps draining after stop until a read times out, so the last ticks are counted.
+
                 loop {
                     match r.read(&mut buf) {
                         Ok(n) => {
@@ -166,7 +175,14 @@ impl TickLoop {
                 .expect("spawn tick thread")
         };
 
-        TickLoop { stop, samples, bytes_received, lines_received, tick: Some(tick), reader }
+        TickLoop {
+            stop,
+            samples,
+            bytes_received,
+            lines_received,
+            tick: Some(tick),
+            reader,
+        }
     }
 
     pub fn snapshot(&self) -> TickSnapshot {
@@ -201,9 +217,14 @@ impl Drop for TickLoop {
     }
 }
 
-/// Deadline loop: sleep most of the way, spin the last `spin_us`, write, record.
-/// A 0.5 Hz sine on L0 so a connected stroker visibly moves.
-fn tick_loop(mut port: Box<dyn SerialPort>, opts: TickOptions, stop: Arc<AtomicBool>, samples: Arc<Mutex<Samples>>) {
+
+
+fn tick_loop(
+    mut port: Box<dyn SerialPort>,
+    opts: TickOptions,
+    stop: Arc<AtomicBool>,
+    samples: Arc<Mutex<Samples>>,
+) {
     let hz = opts.hz.max(1);
     let period = Duration::from_micros(1_000_000 / hz as u64);
     let interval_ms = (1000 / hz).max(1);
@@ -245,7 +266,7 @@ fn tick_loop(mut port: Box<dyn SerialPort>, opts: TickOptions, stop: Arc<AtomicB
         push(&mut s.late_us, late_us);
         push(&mut s.write_us, write_us);
 
-        // After a stall, skip the missed ticks instead of bursting to catch up.
+
         let behind = Instant::now().saturating_duration_since(start + period * (n + 1));
         if behind > period {
             let skip = (behind.as_micros() / period.as_micros()) as u32;
@@ -285,13 +306,22 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn loopback_ticks_arrive_on_time() {
-        let mut l = TickLoop::loopback(TickOptions { hz: 100, spin_us: 500 }).unwrap();
+        let mut l = TickLoop::loopback(TickOptions {
+            hz: 100,
+            spin_us: 500,
+        })
+        .unwrap();
         thread::sleep(Duration::from_millis(600));
         l.stop();
         let s = l.snapshot();
         assert!(s.ticks >= 50, "ticks {}", s.ticks);
         assert_eq!(s.write_errors, 0);
-        assert!(s.lines_received >= s.ticks - 2, "received {} of {}", s.lines_received, s.ticks);
+        assert!(
+            s.lines_received >= s.ticks - 2,
+            "received {} of {}",
+            s.lines_received,
+            s.ticks
+        );
         assert!(s.late.p95 < 2_000, "p95 late {}us", s.late.p95);
     }
 }

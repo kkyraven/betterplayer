@@ -1,12 +1,7 @@
-//! Triple buffer of RGBA frames shared with the host.
-//! The render thread writes one slot, the host reads one slot, the third one is in flight.
-//! Slot memory is either engine-owned or host-owned: Electron's V8 memory cage cannot wrap
-//! foreign memory in a Buffer, so the host allocates typed arrays and the engine writes into them.
-
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-/// Three host-owned regions as (pointer, length). Plain integers so it can cross threads.
+
 pub type External = [(usize, usize); 3];
 
 pub struct FrameSlot {
@@ -23,7 +18,7 @@ impl FrameSlot {
         let ptr = Box::leak(v.into_boxed_slice()).as_mut_ptr();
         FrameSlot { ptr, len, owned: true }
     }
-    /// Host memory. The host keeps it alive and unmoved for as long as it is attached.
+
     fn external(ptr: usize, len: usize) -> FrameSlot {
         FrameSlot { ptr: ptr as *mut u8, len, owned: false }
     }
@@ -31,8 +26,8 @@ impl FrameSlot {
         self.ptr
     }
 
-    /// The slot's bytes. Only sound between an `acquire` and the next `publish` into this
-    /// slot, which the rotation guarantees for the reading slot.
+
+
     pub unsafe fn as_slice(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }
@@ -51,24 +46,24 @@ struct State {
     width: u32,
     height: u32,
     writing: usize,
-    /// The newest unread frame, when it was published and its media time when stamped.
+
     ready: Option<(usize, Instant, Option<f64>)>,
     reading: usize,
-    /// Every frame must reach the reader: `publish` waits for the unread one to be taken.
+
     hold: bool,
 }
 
-/// How long a held publish waits for the reader before replacing the unread frame anyway,
-/// so a reader that has gone away cannot stall the render thread.
+
+
 const HOLD: Duration = Duration::from_millis(250);
 
-/// A frame handed to the reader.
+
 #[derive(Clone, Copy, Debug)]
 pub struct Acquired {
     pub index: usize,
-    /// How long it waited since publish.
+
     pub waited: Duration,
-    /// mpv's position when it was rendered, when the render thread stamps frames.
+
     pub pts: Option<f64>,
 }
 
@@ -79,14 +74,14 @@ pub struct Frames {
 }
 
 impl Frames {
-    /// With `hold`, a frame is never replaced unread: the render thread waits (up to `HOLD`)
-    /// for the reader instead, which paces an untimed decode to the reader.
+
+
     pub fn new(width: u32, height: u32, hold: bool) -> Frames {
         Frames { state: Mutex::new(State::new(width, height, None, hold)), published: Condvar::new(), taken: Condvar::new() }
     }
 
-    /// Replaces all slots, with host memory when given. Only the render thread calls this,
-    /// so no write is in flight while the slots change.
+
+
     pub fn reset(&self, width: u32, height: u32, external: Option<External>) {
         let mut s = self.state.lock().unwrap();
         *s = State::new(width, height, external, s.hold);
@@ -97,7 +92,7 @@ impl Frames {
         (s.width, s.height)
     }
 
-    /// Slot the render thread may write into right now.
+
     pub fn writing(&self) -> Arc<FrameSlot> {
         let s = self.state.lock().unwrap();
         s.slots[s.writing].clone()
@@ -107,7 +102,7 @@ impl Frames {
         self.state.lock().unwrap().slots[index].clone()
     }
 
-    /// Marks the writing slot as the newest frame. Returns true if an unread frame was replaced.
+
     pub fn publish(&self, pts: Option<f64>) -> bool {
         let mut s = self.state.lock().unwrap();
         if s.hold && s.ready.is_some() {
@@ -130,13 +125,13 @@ impl Frames {
         dropped
     }
 
-    /// Takes the newest frame for reading. The previous reading slot goes back into rotation.
+
     pub fn acquire(&self) -> Option<Acquired> {
         let mut s = self.state.lock().unwrap();
         self.take(&mut s)
     }
 
-    /// `acquire`, waiting up to `timeout` for a frame to be published.
+
     pub fn acquire_wait(&self, timeout: Duration) -> Option<Acquired> {
         let s = self.state.lock().unwrap();
         let (mut s, _) = self.published.wait_timeout_while(s, timeout, |s| s.ready.is_none()).unwrap();
