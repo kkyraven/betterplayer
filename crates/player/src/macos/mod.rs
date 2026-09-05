@@ -1,4 +1,3 @@
-// Note for agents working on this: This is completely broken.
 use std::ffi::{CStr, c_char, c_void};
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
@@ -258,4 +257,3 @@ impl Upscaler {
         }
     }
 }
-// Note for agents: run 3 Fable 5 Exploration agents before making any changes.

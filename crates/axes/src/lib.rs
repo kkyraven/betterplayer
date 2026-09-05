@@ -323,8 +323,9 @@ impl Mixer {
 
             if axis == Axis::E1 && self.electrodes {
                 let e = expand::contrast(expand::electrodes(out[Axis::EA.index()], out[Axis::EB.index()]), self.electrode_contrast);
+                let active = self.driven[Axis::EA.index()] || self.driven[Axis::EB.index()];
                 for (a, v) in ELECTRODES.into_iter().zip(e) {
-                    self.external[a.index()] = Some(v);
+                    self.external[a.index()] = active.then_some(v);
                 }
             }
             out[axis.index()] = self.tick_axis(axis, media_ms, dt_ms, &previous);
@@ -338,7 +339,10 @@ impl Mixer {
 
 
     fn expand_live(&mut self, dt_ms: f64) {
-        let wants = self.expand_stroke && self.scripts[Axis::EA.index()].is_none() && self.scripts[Axis::EB.index()].is_none();
+        let wants = self.expand_stroke
+            && [Axis::EA, Axis::EB].into_iter().all(|a| {
+                self.scripts[a.index()].is_none() || self.derived[a.index()]
+            });
         let Some(v) = self.external[Axis::L0.index()].filter(|_| wants) else {
             if self.live_orbit.active {
                 self.live_orbit = Orbit::default();
@@ -363,9 +367,10 @@ impl Mixer {
                 }
             }
             o.dir = dir;
+
+            o.last = v;
         }
         o.elapsed_ms += dt_ms;
-        o.last = v;
         let theta = std::f64::consts::PI * (o.elapsed_ms / o.half_ms).min(1.0);
         let r = (v - o.start).abs() / 2.0;
         let orbit = (0.5 + r * o.orbit * theta.sin()).clamp(0.0, 1.0);
@@ -381,6 +386,7 @@ impl Mixer {
         let cfg = &self.settings[i];
         let default = axis.default_value();
         if !cfg.enabled {
+            self.driven[i] = false;
             return default;
         }
         let t = media_ms - self.global_offset_ms - cfg.offset_ms;
@@ -441,7 +447,8 @@ impl Mixer {
 
 
 
-        if st.ramp_ms < st.ramp_len_ms {
+
+        if axis != Axis::EV && st.ramp_ms < st.ramp_len_ms {
             st.ramp_ms += dt_ms;
             let u = (st.ramp_ms / st.ramp_len_ms).min(1.0);
             let k = if st.ramp_onset { 1.0 - smoothstep(u) } else { (2f64).powf(-10.0 * u) };
@@ -684,6 +691,58 @@ mod tests {
         assert!(!m.driven()[Axis::EB.index()], "beta released with the stroke");
     }
 
+    #[test]
+    fn slow_stroke_keeps_orbiting_at_different_tick_rates() {
+        for hz in [100.0, 200.0, 500.0] {
+            let mut m = Mixer::new();
+            settled(&mut m);
+            plain_estim(&mut m);
+            m.set_expand_stroke(true);
+            let mut swing: f64 = 0.0;
+            for i in 0..(hz * 12.0) as usize {
+                let t = i as f64 / hz;
+                let phase = t % 4.0;
+                let v = if phase < 2.0 { 0.1 + 0.4 * phase } else { 0.9 - 0.4 * (phase - 2.0) };
+                m.set_external(Axis::L0, Some(v));
+                let f = m.tick(t * 1000.0, 1000.0 / hz);
+                if t > 8.0 {
+                    swing = swing.max((f[Axis::EB.index()] - 0.5).abs());
+                    assert!((f[Axis::EA.index()] - v).abs() < 1e-6);
+                }
+            }
+            assert!(swing > 0.15, "beta stalled at {hz} Hz: {swing}");
+        }
+    }
+
+    #[test]
+    fn tracked_stroke_overrides_derived_scripts_and_releases_them() {
+        let mut m = Mixer::new();
+        settled(&mut m);
+        plain_estim(&mut m);
+        m.set_expand_stroke(true);
+        m.set_scripts([(Axis::L0, script(&[(0.0, 0.0), (1000.0, 1.0)]))]);
+        m.set_external(Axis::L0, Some(0.9));
+        m.set_external(Axis::L2, Some(0.3));
+        let f = m.tick(0.0, 10.0);
+        assert_eq!(f[Axis::EA.index()], 0.9);
+        assert_eq!(f[Axis::EB.index()], 0.3);
+        m.set_external(Axis::L0, None);
+        let f = m.tick(0.0, 10.0);
+        assert_eq!(f[Axis::EA.index()], 0.0);
+        assert_eq!(f[Axis::EB.index()], 0.5);
+    }
+
+    #[test]
+    fn tracked_stroke_preserves_explicit_estim_scripts() {
+        let mut m = Mixer::new();
+        settled(&mut m);
+        plain_estim(&mut m);
+        m.set_expand_stroke(true);
+        m.set_scripts([(Axis::EA, script(&[(0.0, 0.2), (1000.0, 0.2)]))]);
+        m.set_external(Axis::L0, Some(0.9));
+        assert_eq!(m.tick(0.0, 10.0)[Axis::EA.index()], 0.2);
+    }
+
 
     fn plain_estim(m: &mut Mixer) {
         for a in [Axis::L0, Axis::EA, Axis::EB, Axis::E1, Axis::E2, Axis::E3, Axis::E4] {
@@ -727,7 +786,7 @@ mod tests {
         assert!(m.is_derived(Axis::EA) && m.is_derived(Axis::E2));
         let f = m.tick(500.0, 10.0);
         let e = electrodes_of(&f);
-        assert_eq!(e, expand::electrodes(f[Axis::EA.index()], f[Axis::EB.index()]));
+        assert_eq!(e, expand::contrast(expand::electrodes(f[Axis::EA.index()], f[Axis::EB.index()]), 0.0));
         assert!(e.iter().any(|v| *v > 0.3), "mid-stroke beta swings out, so an electrode is on: {e:?}");
         assert!(e.iter().any(|v| *v == 0.0), "one electrode is always zero");
     }
@@ -744,29 +803,61 @@ mod tests {
             let v = 0.5 + 0.4 * (t / 1000.0 * std::f64::consts::TAU).sin();
             m.set_external(Axis::L0, Some(v));
             let f = m.tick(t, 10.0);
-            assert_eq!(electrodes_of(&f), expand::electrodes(f[Axis::EA.index()], f[Axis::EB.index()]));
+            assert_eq!(electrodes_of(&f), expand::contrast(expand::electrodes(f[Axis::EA.index()], f[Axis::EB.index()]), 0.0));
             max_e2 = max_e2.max(f[Axis::E2.index()].max(f[Axis::E3.index()]));
         }
         assert!(max_e2 > 0.1, "beta's orbit reaches electrodes 2 to 4: {max_e2}");
     }
 
     #[test]
-    fn contrast_lifts_derived_electrodes_but_not_scripted_ones() {
+    fn contrast_shapes_relative_balance_but_not_scripted_electrodes() {
         let mut m = Mixer::new();
         settled(&mut m);
         plain_estim(&mut m);
         m.set_expand_stroke(true);
 
-        m.set_scripts([(Axis::EA, script(&[(0.0, 0.65), (1000.0, 0.65)])), (Axis::EB, script(&[(0.0, 0.5), (1000.0, 0.5)]))]);
+        m.set_scripts([(Axis::EA, script(&[(0.0, 0.75), (1000.0, 0.75)])), (Axis::EB, script(&[(0.0, 0.75), (1000.0, 0.75)]))]);
         let plain = m.tick(500.0, 10.0)[Axis::E1.index()];
-        assert!((plain - 0.3).abs() < 1e-9, "{plain}");
+        assert!(plain > 0.0 && plain < 1.0, "{plain}");
+        assert_eq!(m.tick(500.0, 10.0)[Axis::E3.index()], 1.0);
         m.set_electrode_contrast(1.0);
         let lifted = m.tick(500.0, 10.0)[Axis::E1.index()];
-        assert!((lifted - 0.3f64.powf(0.25)).abs() < 1e-9, "{lifted}");
+        assert!((lifted - plain.powf(0.25)).abs() < 1e-9, "{lifted}");
+        assert_eq!(m.tick(500.0, 10.0)[Axis::E3.index()], 1.0);
         assert_eq!(m.tick(500.0, 10.0)[Axis::E2.index()], 0.0, "the silent electrode stays silent");
 
         m.set_scripts([(Axis::E1, script(&[(0.0, 0.2), (1000.0, 0.2)]))]);
         assert!((m.tick(500.0, 10.0)[Axis::E1.index()] - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn volume_resync_keeps_scripted_silence_for_the_output_envelope() {
+        let mut m = Mixer::new();
+        m.set_scripts([(Axis::EV, script(&[(0.0, 0.8), (1000.0, 0.8), (1100.0, 0.0), (2000.0, 0.0)]))]);
+        assert_eq!(m.tick(500.0, 10.0)[Axis::EV.index()], 0.8);
+        m.resync();
+        assert_eq!(m.tick(1500.0, 10.0)[Axis::EV.index()], 0.0);
+        assert!(m.driven()[Axis::EV.index()]);
+        m.resync();
+        assert_eq!(m.tick(500.0, 10.0)[Axis::EV.index()], 0.8, "the output envelope owns the next fade");
+    }
+
+    #[test]
+    fn derived_electrodes_release_when_the_position_source_stops() {
+        let mut m = Mixer::new();
+        settled(&mut m);
+        m.set_expand_stroke(true);
+        m.tick(0.0, 10.0);
+        assert!(ELECTRODES.iter().all(|a| !m.driven()[a.index()]));
+        m.set_external(Axis::EA, Some(0.8));
+        m.tick(0.0, 10.0);
+        assert!(ELECTRODES.iter().all(|a| m.driven()[a.index()]));
+        let mut settings = m.settings(Axis::EA).clone();
+        settings.enabled = false;
+        m.set_settings(Axis::EA, settings);
+        m.tick(0.0, 10.0);
+        assert!(!m.driven()[Axis::EA.index()]);
+        assert!(ELECTRODES.iter().all(|a| !m.driven()[a.index()]));
     }
 
     #[test]

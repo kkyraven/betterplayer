@@ -60,7 +60,10 @@ pub fn electrodes(alpha: f64, beta: f64) -> [f64; 4] {
 
 pub fn contrast(e: [f64; 4], contrast: f64) -> [f64; 4] {
     let gamma = 1.0 - 0.75 * contrast.clamp(0.0, 1.0);
-    e.map(|v| v.clamp(0.0, 1.0).powf(gamma))
+    let e = e.map(|v| v.clamp(0.0, 1.0));
+    let peak = e.into_iter().fold(0.0, f64::max);
+    if peak == 0.0 { return e; }
+    e.map(|v| (v / peak).powf(gamma))
 }
 
 
@@ -167,6 +170,21 @@ mod tests {
         let half = contrast(e, 0.5);
         assert!(half[1] > e[1] && half[1] < up[1]);
         assert_eq!(contrast(e, 2.0), up, "clamped");
+    }
+
+    #[test]
+    fn channel_balance_is_independent_of_common_scale() {
+        for amount in [0.0, 0.5, 1.0] {
+            let weights = [0.0, 0.2, 0.4, 0.8];
+            let full = contrast(weights, amount);
+            let low = contrast(weights.map(|v| v * 0.01), amount);
+            for i in 0..4 {
+                assert!((full[i] - low[i]).abs() < 1e-12);
+            }
+            assert_eq!(full[0], 0.0);
+            assert_eq!(full[3], 1.0);
+            assert_eq!(contrast([0.0; 4], amount), [0.0; 4]);
+        }
     }
 
     #[test]

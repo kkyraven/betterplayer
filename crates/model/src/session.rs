@@ -54,6 +54,9 @@ impl Session {
         }
         let mut s = Session { session, input_name, provider, fallback, warmup_ms: 0.0, run_ms: 0.0, shape: meta.input_shape };
         let zeros = vec![0.0f32; s.shape[1] * s.shape[2]];
+
+
+        s.run(&zeros)?;
         let mut times = Vec::new();
         for _ in 0..3 {
             let t0 = Instant::now();

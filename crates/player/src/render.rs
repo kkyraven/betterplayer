@@ -35,6 +35,9 @@ pub enum Msg {
     Resize(u32, u32, Option<External>, Sender<()>),
 
     Presenting(bool),
+
+
+    PictureBack,
     Stop,
 }
 
@@ -324,6 +327,8 @@ fn run(
 
     let mut presenting = true;
 
+    let mut skipped_frame = false;
+
 
     let wanted = |presenting: bool| presenting && has_video.load(Ordering::Relaxed);
     loop {
@@ -370,6 +375,7 @@ fn run(
 
                             skip_one(ctx);
                         } else {
+                            skipped_frame = false;
                             render_one(
                                 ctx,
                                 &mut target,
@@ -383,8 +389,33 @@ fn run(
                             );
                         }
                     } else {
+
+
+                        if presenting {
+                            skipped_frame = true;
+                            stats.skipped();
+                        }
                         skip_one(ctx);
                     }
+                }
+            }
+            Some(Msg::PictureBack) => {
+                if skipped_frame && wanted(presenting) {
+                    skipped_frame = false;
+                    while target.busy() {
+                        target.poll(ctx, &frames, &stats, true);
+                    }
+                    render_one(
+                        ctx,
+                        &mut target,
+                        &frames,
+                        &stats,
+                        None,
+                        #[cfg(target_os = "macos")]
+                        &mut apple,
+                        #[cfg(windows)]
+                        &mut dlss,
+                    );
                 }
             }
             Some(Msg::Presenting(on)) => {

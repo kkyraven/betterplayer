@@ -621,6 +621,9 @@ mod tests {
 
     fn ctx(media_ms: f64, paused: bool) -> TickContext {
         TickContext {
+            manual_axes: [false; Axis::COUNT],
+            estim_manual: false,
+            estim_volume: crate::ramp::VolumeSettings::default(),
             media_ms,
             playing: !paused,
             rate: 1.0,
@@ -678,6 +681,19 @@ mod tests {
         panic!("waited for {n} x {path}, saw {:?}", mock.paths());
     }
 
+
+
+    fn settle(link: &mut HowlLink, done: impl Fn(&HowlLink) -> bool) {
+        for _ in 0..400 {
+            link.poll().unwrap();
+            if done(link) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("the reply never came");
+    }
+
     #[test]
     fn connect_checks_the_key_and_reads_the_status() {
         let mock = Mock::start();
@@ -724,7 +740,7 @@ mod tests {
             howl_json(&scripts()).as_deref()
         );
         assert_eq!(mock.last("start_player").body["from"].as_f64(), Some(4.0));
-        assert!(link.status.playing);
+        settle(&mut link, |l| l.status.playing);
 
 
         run(&mut link, &mock, "seek", 1, Some(60_000.0), false);

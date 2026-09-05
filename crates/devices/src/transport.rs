@@ -13,6 +13,8 @@ use crate::buttplug::Buttplug;
 use crate::coyote::CoyoteLink;
 use crate::handy::{HandyHosting, HandyLink};
 use crate::howl::{self, HowlLink};
+use crate::openshock::{OpenShockLink, OpenShockTrigger};
+use crate::ossm::OssmLink;
 use crate::toys::{BIND_TIMEOUT, ToyLink};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -42,6 +44,11 @@ pub enum Transport {
     },
 
 
+    Ossm {
+        name: String,
+    },
+
+
     Coyote {
         name: String,
         strength_a: u8,
@@ -64,6 +71,14 @@ pub enum Transport {
         name: String,
         address: String,
     },
+
+
+    OpenShock {
+        url: String,
+        token: String,
+        shocker: String,
+        trigger: OpenShockTrigger,
+    },
 }
 
 impl Transport {
@@ -75,10 +90,12 @@ impl Transport {
             Transport::WebSocket { .. } => "websocket",
             Transport::Buttplug { .. } => "buttplug",
             Transport::Ble { .. } => "ble",
+            Transport::Ossm { .. } => "ossm",
             Transport::Coyote { .. } => "coyote",
             Transport::Handy { .. } => "handy",
             Transport::Howl { .. } => "howl",
             Transport::Toy { .. } => "toy",
+            Transport::OpenShock { .. } => "openshock",
         }
     }
 
@@ -92,6 +109,13 @@ impl Transport {
             }
             Transport::WebSocket { url } | Transport::Buttplug { url } => url.clone(),
             Transport::Ble { name } | Transport::Coyote { name, .. } => name.clone(),
+            Transport::Ossm { name } => {
+                if name.is_empty() {
+                    "OSSM".into()
+                } else {
+                    name.clone()
+                }
+            }
             Transport::Handy { key, .. } => mask(key),
             Transport::Howl { host, .. } => format!("{host}:{}", howl::PORT),
             Transport::Toy { name, address } => {
@@ -101,8 +125,15 @@ impl Transport {
                     name.clone()
                 }
             }
+            Transport::OpenShock { url, .. } => host_of(url),
         }
     }
+}
+
+
+fn host_of(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    rest.split('/').next().unwrap_or_default().to_string()
 }
 
 
@@ -122,9 +153,11 @@ pub enum Link {
     Lines(Box<dyn Conn>),
     Buttplug(Buttplug),
     Coyote(CoyoteLink),
+    Ossm(OssmLink),
     Handy(HandyLink),
     Howl(HowlLink),
     Toy(ToyLink),
+    OpenShock(OpenShockLink),
 }
 
 
@@ -212,6 +245,7 @@ pub fn open(t: &Transport) -> io::Result<Link> {
             strength_a,
             strength_b,
         } => return CoyoteLink::open(name, *strength_a, *strength_b).map(Link::Coyote),
+        Transport::Ossm { name } => return OssmLink::open(name).map(Link::Ossm),
         Transport::Handy {
             key,
             app_key,
@@ -223,14 +257,22 @@ pub fn open(t: &Transport) -> io::Result<Link> {
                 .bind(address, name, BIND_TIMEOUT)
                 .map(Link::Toy);
         }
+        Transport::OpenShock {
+            url,
+            token,
+            shocker,
+            trigger,
+        } => return OpenShockLink::connect(url, token, shocker, *trigger).map(Link::OpenShock),
         _ => {}
     }
     Ok(Link::Lines(match t {
         Transport::Buttplug { .. }
         | Transport::Coyote { .. }
+        | Transport::Ossm { .. }
         | Transport::Handy { .. }
         | Transport::Howl { .. }
-        | Transport::Toy { .. } => unreachable!(),
+        | Transport::Toy { .. }
+        | Transport::OpenShock { .. } => unreachable!(),
         Transport::Ble { name } => Box::new(crate::ble::tcode(name)?),
         Transport::Serial { path, baud } => {
             let port = open_serial(path, *baud, Duration::from_millis(100)).map_err(|e| io::Error::new(ErrorKind::NotFound, e.to_string()))?;
@@ -529,6 +571,8 @@ mod tests {
         };
         assert_eq!((t.kind(), t.address()), ("handy", "Ab****Gh".to_string()));
         assert_eq!(mask("abc"), "***");
+        assert_eq!(host_of("https://api.openshock.app/"), "api.openshock.app");
+        assert_eq!(host_of("shock.local:8080"), "shock.local:8080");
     }
 
 

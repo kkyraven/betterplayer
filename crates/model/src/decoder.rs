@@ -16,11 +16,29 @@ pub struct DecodeConfig {
 
     pub active_threshold: f64,
     pub active_hold_ms: f64,
+
+
+
+    pub amplitude: f64,
+
+    pub centre_tau_ms: f64,
 }
+
+
+pub const CENTRE_TAU_MS: f64 = 4000.0;
 
 impl Default for DecodeConfig {
     fn default() -> DecodeConfig {
-        DecodeConfig { tau_ms: 0.0, event_threshold: 0.5, nms_frames: 3, rdp_eps: RDP_EPS, active_threshold: 0.3, active_hold_ms: 2000.0 }
+        DecodeConfig {
+            tau_ms: 0.0,
+            event_threshold: 0.5,
+            nms_frames: 4,
+            rdp_eps: RDP_EPS,
+            active_threshold: 0.3,
+            active_hold_ms: 2000.0,
+            amplitude: 1.0,
+            centre_tau_ms: CENTRE_TAU_MS,
+        }
     }
 }
 
@@ -65,6 +83,31 @@ pub fn smooth(time_ms: &[f64], pos: &[f64], tau_ms: f64) -> Vec<f64> {
         last = *t;
     }
     out
+}
+
+
+
+pub fn trim_step(centre: f64, pos: f64, gain: f64) -> f64 {
+    (centre + gain * (pos - centre)).clamp(0.0, 1.0)
+}
+
+
+
+
+pub fn scale_amplitude(time_ms: &[f64], pos: &[f64], gain: f64, centre_tau_ms: f64) -> Vec<f64> {
+    if gain == 1.0 || pos.is_empty() {
+        return pos.to_vec();
+    }
+    let centre = smooth(time_ms, pos, centre_tau_ms);
+    centre.iter().zip(pos).map(|(&c, &p)| trim_step(c, p, gain)).collect()
+}
+
+
+
+
+pub fn dense_signal(time_ms: &[f64], pos: &[f64], config: &DecodeConfig) -> Vec<f64> {
+    let scaled = scale_amplitude(time_ms, pos, config.amplitude, config.centre_tau_ms);
+    smooth(time_ms, &scaled, config.tau_ms)
 }
 
 
@@ -119,7 +162,7 @@ pub fn decode_axis(time_ms: &[f64], pos: &[f64], trough: &[f64], peak: &[f64], a
     if n == 0 {
         return Vec::new();
     }
-    let y = smooth(time_ms, pos, config.tau_ms);
+    let y = dense_signal(time_ms, pos, config);
     let mut edges: Vec<usize> = vec![0, n - 1];
     edges.extend(pick_events(trough, config.event_threshold, config.nms_frames));
     edges.extend(pick_events(peak, config.event_threshold, config.nms_frames));
@@ -210,6 +253,24 @@ mod tests {
 
         assert_eq!(base.energised(0.0).tau_ms, 120.0 / ENERGY_MIN);
         assert_eq!(lively.event_threshold, base.event_threshold);
+    }
+
+    #[test]
+    fn the_trim_stretches_about_the_running_centre_and_clips() {
+        let t: Vec<f64> = (0..200).map(|i| i as f64 * 33.0).collect();
+
+        let pos: Vec<f64> = t.iter().map(|&x| if (x / 500.0) as i64 % 2 == 0 { 0.4 } else { 0.6 }).collect();
+        assert_eq!(scale_amplitude(&t, &pos, 1.0, CENTRE_TAU_MS), pos);
+        let deep = scale_amplitude(&t, &pos, 2.0, 1.0e12);
+
+
+        assert!((deep[0] - 0.4).abs() < 1e-6 && (deep[16] - 0.8).abs() < 1e-6, "{:?}", &deep[..20]);
+        let clipped = scale_amplitude(&t, &pos, 10.0, 1.0e12);
+        assert_eq!(clipped[16], 1.0);
+
+        let mut centre = Smoother::default();
+        let live: Vec<f64> = t.iter().zip(&pos).map(|(&t, &p)| trim_step(centre.push(t, p, 300.0), p, 1.5)).collect();
+        assert_eq!(live, scale_amplitude(&t, &pos, 1.5, 300.0));
     }
 
     #[test]

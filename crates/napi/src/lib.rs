@@ -30,6 +30,8 @@ impl From<bp_player::Percentiles> for Percentiles {
 pub struct RenderStats {
     pub frames: f64,
     pub dropped: f64,
+
+    pub skipped: f64,
     pub render_errors: f64,
     pub gl_errors: f64,
     pub last_gl_error: u32,
@@ -105,6 +107,7 @@ pub struct DlssOptions {
 pub struct EnhanceOptions {
 
 
+
     pub upscaler: String,
 
     pub target_fps: Option<f64>,
@@ -133,18 +136,23 @@ pub struct EnhanceState {
 
 fn parse_dlss(d: DlssOptions) -> std::result::Result<bp_player::DlssOptions, String> {
     let options = bp_player::DlssOptions {
-        nr_preset: bp_player::NrPreset::parse(&d.nr_preset).ok_or_else(|| format!("unknown NR preset {}", d.nr_preset))?,
-        nr_style: bp_player::NrStyle::parse(&d.nr_style).ok_or_else(|| format!("unknown NR style {}", d.nr_style))?,
+        nr_preset: bp_player::NrPreset::parse(&d.nr_preset)
+            .ok_or_else(|| format!("unknown NR preset {}", d.nr_preset))?,
+        nr_style: bp_player::NrStyle::parse(&d.nr_style)
+            .ok_or_else(|| format!("unknown NR style {}", d.nr_style))?,
         intensity: d.intensity as f32,
         local_tone: d.local_tone as f32,
         local_structure: d.local_structure as f32,
         skin_structure: d.skin_structure as f32,
         auto_mask: d.auto_mask,
-        model_preset: bp_player::ModelPreset::parse(&d.model_preset).ok_or_else(|| format!("unknown model preset {}", d.model_preset))?,
+        model_preset: bp_player::ModelPreset::parse(&d.model_preset)
+            .ok_or_else(|| format!("unknown model preset {}", d.model_preset))?,
         factor: d.factor,
         input_height: d.input_height,
-        rate: bp_player::DlssRate::parse(&d.rate).ok_or_else(|| format!("unknown rate {}", d.rate))?,
-        guide: bp_player::GuideQuality::parse(&d.guide).ok_or_else(|| format!("unknown guide quality {}", d.guide))?,
+        rate: bp_player::DlssRate::parse(&d.rate)
+            .ok_or_else(|| format!("unknown rate {}", d.rate))?,
+        guide: bp_player::GuideQuality::parse(&d.guide)
+            .ok_or_else(|| format!("unknown guide quality {}", d.guide))?,
         buffer_seconds: d.buffer_seconds,
     };
     options.validate()?;
@@ -324,6 +332,8 @@ pub struct OutputState {
 
     pub howl: Option<HowlStatus>,
 
+    pub ossm: Option<OssmStatus>,
+
     pub features: Vec<OutputFeature>,
 
     pub battery: Option<u8>,
@@ -339,6 +349,25 @@ pub struct HowlStatus {
     pub power_a: u8,
     pub power_b: u8,
     pub mute: bool,
+}
+
+
+
+
+#[napi(object)]
+pub struct OssmStatus {
+    pub state: String,
+    pub speed: u8,
+    pub position_mm: f64,
+}
+
+
+
+#[napi(object)]
+pub struct VibrationConfig {
+    pub source: String,
+    pub depth: f64,
+    pub hz: f64,
 }
 
 
@@ -422,12 +451,23 @@ pub struct RampConfig {
 }
 
 
+#[napi(object)]
+pub struct EstimVolumeBoost {
+    pub enabled: bool,
+    pub axis: String,
+
+    pub amount: f64,
+}
 
 
 
 #[napi(object)]
 pub struct EstimOptions {
     pub contrast: f64,
+
+    pub volume_floor: Option<f64>,
+    pub volume_max: Option<f64>,
+    pub volume_boost: Option<EstimVolumeBoost>,
     pub params: bool,
 }
 
@@ -698,6 +738,7 @@ fn track_axes(rows: Vec<TrackAxis>, mut table: bp_core::TrackAxes) -> Result<bp_
             "hero" => bp_core::TrackSource::Hero,
             "ai-motion" => bp_core::TrackSource::AiMotion,
             "ai-music" => bp_core::TrackSource::AiMusic,
+            "faptap" => bp_core::TrackSource::Faptap,
             _ => bp_core::TrackSource::Off,
         };
         let min = r.min.clamp(0.0, 1.0);
@@ -903,6 +944,9 @@ pub struct TrackState {
 
 
 
+
+
+
 #[napi(object)]
 pub struct Transport {
     pub kind: String,
@@ -919,6 +963,33 @@ pub struct Transport {
     pub app_key: Option<String>,
     pub hosting: Option<String>,
     pub address: Option<String>,
+    pub token: Option<String>,
+    pub shocker: Option<String>,
+    pub trigger: Option<OpenShockTrigger>,
+}
+
+
+
+#[napi(object)]
+pub struct OpenShockTrigger {
+    pub axis: String,
+    pub line: f64,
+    pub above: bool,
+    pub control: String,
+    pub intensity: u8,
+}
+
+impl OpenShockTrigger {
+    fn to_core(&self) -> Result<bp_devices::OpenShockTrigger> {
+        Ok(bp_devices::OpenShockTrigger {
+            axis: axis(&self.axis)?,
+            line: self.line.clamp(0.0, 1.0),
+            above: self.above,
+            control: bp_devices::OpenShockControl::from_str(&self.control)
+                .ok_or_else(|| err(format!("unknown openshock control {}", self.control)))?,
+            intensity: self.intensity.min(100),
+        })
+    }
 }
 
 fn profile(s: &str) -> Result<bp_devices::Profile> {
@@ -956,6 +1027,9 @@ impl Transport {
             "ble" => bp_devices::Transport::Ble {
                 name: need(&self.name, "name")?,
             },
+            "ossm" => bp_devices::Transport::Ossm {
+                name: self.name.clone().unwrap_or_default(),
+            },
             "coyote" => bp_devices::Transport::Coyote {
                 name: self.name.clone().unwrap_or_default(),
                 strength_a: self.strength_a.unwrap_or(0),
@@ -977,6 +1051,21 @@ impl Transport {
             "toy" => bp_devices::Transport::Toy {
                 name: self.name.clone().unwrap_or_default(),
                 address: self.address.clone().unwrap_or_default(),
+            },
+            "openshock" => bp_devices::Transport::OpenShock {
+                url: self
+                    .url
+                    .clone()
+                    .filter(|u| !u.trim().is_empty())
+                    .unwrap_or_else(|| bp_devices::OPENSHOCK_API.into()),
+                token: need(&self.token, "token")?,
+                shocker: need(&self.shocker, "shocker")?,
+                trigger: self
+                    .trigger
+                    .as_ref()
+                    .map(OpenShockTrigger::to_core)
+                    .transpose()?
+                    .unwrap_or_default(),
             },
             k => return Err(err(format!("unknown transport {k}"))),
         })
@@ -1184,7 +1273,10 @@ impl Engine {
 
     #[napi]
     pub fn detect_boxes(&self, kinds: Vec<String>) -> DetectBoxes {
-        let kinds: Vec<bp_core::DetectKind> = kinds.iter().filter_map(|k| bp_core::DetectKind::from_id(k)).collect();
+        let kinds: Vec<bp_core::DetectKind> = kinds
+            .iter()
+            .filter_map(|k| bp_core::DetectKind::from_id(k))
+            .collect();
         let (runs, boxes) = self.inner.detect_boxes(&kinds);
         DetectBoxes {
             runs: runs as f64,
@@ -1256,6 +1348,106 @@ impl Engine {
         self.inner.player.muted()
     }
 
+
+    #[napi]
+    pub fn seek_exact(&self, seconds: f64) -> Result<()> {
+        self.inner.seek_exact(seconds).map_err(err)
+    }
+
+
+    #[napi]
+    pub fn frame_step(&self, forward: bool) -> Result<()> {
+        self.inner.frame_step(forward).map_err(err)
+    }
+
+
+
+
+
+    #[napi]
+    pub fn set_draft(
+        &self,
+        axis_id: String,
+        at: Option<Float64Array>,
+        pos: Option<Float64Array>,
+    ) -> Result<()> {
+        let script = match (at, pos) {
+            (Some(at), Some(pos)) => Some(script_from_arrays(&at, &pos)?),
+            _ => None,
+        };
+        self.inner.set_draft(axis(&axis_id)?, script);
+        Ok(())
+    }
+
+
+    #[napi]
+    pub fn clear_draft(&self) {
+        self.inner.clear_draft()
+    }
+
+
+
+    #[napi]
+    pub fn push_draft_hosted(&self) {
+        self.inner.push_draft_hosted()
+    }
+
+
+
+
+
+    #[napi(ts_return_type = "Promise<RangeAnalysis>")]
+    pub fn analyse_range(&self, options: AnalyseOptions) -> Result<AsyncTask<AnalyseRange>> {
+        let analyser = self.inner.range_analyser().map_err(err)?;
+        Ok(AsyncTask::new(AnalyseRange {
+            analyser: Some(analyser),
+            options: bp_core::RangeOptions {
+                start_ms: options.start_ms,
+                end_ms: options.end_ms,
+                region: options.region.map(region_core),
+                model: options.model.unwrap_or(false),
+                hero: options.hero.unwrap_or(false),
+                thumbs_every_ms: options.thumbs_every_ms,
+                thumb_width: options.thumb_width.unwrap_or(96),
+            },
+        }))
+    }
+
+    #[napi]
+    pub fn analyse_state(&self) -> RangeState {
+        let p = self.inner.range_progress();
+        let error = match &p.status {
+            bp_core::RangeStatus::Error(e) => Some(e.clone()),
+            _ => None,
+        };
+        RangeState {
+            status: p.status.as_str().to_string(),
+            error,
+            start_ms: p.start_ms,
+            end_ms: p.end_ms,
+            time_ms: p.time_ms,
+        }
+    }
+
+
+
+    #[napi]
+    pub fn device_slider(&self) -> Option<f64> {
+        self.inner.device_slider()
+    }
+
+
+    #[napi]
+    pub fn analyse_cancel(&self) {
+        self.inner.range_cancel()
+    }
+
+
+    #[napi]
+    pub fn analyse_close(&self) {
+        self.inner.range_close()
+    }
+
     #[napi]
     pub fn global_offset_ms(&self) -> f64 {
         self.inner.global_offset_ms()
@@ -1320,6 +1512,12 @@ impl Engine {
     #[napi]
     pub fn track_stop(&self) {
         self.inner.track_stop()
+    }
+
+
+    #[napi]
+    pub fn track_playback(&self, media_ms: f64, playing: bool, rate: f64) {
+        self.inner.track_playback(media_ms, playing, rate);
     }
 
 
@@ -1766,9 +1964,34 @@ impl Engine {
     }
 
 
+
+    #[napi]
+    pub fn set_output_vibration(&self, id: u32, vibration: Option<VibrationConfig>) -> Result<bool> {
+        let vibration = vibration
+            .map(|v| {
+                if !v.depth.is_finite() || !v.hz.is_finite() {
+                    return Err(err("vibration depth and hz must be finite".into()));
+                }
+                Ok::<_, Error>(bp_devices::Vibration {
+                    source: axis(&v.source)?,
+                    depth: v.depth.clamp(0.0, 1.0),
+                    hz: v.hz.clamp(0.0, 50.0),
+                })
+            })
+            .transpose()?;
+        Ok(self.inner.set_output_vibration(id, vibration))
+    }
+
+
     #[napi]
     pub fn set_coyote_strength(&self, id: u32, a: u8, b: u8) -> bool {
         self.inner.set_coyote_strength(id, a, b)
+    }
+
+
+    #[napi]
+    pub fn set_openshock_trigger(&self, id: u32, trigger: OpenShockTrigger) -> Result<bool> {
+        Ok(self.inner.set_openshock_trigger(id, trigger.to_core()?))
     }
 
     #[napi]
@@ -1877,11 +2100,25 @@ impl Engine {
     }
 
     #[napi]
-    pub fn set_estim(&self, options: EstimOptions) {
+    pub fn set_estim(&self, options: EstimOptions) -> Result<()> {
+        let boost = match options.volume_boost {
+            Some(b) => {
+                let source = axis(&b.axis)?;
+                if !matches!(source.kind(), bp_script::Kind::Position | bp_script::Kind::Rotation) {
+                    return Err(err("volume boost requires a position or rotation axis".into()));
+                }
+                bp_devices::ramp::VolumeBoost { enabled: b.enabled, axis: source, amount: b.amount }
+            }
+            None => bp_devices::ramp::VolumeBoost::default(),
+        };
         self.inner.set_estim(bp_core::EstimOptions {
             contrast: options.contrast,
+            volume_floor: options.volume_floor.unwrap_or(bp_core::EstimOptions::default().volume_floor),
+            volume_max: options.volume_max.unwrap_or(1.0),
+            volume_boost: boost,
             params: options.params,
-        })
+        });
+        Ok(())
     }
 
     #[napi]
@@ -1889,6 +2126,9 @@ impl Engine {
         let o = self.inner.estim();
         EstimOptions {
             contrast: o.contrast,
+            volume_floor: Some(o.volume_floor),
+            volume_max: Some(o.volume_max),
+            volume_boost: Some(EstimVolumeBoost { enabled: o.volume_boost.enabled, axis: o.volume_boost.axis.id().into(), amount: o.volume_boost.amount }),
             params: o.params,
         }
     }
@@ -1959,6 +2199,11 @@ impl Engine {
                             power_a: h.power_a,
                             power_b: h.power_b,
                             mute: h.mute,
+                        }),
+                        ossm: o.ossm.map(|s| OssmStatus {
+                            state: s.state,
+                            speed: s.speed,
+                            position_mm: s.position_mm,
                         }),
                         features: o
                             .features
@@ -2053,7 +2298,14 @@ impl Engine {
             Some(d) => parse_dlss(d).map_err(err)?,
             None => bp_player::DlssOptions::default(),
         };
-        self.inner.player.set_enhance(bp_player::EnhanceOptions { upscaler, target_fps, dlss }).map_err(err)
+        self.inner
+            .player
+            .set_enhance(bp_player::EnhanceOptions {
+                upscaler,
+                target_fps,
+                dlss,
+            })
+            .map_err(err)
     }
 
 
@@ -2126,6 +2378,7 @@ impl Engine {
         RenderStats {
             frames: s.frames as f64,
             dropped: s.dropped as f64,
+            skipped: s.skipped as f64,
             render_errors: s.render_errors as f64,
             gl_errors: s.gl_errors as f64,
             last_gl_error: s.last_gl_error,
@@ -2176,14 +2429,22 @@ impl Task for LoadScripts {
     type JsValue = MediaInfo;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        Ok(self.loader.pool_for(&self.path, self.scripts_path.as_deref()))
+        Ok(self
+            .loader
+            .pool_for(&self.path, self.scripts_path.as_deref()))
     }
 
     fn resolve(&mut self, _env: Env, pool: Self::Output) -> Result<Self::JsValue> {
         let m = match self.start_seconds {
             Some(start) => self
                 .loader
-                .load(&self.path, start, pool, &self.variants, self.headers.as_deref())
+                .load(
+                    &self.path,
+                    start,
+                    pool,
+                    &self.variants,
+                    self.headers.as_deref(),
+                )
                 .map_err(err)?,
             None => self
                 .loader
@@ -2207,7 +2468,8 @@ impl Task for Prepare {
     type JsValue = ();
 
     fn compute(&mut self) -> Result<Self::Output> {
-        self.loader.prepare(&self.path, self.scripts_path.as_deref());
+        self.loader
+            .prepare(&self.path, self.scripts_path.as_deref());
         Ok(())
     }
 
@@ -2856,7 +3118,11 @@ fn script_info_js(s: bp_core::ScriptInfo) -> ScriptInfo {
         average_speed: s.average_speed,
         max_speed: s.max_speed,
         heatmap: s.heatmap,
-        gaps: s.gaps.into_iter().map(|(start_ms, end_ms)| Span { start_ms, end_ms }).collect(),
+        gaps: s
+            .gaps
+            .into_iter()
+            .map(|(start_ms, end_ms)| Span { start_ms, end_ms })
+            .collect(),
         chapters: s
             .chapters
             .into_iter()
@@ -3171,7 +3437,13 @@ impl VideoPlayer {
             width,
             height,
             bp_player::PlayerOptions {
-                hwdec: o.hwdec.map(|h| if h == "auto" { default_hwdec().to_string() } else { h }),
+                hwdec: o.hwdec.map(|h| {
+                    if h == "auto" {
+                        default_hwdec().to_string()
+                    } else {
+                        h
+                    }
+                }),
                 mpv_options,
                 ..bp_player::PlayerOptions::default()
             },
@@ -3280,4 +3552,332 @@ impl VideoPlayer {
     pub fn close(&mut self) {
         self.inner.close()
     }
+}
+
+
+
+
+
+#[napi(object)]
+pub struct AnalyseOptions {
+    pub start_ms: f64,
+    pub end_ms: f64,
+    pub region: Option<TrackRegion>,
+
+    pub model: Option<bool>,
+
+    pub hero: Option<bool>,
+
+    pub thumbs_every_ms: Option<f64>,
+    pub thumb_width: Option<u32>,
+}
+
+
+#[napi(object)]
+pub struct RangeState {
+    pub status: String,
+    pub error: Option<String>,
+    pub start_ms: f64,
+    pub end_ms: f64,
+    pub time_ms: f64,
+}
+
+#[napi(object)]
+pub struct RangeBox {
+    pub time_ms: f64,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+
+#[napi(object)]
+pub struct AxisKeyframes {
+    pub axis: String,
+    pub at: Float64Array,
+    pub pos: Float64Array,
+}
+
+
+#[napi(object)]
+pub struct RangeThumb {
+    pub time_ms: f64,
+    pub width: u32,
+    pub height: u32,
+    pub rgb: Uint8Array,
+}
+
+
+
+#[napi(object)]
+pub struct RangeAnalysis {
+    pub start_ms: f64,
+    pub end_ms: f64,
+    pub fps: f64,
+    pub times: Float64Array,
+    pub motion: Float64Array,
+    pub cuts: Vec<f64>,
+    pub boxes: Vec<RangeBox>,
+
+    pub model: Vec<AxisKeyframes>,
+
+    pub hero: Vec<AxisKeyframes>,
+    pub thumbs: Vec<RangeThumb>,
+}
+
+pub struct AnalyseRange {
+    analyser: Option<bp_core::RangeAnalyser>,
+    options: bp_core::RangeOptions,
+}
+
+impl Task for AnalyseRange {
+    type Output = RangeAnalysis;
+    type JsValue = RangeAnalysis;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let analyser = self
+            .analyser
+            .take()
+            .ok_or_else(|| err("already run".into()))?;
+        let o = self.options.clone();
+        let r = analyser.run(o.clone()).map_err(err)?;
+        let mut motion = Vec::with_capacity(r.motion.len() * 6);
+        for (_, m) in &r.motion {
+            motion.extend_from_slice(m);
+        }
+        Ok(RangeAnalysis {
+            start_ms: o.start_ms,
+            end_ms: o.end_ms,
+            fps: r.fps,
+            times: Float64Array::new(r.motion.iter().map(|(t, _)| *t).collect()),
+            motion: Float64Array::new(motion),
+            cuts: r.cuts,
+            boxes: r
+                .boxes
+                .into_iter()
+                .map(|(time_ms, b)| RangeBox {
+                    time_ms,
+                    x: b.x,
+                    y: b.y,
+                    w: b.w,
+                    h: b.h,
+                })
+                .collect(),
+            model: r
+                .model
+                .into_iter()
+                .map(|(axis, actions)| AxisKeyframes {
+                    axis: axis.id().to_string(),
+                    at: Float64Array::new(actions.iter().map(|a| a.at).collect()),
+                    pos: Float64Array::new(actions.iter().map(|a| a.pos).collect()),
+                })
+                .collect(),
+            hero: r
+                .hero
+                .into_iter()
+                .map(|(axis, actions)| AxisKeyframes {
+                    axis: axis.id().to_string(),
+                    at: Float64Array::new(actions.iter().map(|a| a.at).collect()),
+                    pos: Float64Array::new(actions.iter().map(|a| a.pos).collect()),
+                })
+                .collect(),
+            thumbs: r
+                .thumbs
+                .into_iter()
+                .map(|t| RangeThumb {
+                    time_ms: t.time_ms,
+                    width: t.width,
+                    height: t.height,
+                    rgb: Uint8Array::new(t.rgb),
+                })
+                .collect(),
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, out: Self::Output) -> Result<Self::JsValue> {
+        Ok(out)
+    }
+}
+
+
+
+#[napi(object)]
+pub struct EditorScript {
+    pub axis: String,
+    pub variant: Option<String>,
+    pub source: String,
+    pub container: String,
+    pub at: Float64Array,
+    pub pos: Float64Array,
+    pub chapters: Vec<Chapter>,
+    pub bookmarks: Vec<Bookmark>,
+    pub metadata: String,
+}
+
+pub struct ReadScripts {
+    path: String,
+}
+
+impl Task for ReadScripts {
+    type Output = Vec<bp_script::LoadedScript>;
+    type JsValue = Vec<EditorScript>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        Ok(bp_script::find_scripts(std::path::Path::new(&self.path)))
+    }
+
+    fn resolve(&mut self, _env: Env, scripts: Self::Output) -> Result<Self::JsValue> {
+        Ok(scripts
+            .into_iter()
+            .map(|s| EditorScript {
+                axis: s.axis.id().to_string(),
+                variant: s.variant,
+                source: s.source.to_string_lossy().into_owned(),
+                container: s.container.as_str().to_string(),
+                at: Float64Array::new(s.script.actions.iter().map(|a| a.at).collect()),
+                pos: Float64Array::new(s.script.actions.iter().map(|a| a.pos).collect()),
+                chapters: s
+                    .script
+                    .chapters
+                    .iter()
+                    .map(|c| Chapter {
+                        name: c.name.clone(),
+                        start_ms: c.start_ms,
+                        end_ms: c.end_ms,
+                    })
+                    .collect(),
+                bookmarks: s
+                    .script
+                    .bookmarks
+                    .iter()
+                    .map(|b| Bookmark {
+                        name: b.name.clone(),
+                        at_ms: b.at_ms,
+                    })
+                    .collect(),
+                metadata: serde_json::Value::Object(s.script.metadata).to_string(),
+            })
+            .collect())
+    }
+}
+
+
+
+#[napi(ts_return_type = "Promise<Array<EditorScript>>")]
+pub fn read_scripts(path: String) -> AsyncTask<ReadScripts> {
+    AsyncTask::new(ReadScripts { path })
+}
+
+
+
+
+#[napi(object)]
+pub struct ScriptInput {
+    pub at: Float64Array,
+    pub pos: Float64Array,
+    pub chapters: Option<Vec<Chapter>>,
+    pub bookmarks: Option<Vec<Bookmark>>,
+    pub metadata: Option<String>,
+    pub duration_seconds: Option<f64>,
+}
+
+fn script_from_arrays(at: &[f64], pos: &[f64]) -> Result<bp_script::Script> {
+    if at.len() != pos.len() {
+        return Err(err(format!(
+            "{} times for {} positions",
+            at.len(),
+            pos.len()
+        )));
+    }
+    let mut actions: Vec<bp_script::Action> = at
+        .iter()
+        .zip(pos)
+        .filter(|(t, p)| t.is_finite() && p.is_finite())
+        .map(|(t, p)| bp_script::Action {
+            at: t.max(0.0),
+            pos: p.clamp(0.0, 1.0),
+        })
+        .collect();
+    actions.sort_by(|a, b| a.at.total_cmp(&b.at));
+    actions.dedup_by(|later, earlier| {
+        if later.at == earlier.at {
+            earlier.pos = later.pos;
+            true
+        } else {
+            false
+        }
+    });
+    Ok(bp_script::Script {
+        actions,
+        ..Default::default()
+    })
+}
+
+fn script_from_input(input: &ScriptInput) -> Result<bp_script::Script> {
+    let mut script = script_from_arrays(&input.at, &input.pos)?;
+    script.chapters = input
+        .chapters
+        .iter()
+        .flatten()
+        .map(|c| bp_script::Chapter {
+            name: c.name.clone(),
+            start_ms: c.start_ms,
+            end_ms: c.end_ms,
+        })
+        .collect();
+    script.bookmarks = input
+        .bookmarks
+        .iter()
+        .flatten()
+        .map(|b| bp_script::Bookmark {
+            name: b.name.clone(),
+            at_ms: b.at_ms,
+        })
+        .collect();
+    if let Some(text) = input.metadata.as_deref().filter(|t| !t.trim().is_empty()) {
+        match serde_json::from_str::<serde_json::Value>(text).map_err(|e| err(e.to_string()))? {
+            serde_json::Value::Object(map) => script.metadata = map,
+            _ => return Err(err("metadata must be a JSON object".into())),
+        }
+    }
+    Ok(script)
+}
+
+
+#[napi]
+pub fn funscript_json(script: ScriptInput) -> Result<String> {
+    Ok(script_from_input(&script)?.to_json_with(script.duration_seconds))
+}
+
+
+#[napi]
+pub fn funscript_bundle(root: ScriptInput, axes: Vec<AxisKeyframes>) -> Result<String> {
+    let script = script_from_input(&root)?;
+    let others = axes
+        .iter()
+        .map(|a| Ok((axis(&a.axis)?, script_from_arrays(&a.at, &a.pos)?)))
+        .collect::<Result<Vec<_>>>()?;
+    let refs: Vec<(bp_script::Axis, &bp_script::Script)> =
+        others.iter().map(|(a, s)| (*a, s)).collect();
+    Ok(script.to_bundle_json(&refs, root.duration_seconds))
+}
+
+
+
+#[napi]
+pub fn simplify_indices(at: Float64Array, pos: Float64Array, eps: f64) -> Result<Uint32Array> {
+    if at.len() != pos.len() {
+        return Err(err(format!(
+            "{} times for {} positions",
+            at.len(),
+            pos.len()
+        )));
+    }
+    Ok(Uint32Array::new(
+        bp_script::rdp_indices(&at, &pos, eps)
+            .into_iter()
+            .map(|i| i as u32)
+            .collect(),
+    ))
 }

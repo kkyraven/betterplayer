@@ -11,7 +11,7 @@ pub mod ring;
 pub mod session;
 pub mod spec;
 
-pub use decoder::{ActiveGate, DecodeConfig, Smoother, decode_axis};
+pub use decoder::{ActiveGate, DecodeConfig, Smoother, trim_step, decode_axis};
 pub use features::{BoxRun, FrameInput, MOVEMENT_LAYOUT, MOVEMENT_WIDTH, movement_row};
 pub use meta::{Field, Meta, ModelKind};
 pub use movement::{Heads, Movement, PAST, FUTURE, WINDOW, SCORE_START};

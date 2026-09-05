@@ -8,6 +8,7 @@ mod lookahead;
 mod motion;
 mod params;
 mod pass;
+mod range;
 mod track;
 
 use std::collections::VecDeque;
@@ -19,8 +20,9 @@ use std::time::{Duration, Instant};
 
 use bp_axes::{AxisSettings, Fallback, Frame, Mixer, ScriptTable};
 use bp_devices::{
-    AxisClamp, IntifaceServer, IntifaceStatus, Media, Output, OutputSnapshot, OutputStats, Pace,
-    PercentilesUs, Profile, TickContext, Transport, deadline, percentiles,
+    AxisClamp, IntifaceServer, IntifaceStatus, Media, OpenShockTrigger, Output, OutputSnapshot,
+    OutputStats, Pace, PercentilesUs, Profile, TickContext, Transport, Vibration, deadline,
+    percentiles,
 };
 use bp_player::{Player, PlayerEvent, PlayerOptions};
 use bp_script::{Axis, Container, Kind, Script, find_scripts, heatmap};
@@ -49,6 +51,9 @@ pub use bp_model::{MODELS as AI_MODELS, ModelKind, ModelSpec as AiModelSpec, TOO
 pub use detect::{DetectSnapshot, DetectStatus, Found, Verdict};
 pub use generate::{GenerateProgress, GenerateStatus, Generation};
 pub use hero::{ColourRule, Flourish, HeroSnapshot};
+pub use range::{
+    MODEL_TAIL_MS, RangeAnalyser, RangeOptions, RangeProgress, RangeResult, RangeStatus, Thumb,
+};
 
 pub use bp_axes::{Provider, SmartLimit};
 pub use bp_devices::{RampConfig, RampProgress};
@@ -195,6 +200,10 @@ pub struct EstimOptions {
 
     pub contrast: f64,
 
+    pub volume_floor: f64,
+    pub volume_max: f64,
+    pub volume_boost: bp_devices::ramp::VolumeBoost,
+
 
     pub params: bool,
 }
@@ -203,6 +212,9 @@ impl Default for EstimOptions {
     fn default() -> EstimOptions {
         EstimOptions {
             contrast: 0.0,
+            volume_floor: bp_devices::ramp::DEFAULT_VOLUME_FLOOR,
+            volume_max: 1.0,
+            volume_boost: bp_devices::ramp::VolumeBoost::default(),
             params: false,
         }
     }
@@ -219,6 +231,7 @@ impl ParamSource {
 
 
 
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrackSource {
     Video,
@@ -226,6 +239,7 @@ pub enum TrackSource {
     Hero,
     AiMotion,
     AiMusic,
+    Faptap,
     Off,
 }
 
@@ -546,6 +560,8 @@ struct Published {
 
 struct Shared {
     clock: Mutex<Clock>,
+    browser_tracking: AtomicBool,
+    browser_clock: Mutex<Clock>,
     mixer: Mutex<Mixer>,
     outputs: Mutex<Vec<Output>>,
 
@@ -569,6 +585,7 @@ struct Shared {
     live_params: AtomicBool,
 
     params_enabled: AtomicBool,
+    estim_volume: Mutex<bp_devices::ramp::VolumeSettings>,
 
     detect_wanted: AtomicBool,
 
@@ -621,6 +638,13 @@ struct Shared {
 
     generate: Arc<generate::State>,
 
+
+    draft: Mutex<Vec<(Axis, Arc<Script>)>>,
+
+    range: Arc<range::State>,
+
+    analyser: Mutex<Option<range::Analyser>>,
+
     intiface: Mutex<Option<IntifaceServer>>,
 
     remote_driving: AtomicBool,
@@ -649,6 +673,8 @@ impl Engine {
     pub fn new(width: u32, height: u32, opts: EngineOptions) -> Result<Engine, String> {
         let shared = Arc::new(Shared {
             clock: Mutex::new(Clock::new()),
+            browser_tracking: AtomicBool::new(false),
+            browser_clock: Mutex::new(Clock::new()),
             mixer: Mutex::new(Mixer::new()),
             outputs: Mutex::new(Vec::new()),
             scripts: Mutex::new(Vec::new()),
@@ -665,6 +691,7 @@ impl Engine {
             param_sources: Mutex::new(std::array::from_fn(|_| ParamSource::Restim)),
             live_params: AtomicBool::new(false),
             params_enabled: AtomicBool::new(EstimOptions::default().params),
+            estim_volume: Mutex::new(bp_devices::ramp::VolumeSettings::default()),
             detect_wanted: AtomicBool::new(false),
             boxes_wanted: AtomicBool::new(false),
             cuts_wanted: AtomicBool::new(false),
@@ -696,6 +723,9 @@ impl Engine {
             beat: Arc::new(Mutex::new(Beat::new())),
             hero: Mutex::new(HeroState::new()),
             generate: Arc::new(generate::State::new()),
+            draft: Mutex::new(Vec::new()),
+            range: Arc::new(range::State::new()),
+            analyser: Mutex::new(None),
             intiface: Mutex::new(None),
             remote_driving: AtomicBool::new(false),
             tick: Mutex::new(TickSamples::default()),
@@ -794,6 +824,11 @@ impl Engine {
         *self.shared.lookahead.lock().unwrap() = None;
         self.shared.pool.lock().unwrap().clear();
         self.shared.generated.lock().unwrap().clear();
+        self.shared.draft.lock().unwrap().clear();
+
+        if let Ok(mut a) = self.shared.analyser.try_lock() {
+            *a = None;
+        }
         self.shared.set_scripts(Vec::new());
         let mut clock = self.shared.clock.lock().unwrap();
         clock.report(0.0);
@@ -872,6 +907,16 @@ impl Engine {
         self.player.seek(seconds.max(0.0))
     }
 
+
+    pub fn seek_exact(&self, seconds: f64) -> Result<(), String> {
+        self.player.seek_exact(seconds.max(0.0))
+    }
+
+
+    pub fn frame_step(&self, forward: bool) -> Result<(), String> {
+        self.player.frame_step(forward)
+    }
+
     pub fn set_rate(&self, rate: f64) -> Result<(), String> {
         self.player.set_rate(rate)
     }
@@ -910,6 +955,8 @@ impl Engine {
 
     pub fn track_start(&self, options: TrackOptions, axes: TrackAxes, lookahead: bool) {
         self.track_stop();
+        self.shared.browser_tracking.store(!lookahead, Ordering::Relaxed);
+        *self.shared.browser_clock.lock().unwrap() = Clock::new();
         self.note_hwdec();
         *self.shared.track_axes.lock().unwrap() = axes;
         self.shared.update_motion_wanted(&axes);
@@ -1156,7 +1203,8 @@ impl Engine {
 
 
     pub fn wants_frames(&self) -> bool {
-        self.shared.detect_wanted.load(Ordering::Relaxed) || self.shared.boxes_wanted.load(Ordering::Relaxed)
+        self.shared.detect_wanted.load(Ordering::Relaxed)
+            || self.shared.boxes_wanted.load(Ordering::Relaxed)
     }
 
 
@@ -1233,6 +1281,7 @@ impl Engine {
 
 
     pub fn track_stop(&self) {
+        self.shared.browser_tracking.store(false, Ordering::Relaxed);
         if let Some(t) = self
             .shared
             .track
@@ -1299,10 +1348,25 @@ impl Engine {
     }
 
 
+    pub fn track_playback(&self, media_ms: f64, playing: bool, rate: f64) {
+        if !self.shared.browser_tracking.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut clock = self.shared.browser_clock.lock().unwrap();
+        clock.set_paused(!playing);
+        clock.set_idle(!playing);
+        clock.set_speed(rate);
+        clock.report(media_ms);
+    }
+
+
 
 
 
     pub fn track_frame(&self, bytes: &[u8], channels: u32, width: u32, height: u32, time_ms: f64) {
+        if self.shared.browser_tracking.load(Ordering::Relaxed) {
+            self.shared.browser_clock.lock().unwrap().report(time_ms);
+        }
         if let Some(t) = self
             .shared
             .track
@@ -1427,8 +1491,10 @@ impl Engine {
         }
         let axes = self.shared.track_axes.lock().unwrap();
         if !Axis::ALL.iter().any(|a| {
-            axes[a.index()].source != TrackSource::Off
-                && (!axes[a.index()].source.on_frames() || track_component(*a).is_some())
+            !matches!(
+                axes[a.index()].source,
+                TrackSource::Off | TrackSource::Faptap
+            ) && (!axes[a.index()].source.on_frames() || track_component(*a).is_some())
         }) {
             return Err("no axis is on the tracking table".into());
         }
@@ -1465,6 +1531,91 @@ impl Engine {
         let hosted = self.shared.hosted_scripts();
         for o in self.shared.outputs.lock().unwrap().iter_mut() {
             o.set_scripts(&hosted, &media);
+        }
+    }
+
+
+
+
+    pub fn set_draft(&self, axis: Axis, script: Option<Script>) {
+        let script = script.map(Arc::new);
+        {
+            let mut d = self.shared.draft.lock().unwrap();
+            d.retain(|(a, _)| *a != axis);
+            if let Some(s) = &script {
+                d.push((axis, s.clone()));
+            }
+        }
+        let file = self
+            .shared
+            .scripts
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(a, _)| *a == axis)
+            .map(|(_, s)| s.clone());
+        self.shared
+            .mixer
+            .lock()
+            .unwrap()
+            .set_script_live(axis, script.or(file));
+    }
+
+
+    pub fn clear_draft(&self) {
+        self.shared.draft.lock().unwrap().clear();
+        let scripts = self.shared.scripts.lock().unwrap().clone();
+        self.shared.set_scripts(scripts);
+    }
+
+
+
+    pub fn push_draft_hosted(&self) {
+        let scripts = self.shared.scripts.lock().unwrap().clone();
+        let with_draft = overlay(&scripts, &self.shared.draft.lock().unwrap());
+        let hosted = overlay(&with_draft, &self.shared.generated.lock().unwrap());
+        let media = self.shared.hosted_media();
+        for o in self.shared.outputs.lock().unwrap().iter_mut() {
+            o.set_scripts(&hosted, &media);
+        }
+    }
+
+
+
+
+    pub fn range_analyser(&self) -> Result<RangeAnalyser, String> {
+        let local = self
+            .shared
+            .media_path
+            .lock()
+            .unwrap()
+            .as_deref()
+            .is_some_and(is_local);
+        if !local {
+            return Err("only a local file can be analysed".into());
+        }
+        if self.shared.range.busy() {
+            return Err("a range analysis is already on".into());
+        }
+        self.shared.range.cancel.store(false, Ordering::Relaxed);
+        self.shared.range.progress.lock().unwrap().status = RangeStatus::Running;
+        let hwdec = Some(self.player.hwdec_current()).filter(|h| !h.is_empty());
+        Ok(RangeAnalyser::new(self.shared.clone(), hwdec))
+    }
+
+    pub fn range_progress(&self) -> RangeProgress {
+        self.shared.range.progress.lock().unwrap().clone()
+    }
+
+
+    pub fn range_cancel(&self) {
+        self.shared.range.cancel.store(true, Ordering::Relaxed);
+    }
+
+
+    pub fn range_close(&self) {
+        if let Ok(mut a) = self.shared.analyser.try_lock() {
+            *a = None;
         }
     }
 
@@ -1544,6 +1695,17 @@ impl Engine {
         out
     }
 
+
+
+    pub fn device_slider(&self) -> Option<f64> {
+        self.shared
+            .outputs
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|o| o.slider())
+    }
+
     pub fn set_output_clamp(&self, id: u32, axis: Axis, clamp: AxisClamp) -> bool {
         let mut outputs = self.shared.outputs.lock().unwrap();
         match outputs.iter_mut().find(|o| o.id == id) {
@@ -1553,6 +1715,16 @@ impl Engine {
             }
             None => false,
         }
+    }
+
+
+
+    pub fn set_output_vibration(&self, id: u32, vibration: Option<Vibration>) -> bool {
+        let mut outputs = self.shared.outputs.lock().unwrap();
+        outputs
+            .iter_mut()
+            .find(|o| o.id == id)
+            .is_some_and(|o| o.set_vibration(vibration))
     }
 
 
@@ -1571,6 +1743,15 @@ impl Engine {
             .iter_mut()
             .find(|o| o.id == id)
             .is_some_and(|o| o.set_strength(a, b))
+    }
+
+
+    pub fn set_openshock_trigger(&self, id: u32, trigger: OpenShockTrigger) -> bool {
+        let mut outputs = self.shared.outputs.lock().unwrap();
+        outputs
+            .iter_mut()
+            .find(|o| o.id == id)
+            .is_some_and(|o| o.set_openshock_trigger(trigger))
     }
 
     pub fn output_clamps(&self, id: u32) -> Option<[AxisClamp; Axis::COUNT]> {
@@ -1666,6 +1847,11 @@ impl Engine {
 
 
     pub fn set_estim(&self, options: EstimOptions) {
+        *self.shared.estim_volume.lock().unwrap() = bp_devices::ramp::VolumeSettings {
+            min: options.volume_floor,
+            max: options.volume_max,
+            boost: options.volume_boost,
+        }.validated();
         self.shared
             .mixer
             .lock()
@@ -1678,8 +1864,12 @@ impl Engine {
     }
 
     pub fn estim(&self) -> EstimOptions {
+        let volume = *self.shared.estim_volume.lock().unwrap();
         EstimOptions {
             contrast: self.shared.mixer.lock().unwrap().electrode_contrast(),
+            volume_floor: volume.min,
+            volume_max: volume.max,
+            volume_boost: volume.boost,
             params: self.shared.params_enabled.load(Ordering::Relaxed),
         }
     }
@@ -1835,7 +2025,12 @@ impl ScriptLoader {
     }
 
 
-    pub fn load_media(&self, path: &str, start_seconds: Option<f64>, remote: Option<&str>) -> Result<(), String> {
+    pub fn load_media(
+        &self,
+        path: &str,
+        start_seconds: Option<f64>,
+        remote: Option<&str>,
+    ) -> Result<(), String> {
         *self.shared.load_error.lock().unwrap() = None;
         self.media.load(path, start_seconds, remote)?;
         *self.shared.media_path.lock().unwrap() = Some(path.to_string());
@@ -1857,6 +2052,7 @@ impl ScriptLoader {
         *self.shared.pool.lock().unwrap() = pool;
         *self.shared.variants.lock().unwrap() = variants.to_vec();
         self.shared.generated.lock().unwrap().clear();
+        self.shared.draft.lock().unwrap().clear();
         *self.shared.param_hold.lock().unwrap() = [HoldState::default(); Axis::COUNT];
         *self.shared.cut_watch.lock().unwrap() = None;
         self.shared.loaded.store(true, Ordering::Relaxed);
@@ -2092,7 +2288,7 @@ impl Shared {
         }
         let loudness = sources
             .iter()
-            .any(|s| *s == ParamSource::Audio)
+            .any(|s| *s == ParamSource::Audio && !self.browser_tracking.load(Ordering::Relaxed))
             .then(|| self.beat.lock().unwrap().loudness_at(media_ms))
             .flatten();
         let coverage = sources
@@ -2201,8 +2397,10 @@ impl Shared {
             })
             .collect();
         let infos = describe(&pool, &chosen);
+        let browser = self.browser_tracking.load(Ordering::Relaxed);
         let mut loaded: Vec<(Axis, Arc<Script>)> = chosen
             .iter()
+            .filter(|_| !browser)
             .map(|&i| (pool[i].axis, pool[i].script.clone()))
             .collect();
         drop(pool);
@@ -2279,6 +2477,9 @@ impl Shared {
 
 
     fn hosted_media(&self) -> Media {
+        if self.browser_tracking.load(Ordering::Relaxed) {
+            return Media::default();
+        }
         let Some(path) = self.media_path.lock().unwrap().clone() else {
             return Media::default();
         };
@@ -2302,7 +2503,10 @@ impl Shared {
 
 
     fn hosted_scripts(&self) -> Vec<(Axis, Arc<Script>)> {
-        overlay_generated(
+        if self.browser_tracking.load(Ordering::Relaxed) {
+            return self.scripts.lock().unwrap().clone();
+        }
+        overlay(
             &self.scripts.lock().unwrap(),
             &self.generated.lock().unwrap(),
         )
@@ -2311,9 +2515,15 @@ impl Shared {
 
 
 
+
     fn set_scripts(&self, scripts: Vec<(Axis, Arc<Script>)>) {
         let media = self.hosted_media();
-        let hosted = overlay_generated(&scripts, &self.generated.lock().unwrap());
+        let browser = self.browser_tracking.load(Ordering::Relaxed);
+        let hosted = if browser {
+            scripts.clone()
+        } else {
+            overlay(&scripts, &self.generated.lock().unwrap())
+        };
         let expand = {
             let mut outputs = self.outputs.lock().unwrap();
             for o in outputs.iter_mut() {
@@ -2321,7 +2531,12 @@ impl Shared {
             }
             outputs.iter().any(|o| o.profile == Profile::Restim)
         };
-        let table = ScriptTable::build(scripts.clone(), expand);
+        let for_mixer = if browser {
+            scripts.clone()
+        } else {
+            overlay(&scripts, &self.draft.lock().unwrap())
+        };
+        let table = ScriptTable::build(for_mixer, expand);
         {
             let mut mixer = self.mixer.lock().unwrap();
             mixer.install(table);
@@ -2401,7 +2616,12 @@ impl Shared {
 
     fn tick(&self, t: deadline::Tick) -> Pace {
         let (media_ms, playing, rate) = {
-            let mut clock = self.clock.lock().unwrap();
+            let clock = if self.browser_tracking.load(Ordering::Relaxed) {
+                &self.browser_clock
+            } else {
+                &self.clock
+            };
+            let mut clock = clock.lock().unwrap();
             let now = clock.now();
             (now, clock.running(), clock.speed())
         };
@@ -2410,6 +2630,9 @@ impl Shared {
 
 
         let tracking = self.timeline.lock().unwrap().active;
+
+        let stroke_row = tracking.then(|| self.track_axes.lock().unwrap()[Axis::L0.index()]);
+        let stroke_source = stroke_row.map(|r| r.source);
         let tracked: Option<[Option<f64>; Axis::COUNT]> = tracking.then(|| {
             let axes = *self.track_axes.lock().unwrap();
             let offsets: [f64; Axis::COUNT] = {
@@ -2455,16 +2678,20 @@ impl Shared {
             for (axis, value) in live_params {
                 mixer.set_fallback(axis, value.map_or(Fallback::None, Fallback::Value));
             }
+
+
+
+
+            let remote_owned =
+                matches!(stroke_source, Some(TrackSource::Faptap | TrackSource::Off));
             if let Some(values) = tracked {
                 for axis in Axis::ALL
                     .into_iter()
-                    .filter(|a| track_component(*a).is_some())
+                    .filter(|a| track_component(*a).is_some() && !(remote_owned && *a == Axis::L0))
                 {
                     mixer.set_source(axis, values[axis.index()]);
                 }
             }
-
-
             let remote = self
                 .intiface
                 .lock()
@@ -2474,8 +2701,13 @@ impl Shared {
             let was_remote = self
                 .remote_driving
                 .swap(remote.is_some(), Ordering::Relaxed);
-            if remote.is_some() || (was_remote && tracked.is_none()) {
-                mixer.set_source(Axis::L0, remote);
+            if remote_owned || (stroke_source.is_none() && (remote.is_some() || was_remote)) {
+
+                let value = match stroke_row {
+                    Some(r) if r.source == TrackSource::Faptap => remote.map(|v| r.map(v)),
+                    _ => remote,
+                };
+                mixer.set_source(Axis::L0, value);
             }
             let frame = mixer.tick(media_ms, t.dt_ms);
             let flags: [u8; Axis::COUNT] = std::array::from_fn(|i| {
@@ -2510,8 +2742,12 @@ impl Shared {
             }
         }
         let ctx = TickContext {
+            manual_axes: std::array::from_fn(|i| flags[i] & (FLAG_LIVE | FLAG_TRACKED) != 0),
             media_ms,
             playing,
+            estim_manual: [Axis::EA, Axis::EB, Axis::EV, Axis::E1, Axis::E2, Axis::E3, Axis::E4]
+                .into_iter().any(|a| flags[a.index()] & FLAG_LIVE != 0 && driven[a.index()]),
+            estim_volume: *self.estim_volume.lock().unwrap(),
             rate,
             interval_ms: ((t.dt_ms + 0.75).floor() as u32).clamp(1, 100),
         };
@@ -2591,19 +2827,19 @@ fn next_auto_region(
 }
 
 
-
-fn overlay_generated(
+fn overlay(
     scripts: &[(Axis, Arc<Script>)],
-    generated: &[(Axis, Arc<Script>)],
+    over: &[(Axis, Arc<Script>)],
 ) -> Vec<(Axis, Arc<Script>)> {
     let mut out: Vec<(Axis, Arc<Script>)> = scripts
         .iter()
-        .filter(|(axis, _)| !generated.iter().any(|(g, _)| g == axis))
+        .filter(|(axis, _)| !over.iter().any(|(g, _)| g == axis))
         .cloned()
         .collect();
-    out.extend(generated.iter().cloned());
+    out.extend(over.iter().cloned());
     out
 }
+
 
 fn is_local(path: &str) -> bool {
     !path.contains("://") || path.starts_with("file://")
@@ -2726,7 +2962,7 @@ mod tests {
         };
         let file = vec![(Axis::L0, script(0.0)), (Axis::R0, script(0.5))];
         let generated = vec![(Axis::L0, script(1.0)), (Axis::R1, script(0.25))];
-        let hosted = overlay_generated(&file, &generated);
+        let hosted = overlay(&file, &generated);
         let pos = |axis: Axis| {
             hosted
                 .iter()
@@ -2737,7 +2973,7 @@ mod tests {
         assert_eq!(pos(Axis::R0), Some(0.5));
         assert_eq!(pos(Axis::R1), Some(0.25));
         assert_eq!(hosted.len(), 3);
-        assert_eq!(overlay_generated(&file, &[]), file);
+        assert_eq!(overlay(&file, &[]), file);
     }
 
     #[test]

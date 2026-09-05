@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bp_model::{
     ActiveGate, BoxRun, FUTURE, FrameInput, Heads, Loaded, MOVEMENT_WIDTH, Movement, PAST,
-    SCORE_START, Smoother, WINDOW, movement_row,
+    SCORE_START, Smoother, WINDOW, movement_row, trim_step,
 };
 use bp_script::Axis;
 use bp_tracking::{Motion, Region, Sample, TrackOptions, Tracker};
@@ -69,6 +69,8 @@ pub(crate) struct MotionFeed {
     cadence: Cadence,
     row: Vec<f32>,
     smoothers: [Smoother; 6],
+
+    centres: [Smoother; 6],
     gates: [ActiveGate; 6],
 
     components: [Option<usize>; 6],
@@ -107,6 +109,7 @@ impl MotionFeed {
             cadence,
             row: vec![0.0; MOVEMENT_WIDTH],
             smoothers: Default::default(),
+            centres: Default::default(),
             gates: Default::default(),
             components,
             chain: [0.5; 6],
@@ -219,7 +222,9 @@ impl MotionFeed {
                 continue;
             };
             let config = base.energised(energy[c]);
-            let pos = self.smoothers[i].push(h.time_ms, h.pos[i], config.tau_ms);
+            let centre = self.centres[i].push(h.time_ms, h.pos[i], config.centre_tau_ms);
+            let trimmed = trim_step(centre, h.pos[i], config.amplitude);
+            let pos = self.smoothers[i].push(h.time_ms, trimmed, config.tau_ms);
             out[c] = if self.gates[i].push(h.time_ms, h.active[i], &config) {
                 pos
             } else {

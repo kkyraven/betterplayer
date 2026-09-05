@@ -858,6 +858,9 @@ mod tests {
 
     fn ctx(media_ms: f64, paused: bool) -> TickContext {
         TickContext {
+            manual_axes: [false; Axis::COUNT],
+            estim_manual: false,
+            estim_volume: crate::ramp::VolumeSettings::default(),
             media_ms,
             playing: !paused,
             rate: 1.0,
@@ -964,6 +967,7 @@ mod tests {
         let expected = sha256_hex(funscript_json(&script()).as_bytes());
         assert_eq!(body["sha256"].as_str().unwrap(), expected);
 
+        run(&mut link, &mock, "slide", 1, Some(0.0), true);
         let slide: Value = serde_json::from_str(&mock.last("slide").body).unwrap();
         assert_eq!(
             (slide["min"].as_f64(), slide["max"].as_f64()),

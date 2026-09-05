@@ -81,7 +81,7 @@ fn apple_upscales_paused_frames_resizes_and_falls_back() {
         player.load(source.0.to_str().unwrap(), None).unwrap();
         let original = wait_for_frame(&player, Upscaler::Off, 1280, 720);
         check_colors(&original, 1280, 720, bgra, 5);
-        player.set_enhance(EnhanceOptions { upscaler: Upscaler::Apple, target_fps: None }).unwrap();
+        player.set_enhance(EnhanceOptions { upscaler: Upscaler::Apple, ..Default::default() }).unwrap();
         let enhanced = wait_for_frame(&player, Upscaler::Apple, 1280, 720);
 
         check_colors(&enhanced, 1280, 720, bgra, 50);
@@ -98,7 +98,7 @@ fn apple_upscales_paused_frames_resizes_and_falls_back() {
         player.load(unsupported.0.to_str().unwrap(), None).unwrap();
         wait_for_frame(&player, Upscaler::Off, 960, 540);
         player.resize(4096, 2304, None).unwrap();
-        player.set_enhance(EnhanceOptions { upscaler: Upscaler::Apple, target_fps: None }).unwrap();
+        player.set_enhance(EnhanceOptions { upscaler: Upscaler::Apple, ..Default::default() }).unwrap();
         check_colors(&wait_for_frame(&player, Upscaler::Sharp, 4096, 2304), 4096, 2304, bgra, 5);
         assert_eq!(player.enhance_state().reason.as_deref(), Some("Unsupported video size"));
 

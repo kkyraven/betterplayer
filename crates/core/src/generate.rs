@@ -396,7 +396,8 @@ impl Generation {
                     }
                     s
                 }),
-                TrackSource::Off => None,
+
+                TrackSource::Off | TrackSource::Faptap => None,
             };
             if let Some(s) = script.filter(|s| !s.actions.is_empty()) {
                 scripts.push((axis, s));

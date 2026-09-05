@@ -8,6 +8,7 @@ const WINDOW: usize = 600;
 struct Inner {
     frames: u64,
     dropped: u64,
+    skipped: u64,
     render_errors: u64,
     gl_errors: u64,
     last_gl_error: u32,
@@ -30,6 +31,8 @@ pub struct Percentiles {
 pub struct RenderSnapshot {
     pub frames: u64,
     pub dropped: u64,
+
+    pub skipped: u64,
     pub render_errors: u64,
     pub gl_errors: u64,
     pub last_gl_error: u32,
@@ -76,6 +79,10 @@ impl RenderStats {
         self.inner.lock().unwrap().render_errors += 1;
     }
 
+    pub fn skipped(&self) {
+        self.inner.lock().unwrap().skipped += 1;
+    }
+
     pub fn gl_error(&self, code: u32) {
         let mut s = self.inner.lock().unwrap();
         s.gl_errors += 1;
@@ -87,6 +94,7 @@ impl RenderStats {
         RenderSnapshot {
             frames: s.frames,
             dropped: s.dropped,
+            skipped: s.skipped,
             render_errors: s.render_errors,
             gl_errors: s.gl_errors,
             last_gl_error: s.last_gl_error,

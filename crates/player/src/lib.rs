@@ -193,12 +193,16 @@ impl Player {
         let stop_events = Arc::new(AtomicBool::new(false));
         let enhance = Arc::new(Mutex::new(Enhance::new(enhance_capabilities(), (width, height))));
         let has_video = Arc::new(AtomicBool::new(false));
+
+
+        let picture_back: Arc<Mutex<Option<Sender<Msg>>>> = Arc::new(Mutex::new(None));
         let events = {
             let mpv = mpv.clone();
             let log = log.clone();
             let stop = stop_events.clone();
             let enhance = enhance.clone();
             let has_video = has_video.clone();
+            let picture_back = picture_back.clone();
             thread::Builder::new()
                 .name("bp-mpv-events".into())
                 .spawn(move || {
@@ -242,6 +246,11 @@ impl Player {
                                     if next != size {
                                         size = next;
                                         has_video.store(size.0 > 0, Ordering::Relaxed);
+                                        if size.0 > 0 {
+                                            if let Some(tx) = picture_back.lock().unwrap().as_ref() {
+                                                let _ = tx.send(Msg::PictureBack);
+                                            }
+                                        }
                                         emit(PlayerEvent::VideoSize(size.0, size.1));
 
                                         if let Err(e) = enhance.lock().unwrap().set_source(&mpv, size) {
@@ -283,6 +292,7 @@ impl Player {
             }
         };
         push_log(&log, format!("render context: {context}"));
+        *picture_back.lock().unwrap() = Some((*tx).clone());
 
         Ok(Player {
             mpv,
@@ -325,6 +335,16 @@ impl Player {
 
     pub fn seek(&self, seconds: f64) -> Result<(), String> {
         self.mpv.command(&["seek", &seconds.to_string(), "absolute"])
+    }
+
+
+    pub fn seek_exact(&self, seconds: f64) -> Result<(), String> {
+        self.mpv.command(&["seek", &seconds.to_string(), "absolute+exact"])
+    }
+
+
+    pub fn frame_step(&self, forward: bool) -> Result<(), String> {
+        self.mpv.command(&[if forward { "frame-step" } else { "frame-back-step" }])
     }
 
 

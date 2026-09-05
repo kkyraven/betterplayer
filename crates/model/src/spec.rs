@@ -35,17 +35,18 @@ pub const MOVEMENT: ModelSpec = ModelSpec {
     id: "movement-a",
     label: "AI Motion",
     kind: ModelKind::Motion,
-    version: "20260905",
-    files: ["movement-a-20260905.onnx", "movement-a-20260905.json"],
-    size_mb: 3,
+    version: "20260905-ens5",
+    files: ["movement-a-20260905-ens5.onnx", "movement-a-20260905-ens5.json"],
+    size_mb: 15,
     licence: "Better Player model licence",
     licence_url: LICENCE_URL,
     source_url: SOURCE_URL,
 };
 
+
 pub const MUSIC: ModelSpec = ModelSpec {
     id: "music",
-    label: "AI CH/PMV",
+    label: "CH",
     kind: ModelKind::Music,
     version: "20260905b-av",
     files: ["music-20260905b-av.onnx", "music-20260905b-av.json"],
@@ -55,7 +56,21 @@ pub const MUSIC: ModelSpec = ModelSpec {
     source_url: SOURCE_URL,
 };
 
-pub const MODELS: &[ModelSpec] = &[MOVEMENT, MUSIC];
+
+
+pub const MUSIC_VARIATION: ModelSpec = ModelSpec {
+    id: "music-variation",
+    label: "CH Variation",
+    kind: ModelKind::Music,
+    version: "20260905-av",
+    files: ["music-20260905-av.onnx", "music-20260905-av.json"],
+    size_mb: 7,
+    licence: "Better Player model licence",
+    licence_url: LICENCE_URL,
+    source_url: SOURCE_URL,
+};
+
+pub const MODELS: &[ModelSpec] = &[MOVEMENT, MUSIC, MUSIC_VARIATION];
 
 pub fn model(id: &str) -> Option<&'static ModelSpec> {
     MODELS.iter().find(|m| m.id == id)

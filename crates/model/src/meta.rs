@@ -57,6 +57,9 @@ struct Thresholds {
 #[derive(Clone, Debug, Default, Deserialize)]
 struct Decode {
     nms_frames: Option<usize>,
+
+    amplitude: Option<f64>,
+    centre_tau_ms: Option<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -95,7 +98,10 @@ struct Raw {
 }
 
 
-pub const NMS_FRAMES_DEFAULT: usize = 3;
+
+
+pub const NMS_FRAMES_DEFAULT: usize = 4;
+pub const NMS_FRAMES_MUSIC: usize = 3;
 
 
 #[derive(Clone, Debug)]
@@ -113,6 +119,8 @@ pub struct Meta {
     pub active_threshold: f64,
     pub active_hold_ms: f64,
     pub nms_frames: usize,
+    pub amplitude: f64,
+    pub centre_tau_ms: f64,
 
     pub pace_cdf: Vec<Vec<f64>>,
     pub fps: f64,
@@ -172,7 +180,12 @@ impl Meta {
             event_threshold: raw.thresholds.event,
             active_threshold: raw.thresholds.active,
             active_hold_ms: raw.thresholds.active_hold_s * 1000.0,
-            nms_frames: raw.decode.nms_frames.or(raw.thresholds.nms_frames).unwrap_or(NMS_FRAMES_DEFAULT),
+            nms_frames: raw.decode.nms_frames.or(raw.thresholds.nms_frames).unwrap_or(match kind {
+                ModelKind::Music => NMS_FRAMES_MUSIC,
+                _ => NMS_FRAMES_DEFAULT,
+            }),
+            amplitude: raw.decode.amplitude.unwrap_or(1.0),
+            centre_tau_ms: raw.decode.centre_tau_ms.unwrap_or(crate::decoder::CENTRE_TAU_MS),
             pace_cdf: raw.axes.iter().map(|a| raw.pace.cdf.get(a).cloned().flatten().unwrap_or_default()).collect(),
             axes: raw.axes,
             fps: raw.window.fps,
@@ -192,6 +205,8 @@ impl Meta {
             rdp_eps: crate::decoder::RDP_EPS,
             active_threshold: self.active_threshold,
             active_hold_ms: self.active_hold_ms,
+            amplitude: self.amplitude,
+            centre_tau_ms: self.centre_tau_ms,
         }
     }
 }
@@ -238,6 +253,25 @@ mod tests {
         )
     }
 
+
+
+    #[test]
+    fn the_bundled_movement_metadata_parses_and_matches_the_spec() {
+        let m = Meta::parse(include_str!("../../../../app/models/movement-a-20260905-ens5.json")).unwrap();
+        assert_eq!(m.version, crate::spec::MOVEMENT.version);
+        assert_eq!(m.kind, ModelKind::Motion);
+        assert_eq!((m.nms_frames, m.amplitude, m.centre_tau_ms), (4, 1.5, 4000.0));
+        assert_eq!(m.event_threshold, 0.4);
+        let music = Meta::parse(include_str!("../../../../app/models/music-20260905b-av.json")).unwrap();
+        assert_eq!(music.version, crate::spec::MUSIC.version);
+        assert_eq!(music.kind, ModelKind::Music);
+
+        assert_eq!((music.nms_frames, music.amplitude), (NMS_FRAMES_MUSIC, 1.0));
+        let variation = Meta::parse(include_str!("../../../../app/models/music-20260905-av.json")).unwrap();
+        assert_eq!(variation.version, crate::spec::MUSIC_VARIATION.version);
+        assert_eq!((variation.kind, variation.nms_frames, variation.event_threshold), (ModelKind::Music, NMS_FRAMES_MUSIC, 0.35));
+    }
+
     #[test]
     fn the_shipping_layout_parses_and_a_moved_field_does_not() {
         let m = Meta::parse(&doc(crate::features::MOVEMENT_LAYOUT, crate::features::MOVEMENT_WIDTH, "")).unwrap();
@@ -248,8 +282,11 @@ mod tests {
         assert_eq!(m.pace_cdf[0], vec![0.1, 1.0]);
         assert!(m.pace_cdf[1].is_empty());
         assert_eq!((m.past, m.future, m.score), (128, 16, [64, 128]));
-        let with_nms = Meta::parse(&doc(crate::features::MOVEMENT_LAYOUT, crate::features::MOVEMENT_WIDTH, r#""decode":{"nms_frames":4},"#)).unwrap();
-        assert_eq!(with_nms.nms_frames, 4);
+        assert_eq!((m.amplitude, m.centre_tau_ms), (1.0, crate::decoder::CENTRE_TAU_MS));
+        let ens = Meta::parse(&doc(crate::features::MOVEMENT_LAYOUT, crate::features::MOVEMENT_WIDTH,
+            r#""members":5,"decode":{"nms_frames":3,"amplitude":1.5,"centre_tau_ms":4000.0,"snap":0.0,"tta":"none"},"#)).unwrap();
+        assert_eq!((ens.nms_frames, ens.amplitude, ens.centre_tau_ms), (3, 1.5, 4000.0));
+        assert_eq!(ens.decode_config(0.5).amplitude, 1.5);
 
         let mut moved: Vec<(&str, usize)> = crate::features::MOVEMENT_LAYOUT.to_vec();
         moved.swap(2, 3);

@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
+use serde_json::{Map, Value};
+
+use crate::axis::Axis;
 
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -29,6 +32,9 @@ pub struct Script {
     pub actions: Vec<Action>,
     pub chapters: Vec<Chapter>,
     pub bookmarks: Vec<Bookmark>,
+
+
+    pub metadata: Map<String, Value>,
 }
 
 
@@ -84,6 +90,9 @@ pub(crate) struct RawMeta {
     chapters: Vec<RawChapter>,
     #[serde(default)]
     bookmarks: Vec<RawBookmark>,
+
+    #[serde(flatten)]
+    extra: Map<String, Value>,
 }
 
 #[derive(Deserialize)]
@@ -112,20 +121,47 @@ impl Script {
 
 
 
+
     pub fn to_json(&self) -> String {
-        let actions: Vec<serde_json::Value> = self.actions.iter().map(|a| serde_json::json!({ "at": a.at.round() as i64, "pos": (a.pos.clamp(0.0, 1.0) * 100.0).round() as i64 })).collect();
-        let mut root = serde_json::json!({ "version": "1.0", "inverted": false, "range": 100, "actions": actions });
-        if !self.chapters.is_empty() || !self.bookmarks.is_empty() {
+        self.to_json_with(None)
+    }
+
+
+
+    pub fn to_json_with(&self, duration_s: Option<f64>) -> String {
+        let mut root = self.to_value(duration_s);
+        root["version"] = Value::from("1.0");
+        root.to_string()
+    }
+
+
+    pub fn to_bundle_json(&self, axes: &[(Axis, &Script)], duration_s: Option<f64>) -> String {
+        let mut root = self.to_value(duration_s);
+        root["version"] = Value::from("1.1");
+        root["axes"] = Value::Array(axes.iter().map(|(axis, s)| serde_json::json!({ "id": axis.id(), "inverted": false, "actions": s.actions_value() })).collect());
+        root.to_string()
+    }
+
+    fn actions_value(&self) -> Value {
+        Value::Array(self.actions.iter().map(|a| serde_json::json!({ "at": a.at.round() as i64, "pos": (a.pos.clamp(0.0, 1.0) * 100.0).round() as i64 })).collect())
+    }
+
+    fn to_value(&self, duration_s: Option<f64>) -> Value {
+        let mut root = serde_json::json!({ "inverted": false, "range": 100, "actions": self.actions_value() });
+        if !self.chapters.is_empty() || !self.bookmarks.is_empty() || !self.metadata.is_empty() || duration_s.is_some() {
             let clock = |ms: f64| {
                 let total = (ms.max(0.0) / 1000.0).floor() as u64;
                 format!("{:02}:{:02}:{:02}.{:03}", total / 3600, total / 60 % 60, total % 60, (ms.max(0.0) % 1000.0).round() as u64 % 1000)
             };
-            root["metadata"] = serde_json::json!({
-                "chapters": self.chapters.iter().map(|c| serde_json::json!({ "name": c.name, "startTime": clock(c.start_ms), "endTime": clock(c.end_ms) })).collect::<Vec<_>>(),
-                "bookmarks": self.bookmarks.iter().map(|b| serde_json::json!({ "name": b.name, "time": clock(b.at_ms) })).collect::<Vec<_>>(),
-            });
+            let mut meta = self.metadata.clone();
+            meta.insert("chapters".into(), Value::Array(self.chapters.iter().map(|c| serde_json::json!({ "name": c.name, "startTime": clock(c.start_ms), "endTime": clock(c.end_ms) })).collect()));
+            meta.insert("bookmarks".into(), Value::Array(self.bookmarks.iter().map(|b| serde_json::json!({ "name": b.name, "time": clock(b.at_ms) })).collect()));
+            if let Some(d) = duration_s {
+                meta.insert("duration".into(), Value::from(d.max(0.0).round() as i64));
+            }
+            root["metadata"] = Value::Object(meta);
         }
-        root.to_string()
+        root
     }
 
 
@@ -151,7 +187,9 @@ impl Script {
                 false
             }
         });
-        let meta = meta.unwrap_or_default();
+        let mut meta = meta.unwrap_or_default();
+
+        meta.extra.remove("duration");
         Script {
             actions,
             chapters: meta
@@ -164,6 +202,7 @@ impl Script {
                 .into_iter()
                 .filter_map(|b| Some(Bookmark { name: b.name, at_ms: parse_time(&b.time)? }))
                 .collect(),
+            metadata: meta.extra,
         }
     }
 
@@ -206,6 +245,7 @@ fn parse_time(s: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Axis;
 
     #[test]
     fn tolerates_messy_files() {
@@ -222,6 +262,23 @@ mod tests {
         assert_eq!(s.actions[2], Action { at: 1000.5, pos: 0.4 });
         assert_eq!(s.chapters, vec![Chapter { name: "a".into(), start_ms: 1500.0, end_ms: 2000.0 }]);
         assert_eq!(s.bookmarks, vec![Bookmark { name: "b".into(), at_ms: 62250.0 }]);
+    }
+
+    #[test]
+    fn metadata_passes_through_and_duration_is_written_fresh() {
+        let s = Script::parse(r#"{"actions":[{"at":0,"pos":0},{"at":1000,"pos":100}],"metadata":{"title":"T","creator":"C","tags":["a"],"duration":9,"chapters":[]}}"#).unwrap();
+        assert_eq!(s.metadata.get("title"), Some(&Value::from("T")));
+        assert!(!s.metadata.contains_key("duration"));
+        assert!(!s.metadata.contains_key("chapters"));
+        let out: Value = serde_json::from_str(&s.to_json_with(Some(12.4))).unwrap();
+        assert_eq!(out["metadata"]["creator"], Value::from("C"));
+        assert_eq!(out["metadata"]["duration"], Value::from(12));
+        assert_eq!(out["metadata"]["tags"], serde_json::json!(["a"]));
+        assert_eq!(out["version"], Value::from("1.0"));
+        let bundle: Value = serde_json::from_str(&s.to_bundle_json(&[(Axis::R1, &s)], None)).unwrap();
+        assert_eq!(bundle["version"], Value::from("1.1"));
+        assert_eq!(bundle["axes"][0]["id"], Value::from("R1"));
+        assert_eq!(bundle["axes"][0]["actions"][1]["pos"], Value::from(100));
     }
 
     #[test]

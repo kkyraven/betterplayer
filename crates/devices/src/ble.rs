@@ -25,6 +25,12 @@ pub const TCODE_SERVICE: Uuid = Uuid::from_u128(0xff1b451d_3070_4276_9c81_5dc5ea
 pub const TCODE_WRITE: Uuid = Uuid::from_u128(0xc5f1543e_338d_47a0_8525_01e3c621359d);
 
 
+
+pub const OSSM_SERVICE: Uuid = Uuid::from_u128(0x522b443a_4f53_534d_0001_420badbabe69);
+pub const OSSM_COMMAND: Uuid = Uuid::from_u128(0x522b443a_4f53_534d_1000_420badbabe69);
+pub const OSSM_STATE: Uuid = Uuid::from_u128(0x522b443a_4f53_534d_2000_420badbabe69);
+
+
 pub const COYOTE_SERVICE: Uuid = uuid_from_u16(0x180C);
 pub const COYOTE_WRITE: Uuid = uuid_from_u16(0x150A);
 pub const COYOTE_NOTIFY: Uuid = uuid_from_u16(0x150B);
@@ -53,9 +59,12 @@ pub struct BleDevice {
 }
 
 
+
 fn classify(name: &str, services: &[Uuid]) -> &'static str {
     let lower = name.to_lowercase();
-    if services.contains(&TCODE_SERVICE) || lower.contains("tcode") {
+    if services.contains(&OSSM_SERVICE) || lower.starts_with("ossm") {
+        "ossm"
+    } else if services.contains(&TCODE_SERVICE) || lower.contains("tcode") {
         "tcode"
     } else if lower.contains(COYOTE_NAME)
         || lower.contains("coyote")
@@ -460,6 +469,8 @@ mod tests {
     #[test]
     fn devices_classify_by_service_and_name() {
         assert_eq!(classify("OSR2", &[TCODE_SERVICE]), "tcode");
+        assert_eq!(classify("OSSM", &[]), "ossm");
+        assert_eq!(classify("Bedroom", &[OSSM_SERVICE]), "ossm");
         assert_eq!(classify("47L121000", &[]), "coyote");
         assert_eq!(classify("", &[COYOTE_SERVICE]), "coyote");
         assert_eq!(classify("Some Speaker", &[]), "other");

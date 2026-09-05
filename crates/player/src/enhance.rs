@@ -1,6 +1,6 @@
 // Note for agents working on this: This is completely broken.
 use crate::mpv::Mpv;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Upscaler {
@@ -8,6 +8,8 @@ pub enum Upscaler {
     Off,
 
     Sharp,
+
+    Fsr,
 
     Rtx,
 
@@ -21,6 +23,7 @@ impl Upscaler {
         match self {
             Upscaler::Off => "off",
             Upscaler::Sharp => "sharp",
+            Upscaler::Fsr => "fsr",
             Upscaler::Rtx => "rtx",
             Upscaler::Dlss => "dlss",
             Upscaler::Apple => "apple",
@@ -31,6 +34,7 @@ impl Upscaler {
         match s {
             "off" => Some(Upscaler::Off),
             "sharp" => Some(Upscaler::Sharp),
+            "fsr" => Some(Upscaler::Fsr),
             "rtx" => Some(Upscaler::Rtx),
             "dlss" => Some(Upscaler::Dlss),
             "apple" => Some(Upscaler::Apple),
@@ -340,6 +344,30 @@ const SHARP_SCALE: &str = "ewa_lanczossharp";
 struct Applied {
     scale: String,
     vf: String,
+
+    glsl_shaders: String,
+}
+
+impl Applied {
+    fn plain() -> Applied {
+        Applied { scale: DEFAULT_SCALE.into(), vf: String::new(), glsl_shaders: String::new() }
+    }
+}
+
+const FSR_SHADER: &str = include_str!("../shaders/fsr.glsl");
+
+
+
+fn fsr_shader_path() -> Result<&'static str, &'static str> {
+    static PATH: OnceLock<Result<String, String>> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let path = std::env::temp_dir().join("betterplayer-fsr-1.0.2.glsl");
+        std::fs::write(&path, FSR_SHADER).map_err(|e| format!("FSR shader could not be written to {}: {e}", path.display()))?;
+        path.to_str().map(str::to_owned).ok_or_else(|| "FSR shader path is not UTF-8".into())
+    })
+    .as_ref()
+    .map(String::as_str)
+    .map_err(String::as_str)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -393,7 +421,7 @@ impl Enhance {
             caps,
             source: (0, 0),
             output,
-            applied: Applied { scale: DEFAULT_SCALE.into(), vf: String::new() },
+            applied: Applied::plain(),
             apple: Arc::default(),
             dlss: Arc::default(),
         }
@@ -457,16 +485,24 @@ impl Enhance {
             mpv.set_property("vf", &want.vf)?;
             self.applied.vf = want.vf.clone();
         }
+        if want.glsl_shaders != self.applied.glsl_shaders {
+            mpv.set_property("glsl-shaders", &want.glsl_shaders)?;
+            self.applied.glsl_shaders = want.glsl_shaders.clone();
+        }
         Ok(())
     }
 
     fn desired(&self) -> Applied {
-        let scale = if matches!(self.options.upscaler, Upscaler::Sharp | Upscaler::Apple) { SHARP_SCALE } else { DEFAULT_SCALE };
+
+        let fsr = self.options.upscaler == Upscaler::Fsr && fsr_shader_path().is_ok();
+        let sharp = matches!(self.options.upscaler, Upscaler::Sharp | Upscaler::Apple) || (self.options.upscaler == Upscaler::Fsr && !fsr);
+        let scale = if sharp { SHARP_SCALE } else { DEFAULT_SCALE };
         let vf = match self.vsr_factor() {
             Some(f) => vsr_filter(f),
             None => String::new(),
         };
-        Applied { scale: scale.into(), vf }
+        let glsl_shaders = if fsr { fsr_shader_path().unwrap_or_default().to_owned() } else { String::new() };
+        Applied { scale: scale.into(), vf, glsl_shaders }
     }
 
 
@@ -488,6 +524,10 @@ impl Enhance {
             }
             Upscaler::Apple if apple.factor == 0.0 => {
                 reason = apple.reason.clone();
+                Upscaler::Sharp
+            }
+            Upscaler::Fsr if fsr_shader_path().is_err() => {
+                reason = fsr_shader_path().err().map(str::to_owned);
                 Upscaler::Sharp
             }
             Upscaler::Rtx if !self.caps.vsr => {
@@ -517,7 +557,7 @@ impl Enhance {
             Upscaler::Rtx => self.vsr_factor().unwrap_or(0.0),
 
             Upscaler::Dlss => dlss.factor,
-            Upscaler::Sharp if self.source.1 > 0 && self.output.1 > self.source.1 => self.output.1 as f64 / self.source.1 as f64,
+            Upscaler::Sharp | Upscaler::Fsr if self.source.1 > 0 && self.output.1 > self.source.1 => self.output.1 as f64 / self.source.1 as f64,
             _ => 0.0,
         };
         let frame_gen_wanted = self.options.target_fps.is_some();
@@ -589,7 +629,7 @@ mod tests {
         e.source = (1920, 1080);
         e.options.upscaler = Upscaler::Dlss;
 
-        assert_eq!(e.desired(), Applied { scale: DEFAULT_SCALE.into(), vf: String::new() });
+        assert_eq!(e.desired(), Applied::plain());
         let s = e.state();
         assert_eq!(s.upscaler, Upscaler::Off);
         assert!(!s.upscaling);
@@ -644,16 +684,36 @@ mod tests {
     fn desired_properties_follow_options_and_sizes() {
         let mut e = Enhance::new(rtx(), (2560, 1440));
         e.source = (1920, 1080);
-        assert_eq!(e.desired(), Applied { scale: DEFAULT_SCALE.into(), vf: String::new() });
+        assert_eq!(e.desired(), Applied::plain());
         e.options.upscaler = Upscaler::Rtx;
         assert_eq!(e.desired().vf, "d3d11vpp=scale=1.33:scaling-mode=nvidia");
         assert!(e.state().upscaling);
         e.options.upscaler = Upscaler::Sharp;
-        assert_eq!(e.desired(), Applied { scale: SHARP_SCALE.into(), vf: String::new() });
+        assert_eq!(e.desired(), Applied { scale: SHARP_SCALE.into(), ..Applied::plain() });
         assert!(e.state().upscaling);
 
         e.output = (960, 540);
         assert!(!e.state().upscaling);
+    }
+
+    #[test]
+    fn fsr_hands_mpv_the_bundled_shader() {
+        let mut e = Enhance::new(unsupported(), (2560, 1440));
+        e.source = (1920, 1080);
+        e.options.upscaler = Upscaler::Fsr;
+        let want = e.desired();
+
+        assert_eq!(want.scale, DEFAULT_SCALE);
+        assert!(want.vf.is_empty());
+        assert!(want.glsl_shaders.ends_with("betterplayer-fsr-1.0.2.glsl"), "{}", want.glsl_shaders);
+        assert_eq!(std::fs::read_to_string(&want.glsl_shaders).unwrap(), FSR_SHADER);
+        let s = e.state();
+        assert_eq!(s.upscaler, Upscaler::Fsr);
+        assert_eq!(s.factor, 1440.0 / 1080.0);
+        assert!(s.reason.is_none());
+
+        e.options.upscaler = Upscaler::Off;
+        assert!(e.desired().glsl_shaders.is_empty());
     }
 
     #[test]
