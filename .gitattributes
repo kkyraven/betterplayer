@@ -1,0 +1,4 @@
+# The DLSS 5 runtime binaries are large and NVIDIA-proprietary: store them in Git LFS, and only
+# in the private repo (the public mirror never receives dlss5/, see scripts/prepare-public-engine.mjs).
+dlss5/**/*.dll filter=lfs diff=lfs merge=lfs -text
+dlss5/**/*.addon64 filter=lfs diff=lfs merge=lfs -text

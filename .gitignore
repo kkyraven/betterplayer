@@ -5,8 +5,14 @@ index.js
 index.d.ts
 # Windows: libmpv-2.dll, ANGLE (libEGL.dll, libGLESv2.dll, z.dll) and NvOFFRUC.dll next to the addon.
 *.dll
-# Windows: the DLSS 5 runtime folder (worker, ReShade, RenoDX add-on, NVIDIA DLLs), placed by hand.
-dlss5/
+# Windows: the DLSS 5 runtime (engine/dlss5/) is committed to the PRIVATE repo only, via Git LFS
+# (see engine/.gitattributes), and kept out of the public mirror by scripts/prepare-public-engine.mjs.
+# These negations re-include it despite the *.dll rule above; only ReShade's regenerated runtime
+# state stays ignored.
+!dlss5/
+!dlss5/**
+dlss5/host/ReShade.ini
+dlss5/host/ReShade.log*
 
 # napi-rs build transaction scratch
 .napi-rs-filesystem-transaction.swp/
