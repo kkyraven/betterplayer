@@ -13,13 +13,14 @@ pub struct Override {
     pub stroke_speed: Option<f64>,
 
     pub estim_max: Option<f64>,
+    pub estim_max_relative: Option<f64>,
 
     pub vibe_max: Option<f64>,
 }
 
 impl Default for Override {
     fn default() -> Self {
-        Override { tempo: 1.0, intensity: 1.0, playback_speed: 1.0, stroke_speed: None, estim_max: None, vibe_max: None }
+        Override { tempo: 1.0, intensity: 1.0, playback_speed: 1.0, stroke_speed: None, estim_max: None, estim_max_relative: None, vibe_max: None }
     }
 }
 
@@ -27,6 +28,8 @@ impl Default for Override {
 pub enum ZoneTrigger {
 
     Colour([bool; BUCKETS]),
+
+    CustomColour { buckets: [bool; BUCKETS], matches: Vec<(u32, f64)> },
 
     Part(Kind),
 }
@@ -108,7 +111,7 @@ impl ZoneState {
 
 
     pub fn wants_frames(&self) -> bool {
-        self.enabled && self.zones.iter().any(|z| matches!(z.trigger, ZoneTrigger::Colour(_)))
+        self.enabled && self.zones.iter().any(|z| matches!(z.trigger, ZoneTrigger::Colour(_) | ZoneTrigger::CustomColour { .. }))
     }
 
 
@@ -155,10 +158,12 @@ impl ZoneState {
         }
         self.clock(time_ms);
         for i in 0..self.zones.len() {
-            let ZoneTrigger::Colour(buckets) = self.zones[i].trigger else {
-                continue;
+            let (buckets, matches) = match &self.zones[i].trigger {
+                ZoneTrigger::Colour(buckets) => (buckets, &[][..]),
+                ZoneTrigger::CustomColour { buckets, matches } => (buckets, matches.as_slice()),
+                ZoneTrigger::Part(_) => continue,
             };
-            let share = colour_share(rgb, width, height, self.zones[i].rect, &buckets);
+            let share = colour_share_matching(rgb, width, height, self.zones[i].rect, buckets, matches);
             self.observe(i, share, time_ms);
         }
     }
@@ -228,7 +233,7 @@ fn zone_bucket(r: u8, g: u8, b: u8) -> Option<usize> {
 }
 
 
-fn colour_share(rgb: &[u8], width: usize, height: usize, rect: Rect, buckets: &[bool; BUCKETS]) -> f64 {
+fn colour_share_matching(rgb: &[u8], width: usize, height: usize, rect: Rect, buckets: &[bool; BUCKETS], matches: &[(u32, f64)]) -> f64 {
     let px = |v: f64, n: usize| ((v * n as f64).round() as isize).clamp(0, n as isize) as usize;
     let (x0, y0, x1, y1) = (px(rect.x, width), px(rect.y, height), px(rect.x + rect.w, width), px(rect.y + rect.h, height));
     if x1 <= x0 || y1 <= y0 {
@@ -239,7 +244,8 @@ fn colour_share(rgb: &[u8], width: usize, height: usize, rect: Rect, buckets: &[
         let row = y * width;
         for x in x0..x1 {
             let i = (row + x) * 3;
-            if zone_bucket(rgb[i], rgb[i + 1], rgb[i + 2]).is_some_and(|b| buckets[b]) {
+            if zone_bucket(rgb[i], rgb[i + 1], rgb[i + 2]).is_some_and(|b| buckets[b])
+                || matches.iter().any(|&(colour, tolerance)| bp_hero::colour_matches([rgb[i], rgb[i + 1], rgb[i + 2]], colour, tolerance)) {
                 hits += 1;
             }
         }
@@ -322,6 +328,20 @@ mod tests {
         assert_eq!(z.snapshot(1100.0)[0].share, 0.0);
         z.push_colour(&frame([240, 240, 240], None), W, H, 1200.0);
         assert!(z.snapshot(1200.0)[0].active);
+    }
+
+    #[test]
+    fn custom_colours_request_frames_and_measure_tolerance() {
+        let mut z = ZoneState::new();
+        let zone = Zone { trigger: ZoneTrigger::CustomColour { buckets: [false; BUCKETS], matches: vec![(0xff2828, 0.1)] }, ..colour_zone("custom", 0, 0.2, 0.0) };
+        z.set(true, vec![zone]);
+        assert!(z.wants_frames());
+        assert!(!z.wants_detector());
+        z.push_colour(&frame([255, 60, 60], None), W, H, 1000.0);
+        assert_eq!(z.snapshot(1000.0)[0].share, 1.0);
+        z.push_colour(&frame([255, 80, 80], None), W, H, 1100.0);
+        assert_eq!(z.snapshot(1100.0)[0].share, 0.0);
+        assert!(z.active_at(1100.0).is_none());
     }
 
     #[test]

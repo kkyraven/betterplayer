@@ -101,6 +101,7 @@ pub fn encode(
             continue;
         };
         if !c.enabled {
+            last[i] = None;
             continue;
         }
         let v = if profile.when_driven(axis) && !driven[i] {
@@ -109,7 +110,10 @@ pub fn encode(
                     last[i] = None;
                     release
                 }
-                _ => continue,
+                _ => {
+                    last[i] = None;
+                    continue;
+                }
             }
         } else {
             c.min + values[i].clamp(0.0, 1.0) * (c.max - c.min)
@@ -292,6 +296,29 @@ mod tests {
             ),
             0
         );
+    }
+
+    #[test]
+    fn restim_resends_parameters_when_the_same_value_resumes() {
+        let values = [0.5; Axis::COUNT];
+        let mut driven = [true; Axis::COUNT];
+        let mut clamps = [AxisClamp::default(); Axis::COUNT];
+        let mut last = [None; Axis::COUNT];
+        let mut line = String::new();
+        encode(Profile::Restim, &values, &driven, &clamps, &mut last, 10, &mut line);
+        for axis in [Axis::P0, Axis::P1] {
+            driven[axis.index()] = false;
+        }
+        encode(Profile::Restim, &values, &driven, &clamps, &mut last, 10, &mut line);
+        assert!(!line.contains("P0") && !line.contains("P1"));
+        driven.fill(true);
+        encode(Profile::Restim, &values, &driven, &clamps, &mut last, 10, &mut line);
+        assert_eq!(line, "P05000I10 P15000I10\n");
+        clamps[Axis::P1.index()].enabled = false;
+        encode(Profile::Restim, &values, &driven, &clamps, &mut last, 10, &mut line);
+        clamps[Axis::P1.index()].enabled = true;
+        encode(Profile::Restim, &values, &driven, &clamps, &mut last, 10, &mut line);
+        assert_eq!(line, "P15000I10\n");
     }
 
     #[test]

@@ -94,6 +94,8 @@ pub struct Output {
     volume: Volume,
     state: State,
     last: Units,
+
+    sent: Units,
     line: String,
     retry_at: Instant,
     connected_at: Option<Instant>,
@@ -143,6 +145,7 @@ pub struct FeatureSnapshot {
 
 #[derive(Clone, Debug)]
 pub struct OutputSnapshot {
+    pub sent: Units,
     pub id: u32,
     pub kind: &'static str,
     pub address: String,
@@ -182,6 +185,7 @@ impl Output {
             volume: Volume::default(),
             state: State::Error(String::new()),
             last: [None; Axis::COUNT],
+            sent: [None; Axis::COUNT],
             line: String::with_capacity(128),
             retry_at: Instant::now(),
             connected_at: None,
@@ -229,6 +233,7 @@ impl Output {
     }
 
     fn begin_glide(&mut self) {
+        self.sent = [None; Axis::COUNT];
         self.volume = Volume::default();
         if self.profile == Profile::Restim {
             self.glide = None;
@@ -562,6 +567,11 @@ impl Output {
         };
         match result {
             Ok(()) => {
+                if self.profile == Profile::Restim && matches!(self.state, State::Connected(Link::Lines(_))) {
+                    for (sent, last) in self.sent.iter_mut().zip(self.last) {
+                        if let Some(value) = last { *sent = Some(value); }
+                    }
+                }
                 self.lines_sent += 1;
                 if self.write_us.len() == 1000 {
                     self.write_us.pop_front();
@@ -729,6 +739,7 @@ impl Output {
             _ => (Vec::new(), None),
         };
         OutputSnapshot {
+            sent: self.sent,
             id: self.id,
             kind: self.transport.kind(),
             address: self.transport.address(),
@@ -763,7 +774,9 @@ impl Output {
     fn mute_restim(&mut self) {
         if self.profile == Profile::Restim {
             if let State::Connected(Link::Lines(conn)) = &mut self.state {
-                let _ = conn.send("V00000I0\n");
+                if conn.send("V00000I0\n").is_ok() {
+                    self.sent[Axis::EV.index()] = Some(0);
+                }
             }
         }
     }
@@ -808,6 +821,34 @@ mod tests {
 
     fn volume_units(o: &Output) -> u16 {
         o.last[Axis::EV.index()].expect("restim always owns volume")
+    }
+
+    #[test]
+    fn restim_sent_history_tracks_final_values_and_retains_inactive_axes() {
+        let (mut o, _receiver) = restim();
+        assert!(o.snapshot().sent.iter().all(Option::is_none));
+        let mut values = [0.5; Axis::COUNT];
+        let mut driven = [false; Axis::COUNT];
+        driven[Axis::EA.index()] = true;
+        driven[Axis::P0.index()] = true;
+        driven[Axis::E1.index()] = true;
+        o.clamps[Axis::E1.index()] = AxisClamp { enabled: true, min: 0.2, max: 0.6 };
+        let mut ctx = context();
+        o.send(&values, &driven, &ctx);
+        assert_eq!(o.snapshot().sent[Axis::EV.index()], Some(0));
+        assert_eq!(o.snapshot().sent[Axis::E1.index()], Some(4000));
+        assert_eq!(o.snapshot().sent[Axis::C0.index()], None);
+        assert_eq!(o.snapshot().sent[Axis::P0.index()], Some(5000));
+        driven[Axis::P0.index()] = false;
+        values[Axis::P0.index()] = 0.9;
+        for _ in 0..200 { o.send(&values, &driven, &ctx); }
+        assert_eq!(o.snapshot().sent[Axis::EV.index()], Some(9999));
+        assert_eq!(o.snapshot().sent[Axis::P0.index()], Some(5000));
+        ctx.playing = false;
+        o.send(&values, &driven, &ctx);
+        assert_eq!(o.snapshot().sent[Axis::EV.index()], Some(0));
+        o.begin_glide();
+        assert!(o.snapshot().sent.iter().all(Option::is_none));
     }
 
     #[test]

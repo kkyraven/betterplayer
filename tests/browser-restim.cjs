@@ -16,6 +16,50 @@ async function until(check) {
   }
 }
 
+test('Restim parameters default off, send P0/P1 sources, and resend after being disabled', async () => {
+  const receiver = createSocket('udp4')
+  const commands = []
+  receiver.on('message', (message) => commands.push(...message.toString().trim().split(/\s+/)))
+  let engine
+  try {
+    await new Promise((resolve) => receiver.bind(0, '127.0.0.1', resolve))
+    engine = new Engine(2, 2, Array.from({ length: 3 }, () => new Uint8Array(16)))
+    engine.setPresenting(false)
+    const id = engine.connect({ kind: 'udp', host: '127.0.0.1', port: receiver.address().port, profile: 'restim' })
+    await until(() => engine.state().outputs.find((o) => o.id === id)?.status === 'connected')
+    assert.equal(engine.estim().params, false)
+    engine.setParamSource('P0', { source: 'fixed', value: 0.5 })
+    engine.setParamSource('P1', { source: 'sweep', provider: 'sine', providerPeriodMs: 1000 })
+    await delay(100)
+    assert.ok(!commands.some((c) => /^P[01]/.test(c)), 'parameters stay silent until enabled')
+    engine.setEstim({ ...engine.estim(), params: true })
+    await until(() => commands.some((c) => /^P05000I/.test(c)))
+    await until(() => new Set(commands.filter((c) => c.startsWith('P1'))).size > 5)
+    engine.setParamSource('P1', { source: 'fixed', value: 0.5 })
+    await until(() => commands.some((c) => /^P15000I/.test(c)))
+    await delay(100)
+    engine.setEstim({ ...engine.estim(), params: false })
+    await delay(100)
+    commands.length = 0
+    await delay(100)
+    assert.ok(!commands.some((c) => /^P[01]/.test(c)))
+    engine.setEstim({ ...engine.estim(), params: true })
+    await until(() => commands.some((c) => /^P05000I/.test(c)) && commands.some((c) => /^P15000I/.test(c)))
+    engine.setParamSource('P0', { source: 'detection', kinds: ['genitals'] })
+    assert.equal(engine.wantsFrames(), true)
+    engine.setParamSource('P0', { source: 'restim' })
+    engine.setParamSource('P1', { source: 'restim' })
+    assert.equal(engine.wantsFrames(), false)
+    await delay(50)
+    commands.length = 0
+    await delay(100)
+    assert.ok(!commands.some((c) => /^P[01]/.test(c)), 'restim sources leave both axes alone')
+  } finally {
+    engine?.close()
+    receiver.close()
+  }
+})
+
 test('browser tracking excludes player scripts and controls the Restim ramp independently', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'bp-browser-restim-'))
   const receiver = createSocket('udp4')

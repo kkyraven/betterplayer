@@ -95,6 +95,9 @@ pub struct MusicRule {
     pub playback_speed: f64,
     pub stroke_speed: Option<f64>,
     pub estim_max: Option<f64>,
+    pub estim_max_relative: Option<f64>,
+    pub colour: Option<u32>,
+    pub tolerance: f64,
 
     pub vibe_max: Option<f64>,
 }
@@ -134,6 +137,7 @@ struct Pending {
     id: u64,
     at_ms: f64,
     bucket: usize,
+    rgb: [u8; 3],
     size: f64,
     settled: bool,
 }
@@ -213,7 +217,9 @@ impl HeroState {
     pub fn music_at(&self, time_ms: f64) -> Option<(f64, MusicRule)> {
         if !self.music.enabled || self.zone.is_none() { return None; }
         let (hit, rule) = self.pending.iter().rev().find_map(|p| {
-            (time_ms >= p.at_ms).then(|| self.music.rules[p.bucket].map(|r| (p, r))).flatten()
+            if time_ms < p.at_ms { return None; }
+            let custom = self.music.rules.iter().flatten().find(|r| r.colour.is_some_and(|c| bp_hero::colour_matches(p.rgb, c, r.tolerance)));
+            custom.copied().or_else(|| self.music.rules[p.bucket].filter(|r| r.colour.is_none())).map(|r| (p, r))
         })?;
         (time_ms < hit.at_ms + rule.duration_ms).then_some((hit.at_ms, rule))
     }
@@ -246,6 +252,7 @@ impl HeroState {
                             id: h.id,
                             at_ms: h.at_ms,
                             bucket: h.bucket,
+                            rgb: h.rgb,
                             size: h.size,
                             settled: h.settled,
                         };
@@ -256,6 +263,7 @@ impl HeroState {
                         id: h.id,
                         at_ms: h.at_ms,
                         bucket: h.bucket,
+                        rgb: h.rgb,
                         size: h.size,
                         settled: h.settled,
                     });
@@ -451,6 +459,7 @@ mod tests {
                 id: i as u64,
                 at_ms,
                 bucket,
+                rgb: [255, 0, 0],
                 size: 1.0,
                 settled: true,
             })
@@ -468,7 +477,7 @@ mod tests {
     }
 
     fn music_rule(duration_ms: f64, tempo: f64) -> MusicRule {
-        MusicRule { duration_ms, tempo, intensity: 1.2, playback_speed: 1.5, stroke_speed: None, estim_max: Some(0.9), vibe_max: None }
+        MusicRule { duration_ms, tempo, intensity: 1.2, playback_speed: 1.5, stroke_speed: None, estim_max: Some(0.9), estim_max_relative: None, colour: None, tolerance: 0.15, vibe_max: None }
     }
 
     #[test]
@@ -489,6 +498,20 @@ mod tests {
         assert!(h.music_at(2000.0).is_none());
         h.music.enabled = false;
         assert!(h.music_at(2000.0).is_none());
+    }
+
+    #[test]
+    fn custom_music_matches_rgb_across_buckets_and_respects_tolerance() {
+        let mut h = hero_with(&[(1000.0, 0)], rule(Flourish::None));
+        h.zone = Some(Rect { x: 0.1, y: 0.4, w: 0.1, h: 0.2 });
+        h.music.enabled = true;
+        h.music.rules[11] = Some(MusicRule { colour: Some(0xff1000), tolerance: 0.1, ..music_rule(2000.0, 2.0) });
+        assert_eq!(h.music_at(1000.0).unwrap().1.tempo, 2.0);
+        h.music.rules[11].as_mut().unwrap().tolerance = 0.0;
+        assert!(h.music_at(1000.0).is_none());
+        h.pending[0].rgb = [255, 16, 0];
+        assert!(h.music_at(1000.0).is_some());
+        assert!(h.music_at(3000.0).is_none());
     }
 
     #[test]

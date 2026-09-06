@@ -2774,7 +2774,7 @@ impl Shared {
         };
 
 
-        let (effects, estim_max, vibe_max) = {
+        let (effects, estim_max, estim_max_relative, vibe_max) = {
             let hero = self.hero.lock().unwrap();
             let zones = self.zones.lock().unwrap();
             let live = tracking && playing;
@@ -2812,13 +2812,13 @@ impl Shared {
                     (h, z) => h.or(z),
                 }
             });
-            let hit = music_on.then(|| hero.music_at(media_ms)).flatten().map(|(s, r)| (s, r.estim_max, r.vibe_max));
-            let zone = live.then(|| zones.active_at(media_ms)).flatten().map(|(s, _, o)| (s, o.estim_max, o.vibe_max));
+            let hit = music_on.then(|| hero.music_at(media_ms)).flatten().map(|(s, r)| (s, r.estim_max, r.estim_max_relative, r.vibe_max));
+            let zone = live.then(|| zones.active_at(media_ms)).flatten().map(|(s, _, o)| (s, o.estim_max, o.estim_max_relative, o.vibe_max));
             let winner = match (hit, zone) {
                 (Some(h), Some(z)) => Some(if z.0 >= h.0 { z } else { h }),
                 (h, z) => h.or(z),
             };
-            (effects, winner.and_then(|w| w.1), winner.and_then(|w| w.2))
+            (effects, winner.and_then(|w| w.1), winner.and_then(|w| w.2), winner.and_then(|w| w.3))
         };
         let live_params = if self.live_params.load(Ordering::Relaxed) {
             self.live_param_values(media_ms)
@@ -2897,12 +2897,7 @@ impl Shared {
                 p.version += 1;
             }
         }
-        let mut estim_volume = *self.estim_volume.lock().unwrap();
-        if let Some(max) = estim_max {
-            estim_volume.max = max;
-            estim_volume.boost.enabled = false;
-            estim_volume.min = estim_volume.min.min(max);
-        }
+        let estim_volume = estim_with_override(*self.estim_volume.lock().unwrap(), estim_max, estim_max_relative);
         let ctx = TickContext {
             manual_axes: std::array::from_fn(|i| flags[i] & (FLAG_LIVE | FLAG_TRACKED) != 0),
             media_ms,
@@ -3104,8 +3099,35 @@ fn script_info(axis: Axis, source: &Path, container: Container, script: &Script)
     }
 }
 
+
+fn estim_with_override(mut volume: bp_devices::ramp::VolumeSettings, absolute: Option<f64>, relative: Option<f64>) -> bp_devices::ramp::VolumeSettings {
+    if let Some(max) = relative.map(|factor| (volume.max * factor).clamp(0.0, 1.0)).or(absolute) {
+        volume.max = max;
+        volume.min = volume.min.min(max);
+        volume.boost.enabled = false;
+    }
+    volume
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn relative_estim_uses_normal_max_and_restores_without_compounding() {
+        use bp_devices::ramp::{VolumeSettings, VolumeBoost};
+        let normal = VolumeSettings { min: 0.45, max: 0.5, boost: VolumeBoost { enabled: true, ..Default::default() } };
+        for _ in 0..3 {
+            let active = super::estim_with_override(normal, None, Some(0.8));
+            assert_eq!(active.max, 0.4);
+            assert_eq!(active.min, 0.4);
+            assert!(!active.boost.enabled);
+        }
+        assert_eq!(super::estim_with_override(normal, None, None), normal);
+        assert_eq!(super::estim_with_override(normal, Some(0.7), None).max, 0.7);
+        assert_eq!(super::estim_with_override(normal, None, Some(0.0)).max, 0.0);
+        let higher = VolumeSettings { max: 0.8, ..normal };
+        assert_eq!(super::estim_with_override(higher, None, Some(2.0)).max, 1.0);
+    }
+
     use super::*;
     use std::fs;
 

@@ -317,6 +317,8 @@ pub struct DeviceInput {
 
 #[napi(object)]
 pub struct OutputState {
+
+    pub sent_values: HashMap<String, f64>,
     pub id: u32,
     pub kind: String,
     pub address: String,
@@ -1732,6 +1734,9 @@ impl Engine {
                 || !valid(r.duration_ms, 100.0, 30000.0) || !valid(r.tempo, 0.25, 4.0)
                 || !valid(r.intensity, 0.0, 2.0) || !valid(r.playback_speed, 0.25, 2.0)
                 || r.estim_max.is_some_and(|v| !valid(v, 0.0, 1.0))
+                || r.estim_max_relative.is_some_and(|v| !valid(v, 0.0, 2.0) || r.estim_max.is_some())
+                || r.colour.is_some_and(|v| v > 0xffffff)
+                || r.tolerance.is_some_and(|v| !valid(v, 0.0, 1.0))
                 || r.vibe_max.is_some_and(|v| !valid(v, 0.0, 1.0))
                 || r.stroke_speed.is_some_and(|v| !valid(v, 0.1, 20.0)) {
                 return Err(err("invalid Hero music rule".to_string()));
@@ -1740,6 +1745,8 @@ impl Engine {
                 duration_ms: r.duration_ms, tempo: r.tempo, intensity: r.intensity,
                 playback_speed: r.playback_speed, estim_max: r.estim_max, stroke_speed: r.stroke_speed,
                 vibe_max: r.vibe_max,
+                estim_max_relative: r.estim_max_relative,
+                colour: r.colour, tolerance: r.tolerance.unwrap_or(0.15),
             });
         }
         self.inner.set_hero_music(options);
@@ -1768,7 +1775,17 @@ impl Engine {
                         }
                         buckets[b] = true;
                     }
-                    bp_core::ZoneTrigger::Colour(buckets)
+                    let mut matches = Vec::new();
+                    for m in z.colour_matches.as_deref().unwrap_or_default() {
+                        let b = m.bucket as usize;
+                        if b >= bp_core::HERO_BUCKETS || !z.buckets.contains(&m.bucket) || m.colour > 0xffffff || !valid(m.tolerance, 0.0, 1.0) {
+                            return Err(err("invalid zone colour match".to_string()));
+                        }
+                        buckets[b] = false;
+                        matches.push((m.colour, m.tolerance));
+                    }
+                    if matches.is_empty() { bp_core::ZoneTrigger::Colour(buckets) }
+                    else { bp_core::ZoneTrigger::CustomColour { buckets, matches } }
                 }
                 "part" => bp_core::ZoneTrigger::Part(
                     z.part.as_deref().and_then(bp_core::DetectKind::from_id).ok_or_else(|| err("invalid zone part".to_string()))?,
@@ -1781,6 +1798,7 @@ impl Engine {
                 || !valid(z.tempo, 0.25, 4.0) || !valid(z.intensity, 0.0, 2.0) || !valid(z.playback_speed, 0.25, 2.0)
                 || z.stroke_speed.is_some_and(|v| !valid(v, 0.1, 20.0))
                 || z.estim_max.is_some_and(|v| !valid(v, 0.0, 1.0))
+                || z.estim_max_relative.is_some_and(|v| !valid(v, 0.0, 2.0) || z.estim_max.is_some())
                 || z.vibe_max.is_some_and(|v| !valid(v, 0.0, 1.0)) {
                 return Err(err("invalid zone".to_string()));
             }
@@ -1796,6 +1814,7 @@ impl Engine {
                     playback_speed: z.playback_speed,
                     stroke_speed: z.stroke_speed,
                     estim_max: z.estim_max,
+                    estim_max_relative: z.estim_max_relative,
                     vibe_max: z.vibe_max,
                 },
             });
@@ -2311,6 +2330,7 @@ impl Engine {
                         bp_devices::Status::Error(e) => ("error", Some(e)),
                     };
                     OutputState {
+                        sent_values: bp_script::Axis::ALL.into_iter().filter_map(|a| o.sent[a.index()].map(|v| (a.id().to_string(), v as f64 / 9999.0))).collect(),
                         id: o.id,
                         kind: o.kind.to_string(),
                         address: o.address,
@@ -2855,6 +2875,8 @@ pub struct BeatState {
 
 #[napi(object)]
 pub struct HeroMusicRule {
+    pub colour: Option<u32>,
+    pub tolerance: Option<f64>,
     pub bucket: u32,
     pub duration_ms: f64,
     pub tempo: f64,
@@ -2862,6 +2884,7 @@ pub struct HeroMusicRule {
     pub playback_speed: f64,
     pub stroke_speed: Option<f64>,
     pub estim_max: Option<f64>,
+    pub estim_max_relative: Option<f64>,
 
     pub vibe_max: Option<f64>,
 }
@@ -2871,6 +2894,7 @@ pub struct HeroMusicRule {
 
 #[napi(object)]
 pub struct ZoneRule {
+    pub colour_matches: Option<Vec<ZoneColourMatch>>,
     pub id: String,
     pub region: TrackRegion,
 
@@ -2885,7 +2909,15 @@ pub struct ZoneRule {
     pub playback_speed: f64,
     pub stroke_speed: Option<f64>,
     pub estim_max: Option<f64>,
+    pub estim_max_relative: Option<f64>,
     pub vibe_max: Option<f64>,
+}
+
+#[napi(object)]
+pub struct ZoneColourMatch {
+    pub bucket: u32,
+    pub colour: u32,
+    pub tolerance: f64,
 }
 
 

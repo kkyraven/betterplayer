@@ -450,6 +450,12 @@ impl Lane {
 }
 
 
+pub fn colour_matches(rgb: [u8; 3], colour: u32, tolerance: f64) -> bool {
+    let target = [(colour >> 16) as u8, (colour >> 8) as u8, colour as u8];
+    rgb.iter().zip(target).all(|(&a, b)| f64::from(a.abs_diff(b)) <= tolerance * 255.0)
+}
+
+
 pub fn bucket_of(rgb: [f32; 3]) -> usize {
     let (r, g, b) = (rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0);
     let max = r.max(g).max(b);
