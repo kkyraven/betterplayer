@@ -48,7 +48,7 @@ impl Upscaler {
 
 
 
-pub const DLSS_INPUT_HEIGHTS: [u32; 5] = [480, 720, 1080, 1440, 2160];
+pub const DLSS_INPUT_HEIGHTS: [u32; 6] = [0, 480, 720, 1080, 1440, 2160];
 pub const DLSS_STRENGTH_RANGE: (f32, f32) = (0.0, 2.0);
 
 pub const DLSS_SKIN_RANGE: (f32, f32) = (-1.0, 2.0);
@@ -228,7 +228,7 @@ impl Default for DlssOptions {
             auto_mask: false,
             model_preset: ModelPreset::Default,
             factor: 1.5,
-            input_height: 720,
+            input_height: 0,
             rate: DlssRate::Auto,
             guide: GuideQuality::Fast,
             buffer_seconds: 6.0,
@@ -392,6 +392,7 @@ pub(crate) struct AppleUpscaling {
 pub(crate) struct DlssRequest {
     pub enabled: bool,
     pub source: (u32, u32),
+    pub output: (u32, u32),
     pub options: DlssOptions,
 }
 
@@ -470,7 +471,7 @@ impl Enhance {
             }
         }
         {
-            let request = DlssRequest { enabled: self.options.upscaler == Upscaler::Dlss && self.caps.dlss, source: self.source, options: self.options.dlss };
+            let request = DlssRequest { enabled: self.options.upscaler == Upscaler::Dlss && self.caps.dlss, source: self.source, output: self.output, options: self.options.dlss };
             let mut dlss = self.dlss.lock().unwrap();
             if dlss.request != request {
                 *dlss = DlssShared { request, ..DlssShared::default() };
@@ -495,7 +496,7 @@ impl Enhance {
     fn desired(&self) -> Applied {
 
         let fsr = self.options.upscaler == Upscaler::Fsr && fsr_shader_path().is_ok();
-        let sharp = matches!(self.options.upscaler, Upscaler::Sharp | Upscaler::Apple) || (self.options.upscaler == Upscaler::Fsr && !fsr);
+        let sharp = matches!(self.options.upscaler, Upscaler::Sharp | Upscaler::Apple | Upscaler::Dlss) || (self.options.upscaler == Upscaler::Fsr && !fsr);
         let scale = if sharp { SHARP_SCALE } else { DEFAULT_SCALE };
         let vf = match self.vsr_factor() {
             Some(f) => vsr_filter(f),
@@ -540,15 +541,17 @@ impl Enhance {
             }
             Upscaler::Dlss if !self.caps.dlss => {
                 reason = self.caps.dlss_reason.clone();
-                Upscaler::Off
+                Upscaler::Sharp
             }
 
 
             Upscaler::Dlss => {
                 if dlss.factor == 0.0 {
                     reason = dlss.reason.clone();
+                    Upscaler::Sharp
+                } else {
+                    Upscaler::Dlss
                 }
-                Upscaler::Dlss
             }
             u => u,
         };
@@ -629,16 +632,16 @@ mod tests {
         e.source = (1920, 1080);
         e.options.upscaler = Upscaler::Dlss;
 
-        assert_eq!(e.desired(), Applied::plain());
+        assert_eq!(e.desired(), Applied { scale: SHARP_SCALE.into(), ..Applied::plain() });
         let s = e.state();
-        assert_eq!(s.upscaler, Upscaler::Off);
-        assert!(!s.upscaling);
+        assert_eq!(s.upscaler, Upscaler::Sharp);
+        assert!(s.upscaling);
         assert_eq!(s.reason.as_deref(), Some("runtime not installed"));
 
         e.caps.dlss = true;
         e.caps.dlss_reason = None;
-        assert_eq!(e.state().upscaler, Upscaler::Dlss);
-        assert!(!e.state().upscaling, "no factor reported yet");
+        assert_eq!(e.state().upscaler, Upscaler::Sharp);
+        assert_eq!(e.state().factor, 1440.0 / 1080.0, "Sharp fallback reports its actual scale");
         e.dlss.lock().unwrap().factor = 1.5;
         assert_eq!(e.state().factor, 1.5);
         assert!(e.state().upscaling);
@@ -647,8 +650,8 @@ mod tests {
             dlss.factor = 0.0;
             dlss.reason = Some("Unsupported video size".into());
         }
-        assert_eq!(e.state().upscaler, Upscaler::Dlss);
-        assert!(!e.state().upscaling);
+        assert_eq!(e.state().upscaler, Upscaler::Sharp);
+        assert!(e.state().upscaling);
         assert_eq!(e.state().reason.as_deref(), Some("Unsupported video size"));
     }
 

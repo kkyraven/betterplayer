@@ -4,6 +4,8 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::enhance::{DlssOptions, dlss_mode};
 
@@ -244,9 +246,108 @@ pub fn output_size((width, height): (u32, u32), factor: f64) -> Result<(u32, u32
 
 
 
+#[derive(Clone, Default)]
+pub struct SessionControl(Arc<(Mutex<ControlState>, Condvar)>);
+
+#[derive(Default)]
+struct ControlState {
+    watching: bool,
+    cancelled: bool,
+    deadline: Option<Instant>,
+    failure: Option<String>,
+    exited: Option<bool>,
+}
+
+impl SessionControl {
+    pub fn new() -> Self { Self::default() }
+
+
+    pub fn cancel(&self) {
+        let mut state = self.0.0.lock().unwrap();
+        state.cancelled = true;
+        self.0.1.notify_all();
+    }
+
+
+
+
+    pub fn wait_stopped(&self) {
+        let mut state = self.0.0.lock().unwrap();
+        while state.watching && state.exited.is_none() {
+            state = self.0.1.wait(state).unwrap();
+        }
+    }
+
+    fn arm(&self, timeout: Duration) -> Result<(), String> {
+        let mut state = self.0.0.lock().unwrap();
+        if state.cancelled { return Err(state.failure.clone().unwrap_or_else(|| "DLSS worker cancelled".into())); }
+        if state.exited.is_some() { return Err("DLSS worker exited".into()); }
+        state.deadline = Some(Instant::now() + timeout);
+        self.0.1.notify_all();
+        Ok(())
+    }
+
+    fn disarm(&self) { self.0.0.lock().unwrap().deadline = None; }
+
+    fn error(&self, fallback: String) -> String {
+        self.0.0.lock().unwrap().failure.clone().unwrap_or(fallback)
+    }
+
+    fn wait_exit(&self) -> Result<(), String> {
+        let mut state = self.0.0.lock().unwrap();
+        loop {
+            if let Some(failure) = &state.failure { return Err(failure.clone()); }
+            if let Some(ok) = state.exited { return if ok { Ok(()) } else { Err("DLSS worker exited unsuccessfully".into()) }; }
+            state = self.0.1.wait(state).unwrap();
+        }
+    }
+}
+
+
+fn watch_child(mut child: Child, control: SessionControl) {
+    loop {
+        let mut state = control.0.0.lock().unwrap();
+        let expired = state.deadline.is_some_and(|deadline| Instant::now() >= deadline);
+        if state.cancelled || expired {
+            state.cancelled = true;
+            state.failure = Some(if expired { "DLSS worker operation timed out" } else { "DLSS worker cancelled" }.into());
+            drop(state);
+            let _ = child.kill();
+            let status = child.wait();
+            let mut state = control.0.0.lock().unwrap();
+            state.exited = Some(status.is_ok_and(|status| status.success()));
+            control.0.1.notify_all();
+            return;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                state.exited = Some(status.success());
+                control.0.1.notify_all();
+                return;
+            }
+            Err(error) => {
+                state.failure = Some(format!("waiting for DLSS worker: {error}"));
+                drop(state);
+                let _ = child.kill();
+                let status = child.wait();
+                control.0.0.lock().unwrap().exited = Some(status.is_ok_and(|status| status.success()));
+                control.0.1.notify_all();
+                return;
+            }
+            Ok(None) => {}
+        }
+        let _ = control.0.1.wait_timeout(state, Duration::from_millis(10)).unwrap();
+    }
+}
+
+
+struct CancelOnDrop(Option<SessionControl>);
+impl Drop for CancelOnDrop { fn drop(&mut self) { if let Some(control) = &self.0 { control.cancel(); } } }
+
+
 
 pub struct Session {
-    child: Child,
+    control: SessionControl,
 
     stdin: Option<ChildStdin>,
     stdout: ChildStdout,
@@ -258,16 +359,46 @@ pub struct Session {
 impl Session {
 
     pub fn start(host: &Path, header: VideoHeader) -> Result<Session, String> {
-        let mut child = Command::new(host.join(WORKER))
-            .arg("--video")
-            .current_dir(host)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("starting {}: {e}", WORKER))?;
-        let mut stdin = child.stdin.take().ok_or("no stdin")?;
-        let mut stdout = child.stdout.take().ok_or("no stdout")?;
+        Self::start_cancellable(host, header, SessionControl::new())
+    }
+
+
+
+    pub fn start_cancellable(host: &Path, header: VideoHeader, control: SessionControl) -> Result<Session, String> {
+        let mut command = Command::new(host.join(WORKER));
+        command.arg("--video").current_dir(host);
+        Self::start_command(command, header, control, Duration::from_secs(15))
+    }
+
+    fn start_command(mut command: Command, header: VideoHeader, control: SessionControl, timeout: Duration) -> Result<Session, String> {
+        control.arm(timeout)?;
+        let mut cleanup = CancelOnDrop(Some(control.clone()));
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+        let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
+            .spawn().map_err(|e| format!("starting {}: {e}", WORKER))?;
+
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let mut stdout = child.stdout.take().expect("piped stdout");
+        control.0.0.lock().unwrap().watching = true;
+        let watcher_control = control.clone();
+
+        let child_slot = Arc::new(Mutex::new(Some(child)));
+        let watcher_slot = child_slot.clone();
+        if let Err(error) = std::thread::Builder::new().name("dlss-worker-watch".into()).spawn(move || {
+            watch_child(watcher_slot.lock().unwrap().take().unwrap(), watcher_control);
+        }) {
+            if let Some(mut child) = child_slot.lock().unwrap().take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            control.0.0.lock().unwrap().watching = false;
+            control.0.1.notify_all();
+            return Err(format!("starting DLSS watchdog: {error}"));
+        }
         let mut negotiate = || -> Result<SetupResponse, String> {
             stdin.write_all(&header.to_bytes()).map_err(|e| format!("writing the header: {e}"))?;
             stdin.flush().map_err(|e| e.to_string())?;
@@ -288,14 +419,10 @@ impl Session {
             }
             Ok(setup)
         };
-        match negotiate() {
-            Ok(setup) => Ok(Session { child, stdin: Some(stdin), stdout, header, setup, sent: 0 }),
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                Err(e)
-            }
-        }
+        let setup = negotiate().map_err(|error| control.error(error))?;
+        control.disarm();
+        cleanup.0 = None;
+        Ok(Session { control, stdin: Some(stdin), stdout, header, setup, sent: 0 })
     }
 
     pub fn header(&self) -> &VideoHeader {
@@ -323,6 +450,14 @@ impl Session {
         if rgba.len() != rgba_len || motion.len() != motion_len || out.len() != self.output_bytes() {
             return Err("frame buffers do not match the session's sizes".into());
         }
+        self.control.arm(Duration::from_secs(2))?;
+        let result = self.process_inner(rgba, motion, pts, reset, out);
+        self.control.disarm();
+        if result.is_err() { self.control.cancel(); }
+        result.map_err(|error| self.control.error(error))
+    }
+
+    fn process_inner(&mut self, rgba: &[u8], motion: &[u8], pts: i64, reset: bool, out: &mut [u8]) -> Result<(), String> {
         let index = self.sent;
         let head = FrameHeader { magic: FRAME_MAGIC, index, reset, pts };
         let stdin = self.stdin.as_mut().ok_or("the stream is closed")?;
@@ -342,16 +477,13 @@ impl Session {
 
 
     pub fn finish(mut self) -> Result<u32, String> {
+        self.control.arm(Duration::from_secs(2))?;
         let mut stdin = self.stdin.take().ok_or("the stream is closed")?;
         if self.header.frame_count == LIVE_FRAME_COUNT {
             let end = FrameHeader { magic: END_MAGIC, index: self.sent, reset: false, pts: 0 };
             stdin.write_all(&end.to_bytes()).and_then(|_| stdin.flush()).map_err(|e| format!("closing the stream: {e}"))?;
         }
         drop(stdin);
-        let status = self.child.wait().map_err(|e| e.to_string())?;
-        if !status.success() {
-            return Err(format!("the worker exited with {status}"));
-        }
         if self.header.frame_count == LIVE_FRAME_COUNT {
             let mut buf = [0u8; FrameResult::SIZE];
             self.stdout.read_exact(&mut buf).map_err(|e| format!("reading the completion: {e}"))?;
@@ -360,20 +492,120 @@ impl Session {
                 return Err("the worker's completion count does not match".into());
             }
         }
+        self.control.wait_exit()?;
         Ok(self.sent)
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.control.cancel();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    fn fake_worker(script: &str) -> Command {
+        let mut command = Command::new("powershell.exe");
+        command.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script]);
+        command
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stalled_setup_is_killed_at_deadline() {
+        let control = SessionControl::new();
+        let header = VideoHeader::live((64, 64), &DlssOptions::default()).unwrap();
+        let started = Instant::now();
+        let result = Session::start_command(fake_worker("Start-Sleep -Seconds 60"), header, control.clone(), Duration::from_millis(100));
+        assert!(result.err().unwrap().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(control.wait_exit().is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn setup_can_be_cancelled_before_or_during_start() {
+        let header = VideoHeader::live((64, 64), &DlssOptions::default()).unwrap();
+        let cancelled = SessionControl::new();
+        cancelled.cancel();
+        assert!(Session::start_command(fake_worker("Start-Sleep -Seconds 60"), header.clone(), cancelled, Duration::from_secs(15)).err().unwrap().contains("cancelled"));
+        let control = SessionControl::new();
+        let cancel = control.clone();
+        let helper = std::thread::spawn(move || {
+            Session::start_command(fake_worker("Start-Sleep -Seconds 60"), header, control, Duration::from_secs(15)).err().unwrap()
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        let started = Instant::now();
+        cancel.cancel();
+        assert!(helper.join().unwrap().contains("cancelled"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exited_worker_fails_setup_without_waiting_for_deadline() {
+        let header = VideoHeader::live((64, 64), &DlssOptions::default()).unwrap();
+        let started = Instant::now();
+        assert!(Session::start_command(fake_worker("exit 7"), header, SessionControl::new(), Duration::from_secs(15)).is_err());
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[cfg(windows)]
+    fn ready_worker(header: &VideoHeader, tail: &str) -> Command {
+        let words = [SETUP_MAGIC, 1, 1, 64, 64, header.output.0, header.output.1, 64, 64, 7680, 4320, header.model_preset];
+        let bytes = words.iter().flat_map(|word| word.to_le_bytes()).map(|byte| byte.to_string()).collect::<Vec<_>>().join(",");
+        fake_worker(&format!("$stream = [Console]::OpenStandardOutput(); $bytes = [byte[]]@({bytes}); $stream.Write($bytes, 0, $bytes.Length); $stream.Flush(); {tail}"))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stalled_frame_reads_and_writes_are_killed_at_deadline() {
+        for tail in [
+            "Start-Sleep -Seconds 60",
+
+            "$inputStream = [Console]::OpenStandardInput(); $buf = New-Object byte[] 32864; $left = $buf.Length; while ($left -gt 0) { $count = $inputStream.Read($buf, 0, $left); if ($count -eq 0) { exit 9 }; $left -= $count }; Start-Sleep -Seconds 60",
+        ] {
+            let header = VideoHeader::live((64, 64), &DlssOptions::default()).unwrap();
+            let command = ready_worker(&header, tail);
+            let mut session = Session::start_command(command, header, SessionControl::new(), Duration::from_secs(10)).unwrap();
+            let (rgba, motion) = session.input_bytes();
+            let mut output = vec![0; session.output_bytes()];
+            let started = Instant::now();
+            let error = session.process(&vec![0; rgba], &vec![0; motion], 0, false, &mut output).unwrap_err();
+            assert!(error.contains("timed out"), "{error}");
+            assert!(started.elapsed() < Duration::from_secs(5));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dropping_ready_session_reaps_worker() {
+        let header = VideoHeader::live((64, 64), &DlssOptions::default()).unwrap();
+        let control = SessionControl::new();
+        let session = Session::start_command(ready_worker(&header, "Start-Sleep -Seconds 60"), header, control.clone(), Duration::from_secs(10)).unwrap();
+        drop(session);
+        let started = Instant::now();
+        control.wait_stopped();
+        assert!(started.elapsed() < Duration::from_secs(5), "worker was not reaped");
+        assert!(control.0.0.lock().unwrap().exited.is_some());
+    }
+
+    #[test]
+    fn stop_barrier_without_a_worker_returns_immediately() {
+        let control = SessionControl::new();
+        control.cancel();
+        control.wait_stopped();
+        let header = VideoHeader::live((64, 64), &DlssOptions::default()).unwrap();
+        let failed = SessionControl::new();
+        let command = Command::new("bp-deliberately-nonexistent-worker.exe");
+        assert!(Session::start_command(command, header, failed.clone(), Duration::from_secs(15)).is_err());
+        failed.cancel();
+        failed.wait_stopped();
+    }
 
     #[test]
     fn records_have_the_reference_sizes() {

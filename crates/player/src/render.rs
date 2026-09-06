@@ -402,11 +402,29 @@ fn run(
 
     let wanted = |presenting: bool| presenting && has_video.load(Ordering::Relaxed) && mpv.picture_ready.load(Ordering::Relaxed);
     loop {
+        #[cfg(windows)]
+        dlss.poll();
 
-        let msg = if target.busy() {
-            match rx.recv_timeout(POLL) {
+        #[cfg(windows)]
+        let enhancement_wake = if wanted(presenting) && !cfg.stamp { dlss.next_wake() } else { None };
+        #[cfg(not(windows))]
+        let enhancement_wake: Option<Duration> = None;
+        let timeout = match (target.busy(), enhancement_wake) {
+            (true, Some(delay)) => Some(POLL.min(delay)),
+            (true, None) => Some(POLL),
+            (false, delay) => delay,
+        };
+        let msg = if let Some(timeout) = timeout {
+            match rx.recv_timeout(timeout) {
                 Ok(m) => Some(m),
-                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Timeout) => {
+                    #[cfg(windows)]
+                    if enhancement_wake.is_some_and(|delay| delay <= timeout) && wanted(presenting) {
+                        Some(Msg::Redraw)
+                    } else { None }
+                    #[cfg(not(windows))]
+                    { None }
+                },
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         } else {
@@ -430,6 +448,8 @@ fn run(
                         && info.flags & (MPV_RENDER_FRAME_INFO_REDRAW | MPV_RENDER_FRAME_INFO_REPEAT) == 0;
                     if decoded {
                         mpv.picture_ready.store(true, Ordering::Relaxed);
+                        #[cfg(windows)]
+                        dlss.new_frame();
                     }
                     if wanted(presenting) {
 
@@ -488,6 +508,8 @@ fn run(
                 }
             }
             Some(Msg::Presenting(on)) => {
+                #[cfg(windows)]
+                if !on { dlss.suspend(); }
                 let resumed = on && !presenting;
                 presenting = on;
 
@@ -587,7 +609,7 @@ fn render_one(
     #[cfg(target_os = "macos")]
     let redirect = apple.prepare();
     #[cfg(windows)]
-    let redirect = dlss.prepare();
+    let redirect = if target.cfg.stamp { None } else { dlss.prepare(target.w, target.h) };
     #[cfg(not(any(target_os = "macos", windows)))]
     let redirect: Option<(u32, u32, u32)> = None;
     let (draw_fbo, draw_w, draw_h) = redirect.unwrap_or((target.fbo, target.w, target.h));
@@ -613,8 +635,11 @@ fn render_one(
         apple.process(target.fbo, target.w, target.h);
     }
     #[cfg(windows)]
-    if redirect.is_some() {
-        dlss.process(target.fbo, target.w, target.h);
+    if !target.cfg.stamp && !dlss.process(target.fbo, target.w, target.h) {
+
+
+        unsafe { mpv_render_context_report_swap(ctx); }
+        return;
     }
     if let Some(e) = take_gl_error() {
         stats.gl_error(e);
