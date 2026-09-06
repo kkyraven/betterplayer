@@ -6,14 +6,14 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bp_script::{Axis, Script};
+use bp_script::{Axis, Kind, Script};
 
 use crate::howl::HowlStatus;
 use crate::openshock::OpenShockTrigger;
 use crate::ossm::OssmStatus;
 use crate::ramp::{Ramp, RampProgress, Volume, VolumeSettings};
 use crate::tcode::{self, AxisClamp, Profile, Units};
-use crate::toys::follows_speed;
+use crate::toys::{LevelMap, follows_speed};
 use crate::transport::{self, Link, Transport};
 use crate::{PercentilesUs, percentiles};
 
@@ -49,6 +49,10 @@ pub struct TickContext {
     pub manual_axes: [bool; Axis::COUNT],
 
     pub estim_manual: bool,
+
+
+
+    pub stop_on_pause: bool,
 
     pub estim_volume: VolumeSettings,
     pub rate: f64,
@@ -114,6 +118,8 @@ pub struct Output {
     last_line_at: Option<Instant>,
 
     feature_axes: HashMap<u32, Option<Axis>>,
+
+    feature_levels: HashMap<u32, LevelMap>,
     vibration: Option<Vibration>,
     vibration_phase: f64,
 }
@@ -128,6 +134,10 @@ pub struct FeatureSnapshot {
     pub axis: Option<Axis>,
 
     pub speed: bool,
+
+    pub level: bool,
+
+    pub input: Option<f64>,
 }
 
 
@@ -186,6 +196,7 @@ impl Output {
             write_us: VecDeque::new(),
             last_line_at: None,
             feature_axes: HashMap::new(),
+            feature_levels: HashMap::new(),
             vibration: None,
             vibration_phase: 0.0,
         };
@@ -274,7 +285,10 @@ impl Output {
                             }
                         }
                         Link::Buttplug(_) => {}
-                        Link::Toy(toy) => toy.set_axes(&self.feature_axes),
+                        Link::Toy(toy) => {
+                            toy.set_axes(&self.feature_axes);
+                            toy.set_levels(&self.feature_levels);
+                        }
                         Link::OpenShock(o) => self.device = Some(o.device.clone()),
                     }
                     self.state = State::Connected(link);
@@ -425,6 +439,30 @@ impl Output {
         };
 
 
+
+
+        let level_active: [bool; Axis::COUNT] =
+            std::array::from_fn(|i| ctx.playing || ctx.manual_axes[i] || !ctx.stop_on_pause);
+        let rested: [f64; Axis::COUNT];
+        let (values, clamps) = if self.profile == Profile::Stroker
+            && matches!(self.state, State::Connected(Link::Lines(_)))
+            && level_active.iter().any(|a| !a)
+        {
+            let mut out = *values;
+            for a in Axis::ALL {
+                let i = a.index();
+                if !level_active[i] && driven[i] && matches!(a.kind(), Kind::Intensity | Kind::Aux) {
+                    out[i] = 0.0;
+                    clamps[i] = AxisClamp { enabled: clamps[i].enabled, min: 0.0, max: 1.0 };
+                }
+            }
+            rested = out;
+            (&rested, clamps)
+        } else {
+            (values, clamps)
+        };
+
+
         let interval_ms = match &self.state {
             State::Connected(Link::Lines(conn)) => {
                 let min = conn.min_interval_ms();
@@ -463,7 +501,7 @@ impl Output {
                 r
             }
             State::Connected(Link::Buttplug(bp)) => {
-                match bp.send(values, &self.clamps, ctx.interval_ms) {
+                match bp.send(values, &self.clamps, ctx.interval_ms, &level_active) {
                     Ok(true) => Ok(()),
                     Ok(false) => return false,
                     Err(e) => Err(e),
@@ -507,7 +545,7 @@ impl Output {
                 return false;
             }
             State::Connected(Link::Toy(toy)) => {
-                let active = std::array::from_fn(|i| driven[i] && (ctx.playing || ctx.manual_axes[i]));
+                let active = std::array::from_fn(|i| driven[i] && level_active[i]);
                 match toy.send(values, &self.clamps, ctx.interval_ms, &active) {
                     Ok(true) => Ok(()),
                     Ok(false) => return false,
@@ -612,6 +650,22 @@ impl Output {
 
 
 
+    pub fn set_feature_level(&mut self, index: u32, level: Option<LevelMap>) -> bool {
+        if !matches!(self.transport, Transport::Toy { .. }) {
+            return false;
+        }
+        match level {
+            Some(l) => self.feature_levels.insert(index, l.validated()),
+            None => self.feature_levels.remove(&index),
+        };
+        if let State::Connected(Link::Toy(toy)) = &mut self.state {
+            toy.set_levels(&self.feature_levels);
+        }
+        true
+    }
+
+
+
     pub fn set_scripts(&mut self, scripts: &[(Axis, Arc<Script>)], media: &Media) {
         if !matches!(
             self.transport,
@@ -660,12 +714,14 @@ impl Output {
         let (features, battery) = match &self.state {
             State::Connected(Link::Toy(toy)) => (
                 toy.axes()
-                    .map(|(f, axis)| FeatureSnapshot {
+                    .map(|(f, axis, input)| FeatureSnapshot {
                         index: f.index,
                         kind: f.kind.as_str(),
                         description: f.description.clone(),
                         axis,
                         speed: axis.is_some_and(|a| follows_speed(f, a)),
+                        level: f.is_level(),
+                        input,
                     })
                     .collect(),
                 toy.battery(),
@@ -747,7 +803,7 @@ mod tests {
     }
 
     fn context() -> TickContext {
-        TickContext { media_ms: 0.0, playing: true, manual_axes: [false; Axis::COUNT], estim_manual: false, estim_volume: crate::ramp::VolumeSettings::default(), rate: 1.0, interval_ms: 10 }
+        TickContext { media_ms: 0.0, playing: true, manual_axes: [false; Axis::COUNT], estim_manual: false, stop_on_pause: true, estim_volume: crate::ramp::VolumeSettings::default(), rate: 1.0, interval_ms: 10 }
     }
 
     fn volume_units(o: &Output) -> u16 {
@@ -1062,7 +1118,7 @@ mod toy_tests {
         link.set_axes(&HashMap::from([(0, Some(Axis::V0))]));
         let mut output = Output::new(1, Transport::Udp { host: "127.0.0.1".into(), port: receiver.local_addr().unwrap().port() }, Profile::Stroker);
         output.state = State::Connected(Link::Toy(link));
-        let mut ctx = TickContext { media_ms: 0.0, playing: true, manual_axes: [false; Axis::COUNT], estim_manual: false, estim_volume: crate::ramp::VolumeSettings::default(), rate: 1.0, interval_ms: 100 };
+        let mut ctx = TickContext { media_ms: 0.0, playing: true, manual_axes: [false; Axis::COUNT], estim_manual: false, stop_on_pause: true, estim_volume: crate::ramp::VolumeSettings::default(), rate: 1.0, interval_ms: 100 };
         let mut driven = [false; Axis::COUNT];
         driven[Axis::V0.index()] = true;
         let values = [0.6; Axis::COUNT];
@@ -1078,5 +1134,74 @@ mod toy_tests {
         output.send(&values, &driven, &ctx);
         assert_eq!(output_value(&mut rx).1, 0.0);
         assert!(output.test(), "toy test must bypass the renderer's global sweep");
+    }
+
+    #[test]
+    fn holding_on_pause_keeps_a_toys_level_and_the_map_survives_a_reconnect() {
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let (mut link, mut rx) = fixture(&[FeatureKind::Vibrate]);
+        link.set_axes(&HashMap::from([(0, Some(Axis::V0))]));
+
+
+        let mut output = Output::new(1, Transport::Udp { host: "127.0.0.1".into(), port: receiver.local_addr().unwrap().port() }, Profile::Stroker);
+        assert!(!output.set_feature_level(0, None), "not a toy yet");
+        output.transport = Transport::Toy { name: "Nora".into(), address: "A".into() };
+        assert!(output.set_feature_level(0, Some(LevelMap { cap: 0.5, ..LevelMap::default() })));
+
+        link.set_levels(&output.feature_levels);
+        output.state = State::Connected(Link::Toy(link));
+        let mut ctx = TickContext { media_ms: 0.0, playing: true, manual_axes: [false; Axis::COUNT], estim_manual: false, stop_on_pause: false, estim_volume: crate::ramp::VolumeSettings::default(), rate: 1.0, interval_ms: 100 };
+        let mut driven = [false; Axis::COUNT];
+        driven[Axis::V0.index()] = true;
+        let values = [1.0; Axis::COUNT];
+        output.send(&values, &driven, &ctx);
+        assert_eq!(output_value(&mut rx).1, 0.5, "the cap holds the toy at half");
+        ctx.playing = false;
+        assert!(!output.send(&values, &driven, &ctx), "held: nothing new to send");
+        assert!(rx.try_recv().is_err());
+        ctx.stop_on_pause = true;
+        output.send(&values, &driven, &ctx);
+        assert_eq!(output_value(&mut rx).1, 0.0, "stopping on pause rests it at once");
+        assert!(output.set_feature_level(0, None), "back to the default map");
+        assert!(output.feature_levels.is_empty());
+        let snapshot = output.snapshot();
+        assert!(snapshot.features[0].level);
+        assert_eq!(snapshot.features[0].input, None, "paused and stopped: no input");
+    }
+
+    #[test]
+    fn a_paused_tcode_board_zeroes_its_levels_and_holds_its_positions() {
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut o = Output::new(1, Transport::Udp { host: "127.0.0.1".into(), port: receiver.local_addr().unwrap().port() }, Profile::Stroker);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !o.connected() {
+            assert!(Instant::now() < deadline);
+            o.poll();
+            thread::sleep(Duration::from_millis(1));
+        }
+        o.glide = None;
+        o.clamps[Axis::V0.index()].min = 0.4;
+        let mut ctx = TickContext { media_ms: 0.0, playing: true, manual_axes: [false; Axis::COUNT], estim_manual: false, stop_on_pause: true, estim_volume: crate::ramp::VolumeSettings::default(), rate: 1.0, interval_ms: 10 };
+        let mut driven = [false; Axis::COUNT];
+        driven[Axis::L0.index()] = true;
+        driven[Axis::V0.index()] = true;
+        driven[Axis::A1.index()] = true;
+        let values = [0.5; Axis::COUNT];
+        o.send(&values, &driven, &ctx);
+        assert_eq!(o.last[Axis::V0.index()], Some(6999), "playing: the range applies");
+        assert_eq!(o.last[Axis::A1.index()], Some(5000));
+        ctx.playing = false;
+        assert!(o.send(&values, &driven, &ctx));
+        assert_eq!(o.last[Axis::V0.index()], Some(0), "paused: zero, below the range's floor");
+        assert_eq!(o.last[Axis::A1.index()], Some(0));
+        assert_eq!(o.last[Axis::L0.index()], Some(5000), "the stroke stays put");
+        assert!(o.line.starts_with("V00000I") && o.line.contains("A10000I"), "{}", o.line);
+        ctx.manual_axes[Axis::V0.index()] = true;
+        o.send(&values, &driven, &ctx);
+        assert_eq!(o.last[Axis::V0.index()], Some(6999), "a manual source keeps its level");
+        ctx.manual_axes[Axis::V0.index()] = false;
+        ctx.stop_on_pause = false;
+        o.send(&values, &driven, &ctx);
+        assert_eq!(o.last[Axis::V0.index()], Some(6999), "holding keeps the scripted level");
     }
 }

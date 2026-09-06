@@ -373,6 +373,8 @@ pub struct VibrationConfig {
 
 
 
+
+
 #[napi(object)]
 pub struct OutputFeature {
     pub index: u32,
@@ -380,6 +382,18 @@ pub struct OutputFeature {
     pub description: String,
     pub axis: Option<String>,
     pub speed: bool,
+    pub level: bool,
+    pub input: Option<f64>,
+}
+
+
+
+#[napi(object)]
+pub struct FeatureLevel {
+    pub from: f64,
+    pub to: f64,
+    pub floor: f64,
+    pub cap: f64,
 }
 
 
@@ -1965,6 +1979,35 @@ impl Engine {
 
 
 
+
+    #[napi]
+    pub fn set_output_feature_level(&self, id: u32, feature: u32, level: Option<FeatureLevel>) -> Result<bool> {
+        let level = level
+            .map(|l| {
+                if ![l.from, l.to, l.floor, l.cap].iter().all(|v| v.is_finite()) {
+                    return Err(err("feature level values must be finite".into()));
+                }
+                Ok::<_, Error>(bp_devices::LevelMap { from: l.from, to: l.to, floor: l.floor, cap: l.cap }.validated())
+            })
+            .transpose()?;
+        Ok(self.inner.set_output_feature_level(id, feature, level))
+    }
+
+
+
+
+    #[napi]
+    pub fn set_stop_on_pause(&self, on: bool) {
+        self.inner.set_stop_on_pause(on);
+    }
+
+    #[napi]
+    pub fn stop_on_pause(&self) -> bool {
+        self.inner.stop_on_pause()
+    }
+
+
+
     #[napi]
     pub fn set_output_vibration(&self, id: u32, vibration: Option<VibrationConfig>) -> Result<bool> {
         let vibration = vibration
@@ -2214,6 +2257,8 @@ impl Engine {
                                 description: f.description,
                                 axis: f.axis.map(|a| a.id().to_string()),
                                 speed: f.speed,
+                                level: f.level,
+                                input: f.input,
                             })
                             .collect(),
                         battery: o.battery,

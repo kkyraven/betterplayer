@@ -94,6 +94,64 @@ pub struct ToyFeature {
     pub signed: bool,
 }
 
+impl ToyFeature {
+
+
+    pub fn is_level(&self) -> bool {
+        !self.kind.is_position() && !(self.kind == FeatureKind::Rotate && self.signed)
+    }
+}
+
+
+
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LevelMap {
+
+    pub from: f64,
+
+    pub to: f64,
+
+    pub floor: f64,
+
+    pub cap: f64,
+}
+
+impl Default for LevelMap {
+    fn default() -> LevelMap {
+        LevelMap { from: 0.0, to: 1.0, floor: 0.0, cap: 1.0 }
+    }
+}
+
+impl LevelMap {
+
+    pub fn validated(self) -> LevelMap {
+        let unit = |v: f64| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+        let from = unit(self.from);
+        let floor = unit(self.floor);
+        LevelMap { from, to: unit(self.to).max(from), floor, cap: unit(self.cap).max(floor) }
+    }
+
+
+    pub fn apply(&self, input: f64) -> f64 {
+        if input <= self.from || input <= 0.0 {
+            return 0.0;
+        }
+        let span = self.to - self.from;
+        let t = if span <= 1e-9 { 1.0 } else { ((input - self.from) / span).clamp(0.0, 1.0) };
+        self.scale(t)
+    }
+
+
+
+    pub fn scale(&self, t: f64) -> f64 {
+        if t <= 0.0 {
+            return 0.0;
+        }
+        (self.floor + t.min(1.0) * (self.cap - self.floor)).clamp(0.0, 1.0)
+    }
+}
+
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToyInfo {
@@ -302,6 +360,8 @@ impl Hub {
             tx,
             info,
             axes: vec![None; n],
+            levels: vec![LevelMap::default(); n],
+            inputs: vec![None; n],
             last: vec![None; n],
             speed: [0.0; Axis::COUNT],
             prev: [None; Axis::COUNT],
@@ -605,6 +665,11 @@ pub struct ToyLink {
 
     axes: Vec<Option<Axis>>,
 
+    levels: Vec<LevelMap>,
+
+
+    inputs: Vec<Option<f64>>,
+
     last: Vec<Option<i32>>,
     speed: [f64; Axis::COUNT],
     prev: [Option<f64>; Axis::COUNT],
@@ -660,8 +725,24 @@ impl ToyLink {
     }
 
 
-    pub fn axes(&self) -> impl Iterator<Item = (&ToyFeature, Option<Axis>)> {
-        self.info.features.iter().zip(self.axes.iter().copied())
+    pub fn set_levels(&mut self, overrides: &HashMap<u32, LevelMap>) {
+        self.levels = self
+            .info
+            .features
+            .iter()
+            .map(|f| overrides.get(&f.index).copied().unwrap_or_default().validated())
+            .collect();
+    }
+
+
+
+    pub fn axes(&self) -> impl Iterator<Item = (&ToyFeature, Option<Axis>, Option<f64>)> {
+        self.info
+            .features
+            .iter()
+            .zip(self.axes.iter().copied())
+            .zip(self.inputs.iter().copied())
+            .map(|((f, a), input)| (f, a, input.filter(|_| f.is_level())))
     }
 
     fn track_speed(&mut self, values: &[f64; Axis::COUNT], interval_ms: u32) {
@@ -702,6 +783,12 @@ impl ToyLink {
                 self.prev[i] = None;
             }
         }
+        for i in 0..self.info.features.len() {
+            let f = &self.info.features[i];
+            self.inputs[i] = self.axes[i]
+                .filter(|a| clamps[a.index()].enabled && active[a.index()])
+                .map(|a| self.raw(f, a, values));
+        }
         self.since_send_ms += interval_ms as f64;
         if self.since_send_ms < SEND_EVERY_MS {
             return Ok(false);
@@ -724,30 +811,30 @@ impl ToyLink {
                 f.kind,
                 FeatureKind::Temperature | FeatureKind::Led | FeatureKind::Spray
             );
+            let level = self.levels[i];
             let driven = self.axes[i]
                 .filter(|a| clamps[a.index()].enabled)
                 .and_then(|a| {
                     let c = clamps[a.index()];
-                    let raw = if let Some(ms) = testing.filter(|_| testable) {
+                    if let Some(ms) = testing.filter(|_| testable) {
                         let phase = ms as f64 / TEST_MS as f64 * std::f64::consts::TAU;
-                        if f.kind.is_position() || (f.kind == FeatureKind::Rotate && f.signed) {
-                            0.5 - 0.2 * phase.sin()
-                        } else {
-                            0.2 * (phase / 2.0).sin().max(0.0)
-                        }
-                    } else if (finishing_test && testable) || !active[a.index()] {
-                        return None;
-                    } else {
-                        self.raw(f, a, values)
-                    };
+                        return Some(if f.is_level() {
 
-                    if !f.kind.is_position()
-                        && !(f.kind == FeatureKind::Rotate && f.signed)
-                        && raw <= 0.0
-                    {
-                        return Some(0.0);
+                            level.scale(0.2 * (phase / 2.0).sin().max(0.0))
+                        } else {
+                            let raw = 0.5 - 0.2 * phase.sin();
+                            (c.min + raw * (c.max - c.min)).clamp(0.0, 1.0)
+                        });
                     }
-                    Some((c.min + raw * (c.max - c.min)).clamp(0.0, 1.0))
+                    if (finishing_test && testable) || !active[a.index()] {
+                        return None;
+                    }
+                    let raw = self.raw(f, a, values);
+                    Some(if f.is_level() {
+                        level.apply(raw)
+                    } else {
+                        (c.min + raw * (c.max - c.min)).clamp(0.0, 1.0)
+                    })
                 });
             let v = match driven {
                 Some(v) => v,
@@ -1053,14 +1140,17 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn stroke_speed_drives_vibration_but_range_minimum_cannot_raise_silence() {
+    fn stroke_speed_drives_vibration_but_a_level_floor_cannot_raise_silence() {
         let (mut link, mut rx) = fixture(&[FeatureKind::Vibrate]);
+
         let mut clamps = [AxisClamp::default(); Axis::COUNT];
         clamps[Axis::L0.index()].min = 0.3;
+        link.set_levels(&HashMap::from([(0, LevelMap { floor: 0.3, ..LevelMap::default() })]));
         let mut values = [0.5; Axis::COUNT];
         link.send(&values, &clamps, 100, &[true; Axis::COUNT])
             .unwrap();
         assert_eq!(output_value(&mut rx).1, 0.0);
+        assert_eq!(link.axes().next().unwrap().2, Some(0.0), "a still stroke is a zero input");
         for tick in 1..=200 {
             values[Axis::L0.index()] =
                 0.5 + 0.5 * (tick as f64 * 0.01 * std::f64::consts::TAU * 2.0).sin();
@@ -1068,10 +1158,56 @@ pub(crate) mod tests {
                 .unwrap();
         }
         assert!((link.speed[Axis::L0.index()] - SPEED_FULL).abs() < 0.6);
+        let input = link.axes().next().unwrap().2.unwrap();
+        assert!(input > 0.8, "full speed is a full input: {input}");
         while rx.try_recv().is_ok() {}
         link.send(&values, &clamps, 100, &[false; Axis::COUNT])
             .unwrap();
         assert_eq!(output_value(&mut rx).1, 0.0);
+        assert_eq!(link.axes().next().unwrap().2, None, "no input while the axis is inactive");
+    }
+
+    #[test]
+    fn level_map_windows_the_input_and_scales_the_output() {
+        let m = LevelMap { from: 0.2, to: 0.6, floor: 0.3, cap: 0.9 };
+        assert_eq!(m.apply(0.0), 0.0);
+        assert_eq!(m.apply(0.2), 0.0, "off up to and including the start");
+        assert!((m.apply(0.21) - 0.315).abs() < 1e-9, "starts at the floor");
+        assert!((m.apply(0.4) - 0.6).abs() < 1e-9, "halfway across the window");
+        assert!((m.apply(0.6) - 0.9).abs() < 1e-9);
+        assert!((m.apply(1.0) - 0.9).abs() < 1e-9, "held at the cap past full");
+        let d = LevelMap::default();
+        assert_eq!(d.apply(0.0), 0.0);
+        assert!((d.apply(0.37) - 0.37).abs() < 1e-9, "the default is the identity");
+
+        let step = LevelMap { from: 0.5, to: 0.5, floor: 0.2, cap: 0.8 };
+        assert_eq!(step.apply(0.5), 0.0);
+        assert!((step.apply(0.51) - 0.8).abs() < 1e-9);
+        let bad = LevelMap { from: 0.7, to: 0.2, floor: 1.4, cap: f64::NAN }.validated();
+        assert_eq!(bad, LevelMap { from: 0.7, to: 0.7, floor: 1.0, cap: 1.0 });
+        assert!((m.scale(0.5) - 0.6).abs() < 1e-9);
+        assert_eq!(m.scale(0.0), 0.0);
+    }
+
+    #[test]
+    fn a_level_feature_takes_its_map_and_a_position_keeps_the_axis_range() {
+        let (mut link, mut rx) = fixture(&[FeatureKind::Vibrate, FeatureKind::Position]);
+        link.set_axes(&HashMap::from([(0, Some(Axis::V0)), (1, Some(Axis::L0))]));
+        link.set_levels(&HashMap::from([(0, LevelMap { from: 0.5, to: 1.0, floor: 0.0, cap: 0.5 })]));
+        let mut clamps = [AxisClamp::default(); Axis::COUNT];
+        clamps[Axis::L0.index()] = AxisClamp { enabled: true, min: 0.2, max: 0.6 };
+        clamps[Axis::V0.index()] = AxisClamp { enabled: true, min: 0.9, max: 1.0 };
+        let mut values = [0.5; Axis::COUNT];
+        link.send(&values, &clamps, 100, &[true; Axis::COUNT]).unwrap();
+        assert_eq!(output_value(&mut rx), (0, 0.0), "a vibe at its start level is off, whatever V0's range says");
+        assert_eq!(output_value(&mut rx), (1, 0.4), "the position is placed within L0's range");
+        assert!(rx.try_recv().is_err());
+        values[Axis::V0.index()] = 1.0;
+        link.send(&values, &clamps, 100, &[true; Axis::COUNT]).unwrap();
+        assert_eq!(output_value(&mut rx), (0, 0.5), "full input reaches the cap, not V0's range");
+        assert!(rx.try_recv().is_err(), "an unchanged position is not resent");
+        let input: Vec<Option<f64>> = link.axes().map(|(_, _, i)| i).collect();
+        assert_eq!(input, vec![Some(1.0), None], "only levels report an input");
     }
 
     #[test]

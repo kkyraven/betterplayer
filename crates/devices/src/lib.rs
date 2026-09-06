@@ -36,7 +36,7 @@ pub use output::{Media, Output, OutputSnapshot, OutputStats, Status, TickContext
 pub use probe::{ProbedPort, probe_ports};
 pub use ramp::{Ramp, RampConfig, RampProgress};
 pub use tcode::{AxisClamp, Profile};
-pub use toys::{FeatureKind, ToyFeature, ToyInfo, hub as toy_hub};
+pub use toys::{FeatureKind, LevelMap, ToyFeature, ToyInfo, hub as toy_hub};
 pub use transport::Transport;
 
 const WINDOW: usize = 10_000;

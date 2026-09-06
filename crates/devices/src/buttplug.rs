@@ -180,11 +180,14 @@ impl Buttplug {
 
 
 
+
+
     pub fn send(
         &mut self,
         values: &[f64; Axis::COUNT],
         clamps: &[AxisClamp; Axis::COUNT],
         interval_ms: u32,
+        active: &[bool; Axis::COUNT],
     ) -> io::Result<bool> {
         self.since_send_ms += interval_ms as f64;
         if self.since_send_ms < SEND_EVERY_MS {
@@ -198,9 +201,11 @@ impl Buttplug {
                 (c.min + values[axis.index()].clamp(0.0, 1.0) * (c.max - c.min)).clamp(0.0, 1.0)
             })
         };
+        let level = |axis: Axis, rest: f64| clamped(axis).map(|v| if active[axis.index()] { v } else { rest });
         let stroke = clamped(Axis::L0);
-        let vibrate = clamped(Axis::V0);
-        let twist = clamped(Axis::R0);
+        let vibrate = level(Axis::V0, 0.0);
+
+        let twist = level(Axis::R0, 0.5);
         let mut batch = Vec::new();
         let now = Instant::now();
         for d in &mut self.devices {

@@ -860,6 +860,7 @@ mod tests {
         TickContext {
             manual_axes: [false; Axis::COUNT],
             estim_manual: false,
+            stop_on_pause: true,
             estim_volume: crate::ramp::VolumeSettings::default(),
             media_ms,
             playing: !paused,

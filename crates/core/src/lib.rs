@@ -585,6 +585,9 @@ struct Shared {
     live_params: AtomicBool,
 
     params_enabled: AtomicBool,
+
+
+    stop_on_pause: AtomicBool,
     estim_volume: Mutex<bp_devices::ramp::VolumeSettings>,
 
     detect_wanted: AtomicBool,
@@ -691,6 +694,7 @@ impl Engine {
             param_sources: Mutex::new(std::array::from_fn(|_| ParamSource::Restim)),
             live_params: AtomicBool::new(false),
             params_enabled: AtomicBool::new(EstimOptions::default().params),
+            stop_on_pause: AtomicBool::new(true),
             estim_volume: Mutex::new(bp_devices::ramp::VolumeSettings::default()),
             detect_wanted: AtomicBool::new(false),
             boxes_wanted: AtomicBool::new(false),
@@ -1737,6 +1741,26 @@ impl Engine {
     }
 
 
+
+    pub fn set_output_feature_level(&self, id: u32, feature: u32, level: Option<bp_devices::LevelMap>) -> bool {
+        let mut outputs = self.shared.outputs.lock().unwrap();
+        outputs
+            .iter_mut()
+            .find(|o| o.id == id)
+            .is_some_and(|o| o.set_feature_level(feature, level))
+    }
+
+
+
+    pub fn set_stop_on_pause(&self, on: bool) {
+        self.shared.stop_on_pause.store(on, Ordering::Relaxed);
+    }
+
+    pub fn stop_on_pause(&self) -> bool {
+        self.shared.stop_on_pause.load(Ordering::Relaxed)
+    }
+
+
     pub fn set_coyote_strength(&self, id: u32, a: u8, b: u8) -> bool {
         let mut outputs = self.shared.outputs.lock().unwrap();
         outputs
@@ -2747,6 +2771,7 @@ impl Shared {
             playing,
             estim_manual: [Axis::EA, Axis::EB, Axis::EV, Axis::E1, Axis::E2, Axis::E3, Axis::E4]
                 .into_iter().any(|a| flags[a.index()] & FLAG_LIVE != 0 && driven[a.index()]),
+            stop_on_pause: self.stop_on_pause.load(Ordering::Relaxed),
             estim_volume: *self.estim_volume.lock().unwrap(),
             rate,
             interval_ms: ((t.dt_ms + 0.75).floor() as u32).clamp(1, 100),
