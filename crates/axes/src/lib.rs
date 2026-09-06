@@ -107,6 +107,8 @@ pub struct ScriptEffect {
 
 pub struct Mixer {
     effects: [Option<ScriptEffect>; Axis::COUNT],
+
+    max_override: [Option<f64>; Axis::COUNT],
     scripts: [Option<Arc<Script>>; Axis::COUNT],
 
     extents: [Option<(f64, f64)>; Axis::COUNT],
@@ -148,6 +150,7 @@ impl Mixer {
     pub fn new() -> Mixer {
         let mut m = Mixer {
             effects: [None; Axis::COUNT],
+            max_override: [None; Axis::COUNT],
             scripts: std::array::from_fn(|_| None),
             extents: [None; Axis::COUNT],
             loaded: Vec::new(),
@@ -178,6 +181,11 @@ impl Mixer {
 
     pub fn set_script_effect(&mut self, axis: Axis, effect: Option<ScriptEffect>) {
         self.effects[axis.index()] = effect;
+    }
+
+
+    pub fn set_max_override(&mut self, axis: Axis, max: Option<f64>) {
+        self.max_override[axis.index()] = max;
     }
 
 
@@ -461,8 +469,9 @@ impl Mixer {
         } else {
             st.idle_ms += dt_ms;
         }
-        let mut in_range = value.map(|v| cfg.min + v * (cfg.max - cfg.min));
-        let target_home = cfg.min + default * (cfg.max - cfg.min);
+        let max = self.max_override[i].map_or(cfg.max, |m| m.clamp(cfg.min, 1.0));
+        let mut in_range = value.map(|v| cfg.min + v * (max - cfg.min));
+        let target_home = cfg.min + default * (max - cfg.min);
         if in_range.is_none() && cfg.auto_home_delay_ms > 0.0 && st.idle_ms >= cfg.auto_home_delay_ms {
             let u = ((st.idle_ms - cfg.auto_home_delay_ms) / cfg.auto_home_duration_ms.max(1.0)).clamp(0.0, 1.0);
             in_range = Some(st.home_from + (target_home - st.home_from) * smoothstep(u));
@@ -628,6 +637,25 @@ mod tests {
         m.set_script_effect(Axis::L0, None);
         let restored = m.tick(1350.0, 10.0)[Axis::L0.index()];
         assert!((restored - 0.65).abs() < 1e-6);
+    }
+
+    #[test]
+    fn max_override_moves_the_ceiling_and_lets_go() {
+        let mut m = Mixer::new();
+        settled(&mut m);
+        m.set_scripts([(Axis::V0, script(&[(0.0, 1.0), (1000.0, 1.0)]))]);
+        let mut s = AxisSettings::default_for(Axis::V0);
+        s.max = 0.5;
+        s.speed_limit = 0.0;
+        m.set_settings(Axis::V0, s);
+        assert!((m.tick(100.0, 10.0)[Axis::V0.index()] - 0.5).abs() < 1e-9);
+        m.set_max_override(Axis::V0, Some(1.0));
+        assert!((m.tick(110.0, 10.0)[Axis::V0.index()] - 1.0).abs() < 1e-9);
+
+        m.set_max_override(Axis::V0, Some(-1.0));
+        assert!((m.tick(120.0, 10.0)[Axis::V0.index()] - 0.0).abs() < 1e-9);
+        m.set_max_override(Axis::V0, None);
+        assert!((m.tick(130.0, 10.0)[Axis::V0.index()] - 0.5).abs() < 1e-9);
     }
 
     #[test]

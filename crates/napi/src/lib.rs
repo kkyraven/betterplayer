@@ -1732,20 +1732,87 @@ impl Engine {
                 || !valid(r.duration_ms, 100.0, 30000.0) || !valid(r.tempo, 0.25, 4.0)
                 || !valid(r.intensity, 0.0, 2.0) || !valid(r.playback_speed, 0.25, 2.0)
                 || r.estim_max.is_some_and(|v| !valid(v, 0.0, 1.0))
+                || r.vibe_max.is_some_and(|v| !valid(v, 0.0, 1.0))
                 || r.stroke_speed.is_some_and(|v| !valid(v, 0.1, 20.0)) {
                 return Err(err("invalid Hero music rule".to_string()));
             }
             options.rules[r.bucket as usize] = Some(bp_core::HeroMusicRule {
                 duration_ms: r.duration_ms, tempo: r.tempo, intensity: r.intensity,
                 playback_speed: r.playback_speed, estim_max: r.estim_max, stroke_speed: r.stroke_speed,
+                vibe_max: r.vibe_max,
             });
         }
         self.inner.set_hero_music(options);
         Ok(())
     }
 
+
     #[napi]
-    pub fn hero_music_speed(&self) -> f64 { self.inner.hero_music_speed() }
+    pub fn effect_speed(&self) -> f64 {
+        self.inner.effect_speed()
+    }
+
+
+    #[napi]
+    pub fn set_zones(&self, enabled: bool, zones: Vec<ZoneRule>) -> Result<()> {
+        let valid = |v: f64, lo: f64, hi: f64| v.is_finite() && v >= lo && v <= hi;
+        let mut out = Vec::with_capacity(zones.len());
+        for z in zones {
+            let trigger = match z.trigger.as_str() {
+                "colour" => {
+                    let mut buckets = [false; bp_core::HERO_BUCKETS];
+                    for b in &z.buckets {
+                        let b = *b as usize;
+                        if b >= bp_core::HERO_BUCKETS {
+                            return Err(err("invalid zone colour".to_string()));
+                        }
+                        buckets[b] = true;
+                    }
+                    bp_core::ZoneTrigger::Colour(buckets)
+                }
+                "part" => bp_core::ZoneTrigger::Part(
+                    z.part.as_deref().and_then(bp_core::DetectKind::from_id).ok_or_else(|| err("invalid zone part".to_string()))?,
+                ),
+                other => return Err(err(format!("unknown zone trigger {other}"))),
+            };
+            let r = z.region;
+            if !valid(r.x, 0.0, 1.0) || !valid(r.y, 0.0, 1.0) || !valid(r.w, 0.0, 1.0) || !valid(r.h, 0.0, 1.0) || r.w <= 0.0 || r.h <= 0.0
+                || !valid(z.cover, 0.0, 1.0) || !valid(z.hold_ms, 0.0, 60000.0)
+                || !valid(z.tempo, 0.25, 4.0) || !valid(z.intensity, 0.0, 2.0) || !valid(z.playback_speed, 0.25, 2.0)
+                || z.stroke_speed.is_some_and(|v| !valid(v, 0.1, 20.0))
+                || z.estim_max.is_some_and(|v| !valid(v, 0.0, 1.0))
+                || z.vibe_max.is_some_and(|v| !valid(v, 0.0, 1.0)) {
+                return Err(err("invalid zone".to_string()));
+            }
+            out.push(bp_core::Zone {
+                id: z.id,
+                rect: bp_core::DetectRect { x: r.x, y: r.y, w: r.w, h: r.h },
+                trigger,
+                cover: z.cover,
+                hold_ms: z.hold_ms,
+                effect: bp_core::EffectOverride {
+                    tempo: z.tempo,
+                    intensity: z.intensity,
+                    playback_speed: z.playback_speed,
+                    stroke_speed: z.stroke_speed,
+                    estim_max: z.estim_max,
+                    vibe_max: z.vibe_max,
+                },
+            });
+        }
+        self.inner.set_zones(enabled, out);
+        Ok(())
+    }
+
+
+    #[napi]
+    pub fn zone_state(&self) -> Vec<ZoneMatch> {
+        self.inner
+            .zone_state()
+            .into_iter()
+            .map(|m| ZoneMatch { id: m.id, share: m.share, active: m.active, leading: m.leading })
+            .collect()
+    }
 
 
     #[napi]
@@ -2795,6 +2862,42 @@ pub struct HeroMusicRule {
     pub playback_speed: f64,
     pub stroke_speed: Option<f64>,
     pub estim_max: Option<f64>,
+
+    pub vibe_max: Option<f64>,
+}
+
+
+
+
+#[napi(object)]
+pub struct ZoneRule {
+    pub id: String,
+    pub region: TrackRegion,
+
+    pub trigger: String,
+    pub buckets: Vec<u32>,
+    pub part: Option<String>,
+
+    pub cover: f64,
+    pub hold_ms: f64,
+    pub tempo: f64,
+    pub intensity: f64,
+    pub playback_speed: f64,
+    pub stroke_speed: Option<f64>,
+    pub estim_max: Option<f64>,
+    pub vibe_max: Option<f64>,
+}
+
+
+#[napi(object)]
+pub struct ZoneMatch {
+    pub id: String,
+
+    pub share: f64,
+
+    pub active: bool,
+
+    pub leading: bool,
 }
 
 #[napi(object)]

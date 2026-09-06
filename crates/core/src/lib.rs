@@ -10,6 +10,7 @@ mod params;
 mod pass;
 mod range;
 mod track;
+mod zones;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -42,7 +43,7 @@ pub use bp_beat::{
     ONSET_HOP_MS as BEAT_ONSET_HOP_MS, Style as BeatStyle, analyse as beat_analyse,
     grid50 as beat_grid50,
 };
-pub use bp_detect::{Kind as DetectKind, MODELS, ModelSpec};
+pub use bp_detect::{Kind as DetectKind, MODELS, ModelSpec, Rect as DetectRect};
 pub use bp_hero::{
     BUCKET_NAMES as HERO_BUCKET_NAMES, BUCKETS as HERO_BUCKETS, Direction as HeroDirection,
     Hero as RawHero, Note as HeroNote, Options as HeroOptions, Rect as HeroRect,
@@ -51,6 +52,8 @@ pub use bp_model::{MODELS as AI_MODELS, ModelKind, ModelSpec as AiModelSpec, TOO
 pub use detect::{DetectSnapshot, DetectStatus, Found, Verdict};
 pub use generate::{GenerateProgress, GenerateStatus, Generation};
 pub use hero::{ColourRule, Flourish, HeroSnapshot, MusicOptions as HeroMusicOptions, MusicRule as HeroMusicRule};
+pub use zones::{Override as EffectOverride, Zone, ZoneMatch, ZoneTrigger};
+use zones::ZoneState;
 pub use range::{
     MODEL_TAIL_MS, RangeAnalyser, RangeOptions, RangeProgress, RangeResult, RangeStatus, Thumb,
 };
@@ -639,6 +642,10 @@ struct Shared {
     beat: Arc<Mutex<Beat>>,
     hero: Mutex<HeroState>,
 
+    zones: Mutex<ZoneState>,
+
+    zones_detect: AtomicBool,
+
     generate: Arc<generate::State>,
 
 
@@ -726,6 +733,8 @@ impl Engine {
             }),
             beat: Arc::new(Mutex::new(Beat::new())),
             hero: Mutex::new(HeroState::new()),
+            zones: Mutex::new(ZoneState::new()),
+            zones_detect: AtomicBool::new(false),
             generate: Arc::new(generate::State::new()),
             draft: Mutex::new(Vec::new()),
             range: Arc::new(range::State::new()),
@@ -994,6 +1003,7 @@ impl Engine {
             move |rgb, w, h, time_ms, cuts| {
                 for_frames.offer_to_detector(rgb, w, h, cuts);
                 for_frames.hero_frame(rgb, w, h, time_ms);
+                for_frames.zone_frame(rgb, w, h, time_ms);
             },
 
 
@@ -1167,15 +1177,37 @@ impl Engine {
     }
 
 
-    pub fn hero_music_speed(&self) -> f64 {
-        if !self.shared.timeline.lock().unwrap().active
-            || !self.shared.track_axes.lock().unwrap().iter().any(|a| a.source == TrackSource::AiMusic)
-            || self.shared.following.load(Ordering::Relaxed) { return 1.0; }
+
+    pub fn effect_speed(&self) -> f64 {
+        if !self.shared.timeline.lock().unwrap().active || self.shared.following.load(Ordering::Relaxed) {
+            return 1.0;
+        }
         let mut clock = self.shared.clock.lock().unwrap();
-        if !clock.running() { return 1.0; }
+        if !clock.running() {
+            return 1.0;
+        }
         let time = clock.now();
         drop(clock);
-        self.shared.hero.lock().unwrap().music_at(time).map_or(1.0, |(_, r)| r.playback_speed)
+        let music = self.shared.track_axes.lock().unwrap().iter().any(|a| a.source == TrackSource::AiMusic);
+        let hit = music.then(|| self.shared.hero.lock().unwrap().music_at(time)).flatten().map(|(s, r)| (s, r.playback_speed));
+        let zone = self.shared.zones.lock().unwrap().active_at(time).map(|(s, _, o)| (s, o.playback_speed));
+        match (hit, zone) {
+            (Some(h), Some(z)) => if z.0 >= h.0 { z.1 } else { h.1 },
+            (h, z) => h.or(z).map_or(1.0, |e| e.1),
+        }
+    }
+
+
+    pub fn set_zones(&self, enabled: bool, zones: Vec<Zone>) {
+        let mut z = self.shared.zones.lock().unwrap();
+        z.set(enabled, zones);
+        self.shared.zones_detect.store(z.wants_detector(), Ordering::Relaxed);
+    }
+
+
+    pub fn zone_state(&self) -> Vec<ZoneMatch> {
+        let time = self.shared.clock.lock().unwrap().now();
+        self.shared.zones.lock().unwrap().snapshot(time)
     }
 
     pub fn set_hero_colour(&self, axis: Option<Axis>, bucket: usize, rule: ColourRule) {
@@ -2390,6 +2422,7 @@ impl Shared {
             PlayerEvent::Speed(s) => clock.set_speed(s),
             PlayerEvent::Seek | PlayerEvent::FileLoaded => {
                 self.hero.lock().unwrap().reset_hits();
+                self.zones.lock().unwrap().reset();
                 clock.snap();
                 self.mixer.lock().unwrap().resync();
             }
@@ -2521,6 +2554,25 @@ impl Shared {
 
 
 
+    fn zone_frame(&self, rgb: &[u8], w: usize, h: usize, time_ms: f64) {
+        let mut zones = self.zones.lock().unwrap();
+        if !zones.enabled {
+            return;
+        }
+        if zones.wants_frames() {
+            zones.push_colour(rgb, w, h, time_ms);
+        }
+        if zones.wants_detector() {
+            let boxes = match self.detect.lock().unwrap().as_ref() {
+                Some(d) => d.snapshot().boxes,
+                None => Vec::new(),
+            };
+            zones.push_boxes(&boxes, time_ms);
+        }
+    }
+
+
+
     fn hosted_media(&self) -> Media {
         if self.browser_tracking.load(Ordering::Relaxed) {
             return Media::default();
@@ -2602,7 +2654,7 @@ impl Shared {
             (r.source, r.target, r.auto.floor(now))
         };
         let boxes = self.boxes_wanted.load(Ordering::Relaxed);
-        if source != RegionSource::Auto && !self.detect_wanted.load(Ordering::Relaxed) && !boxes {
+        if source != RegionSource::Auto && !self.detect_wanted.load(Ordering::Relaxed) && !boxes && !self.zones_detect.load(Ordering::Relaxed) {
             return;
         }
         let detect = self.detect.lock().unwrap();
@@ -2714,28 +2766,59 @@ impl Shared {
             })
         });
         let music_axes = *self.track_axes.lock().unwrap();
-        let (offsets, derived) = {
+        let (offsets, derived, scripted) = {
             let mixer = self.mixer.lock().unwrap();
             (std::array::from_fn::<_, { Axis::COUNT }, _>(|i| mixer.global_offset_ms + mixer.settings(Axis::ALL[i]).offset_ms),
-             std::array::from_fn::<_, { Axis::COUNT }, _>(|i| mixer.is_derived(Axis::ALL[i])))
+             std::array::from_fn::<_, { Axis::COUNT }, _>(|i| mixer.is_derived(Axis::ALL[i])),
+             std::array::from_fn::<_, { Axis::COUNT }, _>(|i| mixer.has_script(Axis::ALL[i])))
         };
-        let (music_effects, estim_max) = {
+
+
+        let (effects, estim_max, vibe_max) = {
             let hero = self.hero.lock().unwrap();
-            let active = tracking && playing && music_axes.iter().any(|a| a.source == TrackSource::AiMusic);
+            let zones = self.zones.lock().unwrap();
+            let live = tracking && playing;
+            let music_on = live && music_axes.iter().any(|a| a.source == TrackSource::AiMusic);
             let effects = std::array::from_fn::<_, { Axis::COUNT }, _>(|i| {
-                let inherited = matches!(Axis::ALL[i], Axis::EA | Axis::EB) && derived[i]
-                    && music_axes[Axis::L0.index()].source == TrackSource::AiMusic;
-                if !active || (!inherited && music_axes[i].source != TrackSource::AiMusic) { return None; }
-                hero.music_at(media_ms - offsets[i]).map(|(start_ms, rule)| bp_axes::ScriptEffect {
-                    start_ms, end_ms: start_ms + rule.duration_ms,
-                    tempo: rule.tempo, intensity: rule.intensity,
-                    stroke_speed: if inherited || Axis::ALL[i] == Axis::L0 { rule.stroke_speed } else { None },
-                    min: if inherited { 0.0 } else { music_axes[i].min },
-                    max: if inherited { 1.0 } else { music_axes[i].max },
-                })
+                let axis = Axis::ALL[i];
+                let row = music_axes[i];
+                let inherited = matches!(axis, Axis::EA | Axis::EB) && derived[i];
+                let stroke = inherited || axis == Axis::L0;
+                let time = media_ms - offsets[i];
+                let hit = if music_on && (row.source == TrackSource::AiMusic || (inherited && music_axes[Axis::L0.index()].source == TrackSource::AiMusic)) {
+                    hero.music_at(time).map(|(start_ms, rule)| bp_axes::ScriptEffect {
+                        start_ms, end_ms: start_ms + rule.duration_ms,
+                        tempo: rule.tempo, intensity: rule.intensity,
+                        stroke_speed: if stroke { rule.stroke_speed } else { None },
+                        min: if inherited { 0.0 } else { row.min },
+                        max: if inherited { 1.0 } else { row.max },
+                    })
+                } else { None };
+                let zone = if live && (scripted[i] || inherited) {
+                    zones.active_at(time).map(|(start_ms, end_ms, o)| {
+
+                        let generated = !inherited && matches!(row.source, TrackSource::Beat | TrackSource::AiMusic | TrackSource::Hero);
+                        bp_axes::ScriptEffect {
+                            start_ms, end_ms,
+                            tempo: o.tempo, intensity: o.intensity,
+                            stroke_speed: if stroke { o.stroke_speed } else { None },
+                            min: if generated { row.min } else { 0.0 },
+                            max: if generated { row.max } else { 1.0 },
+                        }
+                    })
+                } else { None };
+                match (hit, zone) {
+                    (Some(h), Some(z)) => Some(if z.start_ms >= h.start_ms { z } else { h }),
+                    (h, z) => h.or(z),
+                }
             });
-            let max = active.then(|| hero.music_at(media_ms)).flatten().and_then(|(_, r)| r.estim_max);
-            (effects, max)
+            let hit = music_on.then(|| hero.music_at(media_ms)).flatten().map(|(s, r)| (s, r.estim_max, r.vibe_max));
+            let zone = live.then(|| zones.active_at(media_ms)).flatten().map(|(s, _, o)| (s, o.estim_max, o.vibe_max));
+            let winner = match (hit, zone) {
+                (Some(h), Some(z)) => Some(if z.0 >= h.0 { z } else { h }),
+                (h, z) => h.or(z),
+            };
+            (effects, winner.and_then(|w| w.1), winner.and_then(|w| w.2))
         };
         let live_params = if self.live_params.load(Ordering::Relaxed) {
             self.live_param_values(media_ms)
@@ -2745,8 +2828,9 @@ impl Shared {
         let (frame, driven, flags) = {
             let mut mixer = self.mixer.lock().unwrap();
             for axis in Axis::ALL {
-                mixer.set_script_effect(axis, music_effects[axis.index()]);
+                mixer.set_script_effect(axis, effects[axis.index()]);
             }
+            mixer.set_max_override(Axis::V0, vibe_max);
             for (axis, value) in live_params {
                 mixer.set_fallback(axis, value.map_or(Fallback::None, Fallback::Value));
             }

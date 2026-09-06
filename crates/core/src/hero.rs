@@ -95,6 +95,8 @@ pub struct MusicRule {
     pub playback_speed: f64,
     pub stroke_speed: Option<f64>,
     pub estim_max: Option<f64>,
+
+    pub vibe_max: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -466,7 +468,7 @@ mod tests {
     }
 
     fn music_rule(duration_ms: f64, tempo: f64) -> MusicRule {
-        MusicRule { duration_ms, tempo, intensity: 1.2, playback_speed: 1.5, stroke_speed: None, estim_max: Some(0.9) }
+        MusicRule { duration_ms, tempo, intensity: 1.2, playback_speed: 1.5, stroke_speed: None, estim_max: Some(0.9), vibe_max: None }
     }
 
     #[test]
