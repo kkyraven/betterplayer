@@ -1,5 +1,6 @@
 use std::ffi::{CStr, c_char, c_void};
 use std::ptr;
+use std::sync::OnceLock;
 
 use libloading::{Library, Symbol};
 
@@ -97,7 +98,8 @@ impl Egl {
 }
 
 pub struct Context {
-    egl: Egl,
+
+    egl: &'static Egl,
     display: EGLDisplay,
     surface: EGLSurface,
     context: EGLContext,
@@ -106,7 +108,8 @@ pub struct Context {
 impl Context {
 
     pub fn new() -> Result<Context, String> {
-        let egl = Egl::load()?;
+        static EGL: OnceLock<Result<Egl, String>> = OnceLock::new();
+        let egl = EGL.get_or_init(Egl::load).as_ref().map_err(Clone::clone)?;
 
 
         let client_exts = egl.query(ptr::null_mut(), EGL_EXTENSIONS);

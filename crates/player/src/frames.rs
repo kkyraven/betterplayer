@@ -4,6 +4,32 @@ use std::time::{Duration, Instant};
 
 pub type External = [(usize, usize); 3];
 
+pub(crate) fn frame_len(width: u32, height: u32) -> Result<usize, String> {
+    if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 {
+        return Err("invalid frame dimensions".into());
+    }
+    (width as usize).checked_mul(height as usize).and_then(|n| n.checked_mul(4))
+        .filter(|n| *n <= isize::MAX as usize)
+        .ok_or_else(|| "frame size overflow".into())
+}
+
+pub(crate) fn validate_size(width: u32, height: u32, external: Option<External>) -> Result<(), String> {
+    let len = frame_len(width, height)?;
+    if let Some(slots) = external {
+        for (i, &(ptr, capacity)) in slots.iter().enumerate() {
+            if ptr == 0 || capacity < len || ptr.checked_add(len).is_none() {
+                return Err(format!("invalid frame buffer {i}"));
+            }
+            for &(other, _) in &slots[..i] {
+                if ptr < other + len && other < ptr + len {
+                    return Err("frame buffers must not overlap".into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub struct FrameSlot {
     ptr: *mut u8,
     len: usize,
@@ -170,6 +196,17 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_buffers_that_could_overwrite_host_memory() {
+        assert!(frame_len(0, 10).is_err());
+        assert!(frame_len(u32::MAX, u32::MAX).is_err());
+        assert!(validate_size(2, 2, Some([(0, 16), (32, 16), (64, 16)])).is_err());
+        assert!(validate_size(2, 2, Some([(16, 15), (32, 16), (64, 16)])).is_err());
+        assert!(validate_size(2, 2, Some([(16, 16), (24, 16), (64, 16)])).is_err());
+        assert!(validate_size(2, 2, Some([(16, 16), (32, 16), (usize::MAX - 8, 16)])).is_err());
+        assert!(validate_size(2, 2, Some([(16, 16), (32, 16), (48, 16)])).is_ok());
+    }
 
     #[test]
     fn rotation_never_hands_out_the_reading_slot() {

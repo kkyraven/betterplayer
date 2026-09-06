@@ -1,6 +1,6 @@
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[repr(C)]
 pub struct mpv_handle {
@@ -141,6 +141,9 @@ pub struct Mpv {
     pub handle: *mut mpv_handle,
 
     pub observed_time: AtomicU64,
+
+
+    pub picture_ready: AtomicBool,
 }
 unsafe impl Send for Mpv {}
 unsafe impl Sync for Mpv {}
@@ -173,7 +176,7 @@ impl Mpv {
         if handle.is_null() {
             return Err("mpv_create failed (check LC_NUMERIC)".into());
         }
-        Ok(Mpv { handle, observed_time: AtomicU64::new(0.0f64.to_bits()) })
+        Ok(Mpv { handle, observed_time: AtomicU64::new(0.0f64.to_bits()), picture_ready: AtomicBool::new(false) })
     }
 
     pub fn set_option(&self, name: &str, value: &str) -> Result<(), String> {
@@ -210,6 +213,9 @@ impl Mpv {
             .collect::<Result<_, _>>()?;
         let mut ptrs: Vec<*const c_char> = owned.iter().map(|c| c.as_ptr()).collect();
         ptrs.push(ptr::null());
+        if matches!(args.first(), Some(&"loadfile" | &"stop")) {
+            self.picture_ready.store(false, Ordering::Relaxed);
+        }
         check(unsafe { mpv_command(self.handle, ptrs.as_mut_ptr()) }, args.first().copied().unwrap_or("command"))
     }
 

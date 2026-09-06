@@ -111,8 +111,7 @@ pub struct Player {
     frames: Arc<Frames>,
     stats: Arc<RenderStats>,
     log: Arc<Mutex<Vec<String>>>,
-
-    tx: Option<Box<Sender<Msg>>>,
+    tx: Option<Sender<Msg>>,
     render: Option<JoinHandle<()>>,
     events: Option<JoinHandle<()>>,
     stop_events: Arc<AtomicBool>,
@@ -169,6 +168,7 @@ fn default_hwdec() -> &'static str {
 
 impl Player {
     pub fn new(width: u32, height: u32, opts: PlayerOptions, sink: Option<EventSink>) -> Result<Player, String> {
+        frames::frame_len(width, height)?;
         let mpv = Mpv::create()?;
         mpv.set_option("vo", "libmpv")?;
         mpv.set_option("hwdec", opts.hwdec.as_deref().unwrap_or(default_hwdec()))?;
@@ -246,6 +246,9 @@ impl Player {
                                     if next != size {
                                         size = next;
                                         has_video.store(size.0 > 0, Ordering::Relaxed);
+                                        if size.0 == 0 {
+                                            mpv.picture_ready.store(false, Ordering::Relaxed);
+                                        }
                                         if size.0 > 0 {
                                             if let Some(tx) = picture_back.lock().unwrap().as_ref() {
                                                 let _ = tx.send(Msg::PictureBack);
@@ -292,7 +295,7 @@ impl Player {
             }
         };
         push_log(&log, format!("render context: {context}"));
-        *picture_back.lock().unwrap() = Some((*tx).clone());
+        *picture_back.lock().unwrap() = Some(tx.clone());
 
         Ok(Player {
             mpv,
@@ -421,15 +424,18 @@ impl Player {
 
 
     pub fn resize(&self, width: u32, height: u32, external: Option<External>) -> Result<(), String> {
+        frames::validate_size(width, height, external)?;
         let tx = self.tx.as_ref().ok_or("player closed")?;
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        tx.send(Msg::Resize(width, height, external, done_tx)).map_err(|_| "render thread gone".to_string())?;
-        done_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .map_err(|_| "resize timed out".to_string())?;
-        self.enhance.lock().unwrap().set_output(&self.mpv, (width, height))?;
+        let done = Arc::new(render::ResizeReply::default());
+        tx.send(Msg::Resize(width, height, external, done.clone())).map_err(|_| "render thread gone".to_string())?;
+        done.wait(Duration::from_secs(2))?;
+
+
+        if let Err(e) = self.enhance.lock().unwrap().set_output(&self.mpv, (width, height)) {
+            push_log(&self.log, format!("enhance after resize: {e}"));
+        }
         #[cfg(any(target_os = "macos", windows))]
-        tx.send(Msg::Redraw).map_err(|_| "render thread gone".to_string())?;
+        let _ = tx.send(Msg::Redraw);
         Ok(())
     }
 
