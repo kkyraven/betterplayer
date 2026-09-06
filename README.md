@@ -34,7 +34,3 @@ pnpm install --frozen-lockfile
 pnpm run build
 ```
 Windows builds need an mpv development package; the release workflow prepares one from the shinchiro mpv builds.
-
-## Licence
-
-GPL-3.0-or-later. Detector model weights are not included; see the detector source for their separate licence requirements.
