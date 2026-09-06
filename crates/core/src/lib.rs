@@ -50,7 +50,7 @@ pub use bp_hero::{
 pub use bp_model::{MODELS as AI_MODELS, ModelKind, ModelSpec as AiModelSpec, TOO_SLOW_MS};
 pub use detect::{DetectSnapshot, DetectStatus, Found, Verdict};
 pub use generate::{GenerateProgress, GenerateStatus, Generation};
-pub use hero::{ColourRule, Flourish, HeroSnapshot};
+pub use hero::{ColourRule, Flourish, HeroSnapshot, MusicOptions as HeroMusicOptions, MusicRule as HeroMusicRule};
 pub use range::{
     MODEL_TAIL_MS, RangeAnalyser, RangeOptions, RangeProgress, RangeResult, RangeStatus, Thumb,
 };
@@ -1162,6 +1162,21 @@ impl Engine {
     }
 
 
+    pub fn set_hero_music(&self, options: HeroMusicOptions) {
+        self.shared.hero.lock().unwrap().music = options;
+    }
+
+
+    pub fn hero_music_speed(&self) -> f64 {
+        if !self.shared.timeline.lock().unwrap().active
+            || !self.shared.track_axes.lock().unwrap().iter().any(|a| a.source == TrackSource::AiMusic)
+            || self.shared.following.load(Ordering::Relaxed) { return 1.0; }
+        let mut clock = self.shared.clock.lock().unwrap();
+        if !clock.running() { return 1.0; }
+        let time = clock.now();
+        drop(clock);
+        self.shared.hero.lock().unwrap().music_at(time).map_or(1.0, |(_, r)| r.playback_speed)
+    }
 
     pub fn set_hero_colour(&self, axis: Option<Axis>, bucket: usize, rule: ColourRule) {
         if bucket < HERO_BUCKETS {
@@ -1286,6 +1301,11 @@ impl Engine {
 
     pub fn track_stop(&self) {
         self.shared.browser_tracking.store(false, Ordering::Relaxed);
+        {
+            let mut hero = self.shared.hero.lock().unwrap();
+            hero.music = HeroMusicOptions::default();
+            hero.reset_hits();
+        }
         if let Some(t) = self
             .shared
             .track
@@ -2369,6 +2389,7 @@ impl Shared {
             PlayerEvent::Idle(i) => clock.set_idle(i),
             PlayerEvent::Speed(s) => clock.set_speed(s),
             PlayerEvent::Seek | PlayerEvent::FileLoaded => {
+                self.hero.lock().unwrap().reset_hits();
                 clock.snap();
                 self.mixer.lock().unwrap().resync();
             }
@@ -2477,10 +2498,10 @@ impl Shared {
 
     fn hero_frame(&self, rgb: &[u8], w: usize, h: usize, time_ms: f64) {
         let axes = *self.track_axes.lock().unwrap();
-        if !axes.iter().any(|a| a.source == TrackSource::Hero) {
+        let mut hero = self.hero.lock().unwrap();
+        if !axes.iter().any(|a| a.source == TrackSource::Hero || (a.source == TrackSource::AiMusic && hero.music.enabled)) {
             return;
         }
-        let mut hero = self.hero.lock().unwrap();
         if !hero.push(rgb, w, h, time_ms) {
             return;
         }
@@ -2692,6 +2713,30 @@ impl Shared {
                 Some(a.map(motion[c.index()]))
             })
         });
+        let music_axes = *self.track_axes.lock().unwrap();
+        let (offsets, derived) = {
+            let mixer = self.mixer.lock().unwrap();
+            (std::array::from_fn::<_, { Axis::COUNT }, _>(|i| mixer.global_offset_ms + mixer.settings(Axis::ALL[i]).offset_ms),
+             std::array::from_fn::<_, { Axis::COUNT }, _>(|i| mixer.is_derived(Axis::ALL[i])))
+        };
+        let (music_effects, estim_max) = {
+            let hero = self.hero.lock().unwrap();
+            let active = tracking && playing && music_axes.iter().any(|a| a.source == TrackSource::AiMusic);
+            let effects = std::array::from_fn::<_, { Axis::COUNT }, _>(|i| {
+                let inherited = matches!(Axis::ALL[i], Axis::EA | Axis::EB) && derived[i]
+                    && music_axes[Axis::L0.index()].source == TrackSource::AiMusic;
+                if !active || (!inherited && music_axes[i].source != TrackSource::AiMusic) { return None; }
+                hero.music_at(media_ms - offsets[i]).map(|(start_ms, rule)| bp_axes::ScriptEffect {
+                    start_ms, end_ms: start_ms + rule.duration_ms,
+                    tempo: rule.tempo, intensity: rule.intensity,
+                    stroke_speed: if inherited || Axis::ALL[i] == Axis::L0 { rule.stroke_speed } else { None },
+                    min: if inherited { 0.0 } else { music_axes[i].min },
+                    max: if inherited { 1.0 } else { music_axes[i].max },
+                })
+            });
+            let max = active.then(|| hero.music_at(media_ms)).flatten().and_then(|(_, r)| r.estim_max);
+            (effects, max)
+        };
         let live_params = if self.live_params.load(Ordering::Relaxed) {
             self.live_param_values(media_ms)
         } else {
@@ -2699,6 +2744,9 @@ impl Shared {
         };
         let (frame, driven, flags) = {
             let mut mixer = self.mixer.lock().unwrap();
+            for axis in Axis::ALL {
+                mixer.set_script_effect(axis, music_effects[axis.index()]);
+            }
             for (axis, value) in live_params {
                 mixer.set_fallback(axis, value.map_or(Fallback::None, Fallback::Value));
             }
@@ -2765,6 +2813,12 @@ impl Shared {
                 p.version += 1;
             }
         }
+        let mut estim_volume = *self.estim_volume.lock().unwrap();
+        if let Some(max) = estim_max {
+            estim_volume.max = max;
+            estim_volume.boost.enabled = false;
+            estim_volume.min = estim_volume.min.min(max);
+        }
         let ctx = TickContext {
             manual_axes: std::array::from_fn(|i| flags[i] & (FLAG_LIVE | FLAG_TRACKED) != 0),
             media_ms,
@@ -2772,7 +2826,7 @@ impl Shared {
             estim_manual: [Axis::EA, Axis::EB, Axis::EV, Axis::E1, Axis::E2, Axis::E3, Axis::E4]
                 .into_iter().any(|a| flags[a.index()] & FLAG_LIVE != 0 && driven[a.index()]),
             stop_on_pause: self.stop_on_pause.load(Ordering::Relaxed),
-            estim_volume: *self.estim_volume.lock().unwrap(),
+            estim_volume,
             rate,
             interval_ms: ((t.dt_ms + 0.75).floor() as u32).clamp(1, 100),
         };

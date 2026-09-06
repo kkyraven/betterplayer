@@ -28,8 +28,8 @@ buttplug_server = { version = "11", default-features = false, features = ["tokio
 buttplug_server_hwmgr_btleplug = "11"
 buttplug_server_device_config = "11"
 
-# macOS: the mach thread policy for the tick thread (realtime.rs).
-[target.'cfg(target_os = "macos")'.dependencies]
+# Unix thread scheduling and Linux timer slack (realtime.rs).
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 # Windows: timer resolution and thread priority for the tick thread (realtime.rs).

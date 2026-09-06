@@ -13,7 +13,10 @@ libc = "0.2"
 pkg-config = "0.3"
 cc = "1"
 
-# Windows: DXGI for the GPU probe and the addon path, libloading for ANGLE and NvOFFRUC.
+# Dynamic EGL/GL on Linux, ANGLE and NvOFFRUC on Windows.
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+libloading = "0.9"
+
+# Windows: DXGI for the GPU probe and the addon path.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_LibraryLoader"] }
-libloading = "0.9"

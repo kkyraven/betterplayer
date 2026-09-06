@@ -60,7 +60,23 @@ pub fn promote(_period: Duration) -> Result<(), String> {
 }
 
 
-#[cfg(not(any(target_os = "macos", windows)))]
+
+#[cfg(target_os = "linux")]
+pub fn promote(_period: Duration) -> Result<(), String> {
+    unsafe {
+        libc::prctl(libc::PR_SET_TIMERSLACK, 1 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong);
+        let priority = libc::sched_get_priority_min(libc::SCHED_FIFO);
+        if priority < 0 { return Err(std::io::Error::last_os_error().to_string()); }
+        let param = libc::sched_param { sched_priority: priority };
+        let error = libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param);
+        if error != 0 {
+            return Err(format!("SCHED_FIFO: {}", std::io::Error::from_raw_os_error(error)));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub fn promote(_period: Duration) -> Result<(), String> {
     Err("no realtime policy on this platform yet".into())
 }

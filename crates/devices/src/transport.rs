@@ -186,6 +186,7 @@ pub trait Conn: Send {
 
 
 pub fn open_serial(path: &str, baud: u32, timeout: Duration) -> serialport::Result<Box<dyn serialport::SerialPort>> {
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut port = serialport::new(path, baud).timeout(timeout).flow_control(serialport::FlowControl::None).open()?;
     #[cfg(windows)]
     {

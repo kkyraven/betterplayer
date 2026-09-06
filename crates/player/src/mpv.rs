@@ -32,6 +32,8 @@ pub const MPV_RENDER_PARAM_ADVANCED_CONTROL: c_int = 10;
 pub const MPV_RENDER_PARAM_NEXT_FRAME_INFO: c_int = 11;
 pub const MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME: c_int = 12;
 pub const MPV_RENDER_PARAM_SKIP_RENDERING: c_int = 13;
+#[cfg(target_os = "linux")]
+pub const MPV_RENDER_PARAM_DRM_DISPLAY_V2: c_int = 16;
 pub const MPV_RENDER_UPDATE_FRAME: u64 = 1;
 pub const MPV_RENDER_FRAME_INFO_PRESENT: u64 = 1;
 pub const MPV_RENDER_FRAME_INFO_REDRAW: u64 = 2;
@@ -90,6 +92,16 @@ pub struct mpv_opengl_init_params {
     pub get_proc_address_ctx: *mut c_void,
 }
 
+#[cfg(target_os = "linux")]
+#[repr(C)]
+pub struct mpv_opengl_drm_params_v2 {
+    pub fd: c_int,
+    pub crtc_id: c_int,
+    pub connector_id: c_int,
+    pub atomic_request_ptr: *mut *mut c_void,
+    pub render_fd: c_int,
+}
+
 #[repr(C)]
 pub struct mpv_opengl_fbo {
     pub fbo: c_int,
@@ -99,6 +111,7 @@ pub struct mpv_opengl_fbo {
 }
 
 unsafe extern "C" {
+    pub fn mpv_client_api_version() -> std::ffi::c_ulong;
     pub fn mpv_create() -> *mut mpv_handle;
     pub fn mpv_initialize(h: *mut mpv_handle) -> c_int;
     pub fn mpv_terminate_destroy(h: *mut mpv_handle);

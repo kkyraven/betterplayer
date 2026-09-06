@@ -16,6 +16,10 @@ impl GlContext {
         self.ctx.get_proc_address(name)
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn render_fd(&self) -> i32 {
+        self.ctx.render_fd()
+    }
 
 
     pub fn describe(&self) -> String {
@@ -122,7 +126,11 @@ mod platform {
     pub use crate::windows::egl::Context;
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(target_os = "linux")]
+#[path = "linux/egl.rs"]
+mod platform;
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod platform {
     use std::ffi::{CStr, c_void};
 
@@ -130,7 +138,7 @@ mod platform {
 
     impl Context {
         pub fn new() -> Result<Context, String> {
-            Err("offscreen GL context is only implemented on macOS and Windows so far".into())
+            Err("offscreen GL context is supported on macOS, Windows and Linux".into())
         }
 
         pub fn get_proc_address(&self, _name: &CStr) -> *mut c_void {

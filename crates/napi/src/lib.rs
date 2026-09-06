@@ -1723,6 +1723,30 @@ impl Engine {
         Ok(())
     }
 
+    #[napi]
+    pub fn set_hero_music(&self, enabled: bool, rules: Vec<HeroMusicRule>) -> Result<()> {
+        let mut options = bp_core::HeroMusicOptions { enabled, ..Default::default() };
+        for r in rules {
+            let valid = |v: f64, lo: f64, hi: f64| v.is_finite() && v >= lo && v <= hi;
+            if r.bucket as usize >= bp_core::HERO_BUCKETS
+                || !valid(r.duration_ms, 100.0, 30000.0) || !valid(r.tempo, 0.25, 4.0)
+                || !valid(r.intensity, 0.0, 2.0) || !valid(r.playback_speed, 0.25, 2.0)
+                || r.estim_max.is_some_and(|v| !valid(v, 0.0, 1.0))
+                || r.stroke_speed.is_some_and(|v| !valid(v, 0.1, 20.0)) {
+                return Err(err("invalid Hero music rule".to_string()));
+            }
+            options.rules[r.bucket as usize] = Some(bp_core::HeroMusicRule {
+                duration_ms: r.duration_ms, tempo: r.tempo, intensity: r.intensity,
+                playback_speed: r.playback_speed, estim_max: r.estim_max, stroke_speed: r.stroke_speed,
+            });
+        }
+        self.inner.set_hero_music(options);
+        Ok(())
+    }
+
+    #[napi]
+    pub fn hero_music_speed(&self) -> f64 { self.inner.hero_music_speed() }
+
 
     #[napi]
     pub fn clear_hero_axis_colours(&self, axis: String) -> Result<()> {
@@ -2761,6 +2785,17 @@ pub struct BeatState {
 }
 
 
+
+#[napi(object)]
+pub struct HeroMusicRule {
+    pub bucket: u32,
+    pub duration_ms: f64,
+    pub tempo: f64,
+    pub intensity: f64,
+    pub playback_speed: f64,
+    pub stroke_speed: Option<f64>,
+    pub estim_max: Option<f64>,
+}
 
 #[napi(object)]
 pub struct HeroColourRule {

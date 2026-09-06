@@ -336,7 +336,11 @@ pub struct EnhanceState {
 const VSR_MAX_SOURCE_ROWS: u32 = 1440;
 const VSR_MAX_OUTPUT_ROWS: u32 = 2160;
 
-const DEFAULT_SCALE: &str = "lanczos";
+
+#[cfg(target_os = "linux")]
+pub(crate) const DEFAULT_SCALE: &str = "spline64";
+#[cfg(not(target_os = "linux"))]
+pub(crate) const DEFAULT_SCALE: &str = "lanczos";
 const SHARP_SCALE: &str = "ewa_lanczossharp";
 
 
@@ -436,6 +440,11 @@ impl Enhance {
     #[cfg(windows)]
     pub(crate) fn dlss(&self) -> Arc<Mutex<DlssShared>> {
         self.dlss.clone()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn set_gpu(&mut self, gpu: String) {
+        self.caps.gpu = Some(gpu);
     }
 
     pub fn capabilities(&self) -> EnhanceCapabilities {

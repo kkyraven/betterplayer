@@ -87,6 +87,23 @@ impl ColourRule {
 }
 
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MusicRule {
+    pub duration_ms: f64,
+    pub tempo: f64,
+    pub intensity: f64,
+    pub playback_speed: f64,
+    pub stroke_speed: Option<f64>,
+    pub estim_max: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MusicOptions {
+    pub enabled: bool,
+    pub rules: [Option<MusicRule>; BUCKETS],
+}
+
+
 fn ease(u: f64, s: f64) -> f64 {
     u + s * (u * u * (3.0 - 2.0 * u) - u)
 }
@@ -123,6 +140,7 @@ struct Pending {
 const KEEP_MS: f64 = 60_000.0;
 
 pub struct HeroState {
+    pub music: MusicOptions,
     pub zone: Option<Rect>,
     pub direction: Direction,
 
@@ -141,6 +159,7 @@ pub struct HeroState {
 impl HeroState {
     pub fn new() -> HeroState {
         HeroState {
+            music: MusicOptions::default(),
             zone: None,
             direction: Direction::Auto,
             colours: std::array::from_fn(ColourRule::default_for),
@@ -158,6 +177,7 @@ impl HeroState {
 
     pub fn fresh(&self) -> HeroState {
         HeroState {
+            music: self.music.clone(),
             zone: self.zone,
             direction: self.direction,
             colours: self.colours,
@@ -188,7 +208,25 @@ impl HeroState {
     }
 
 
+    pub fn music_at(&self, time_ms: f64) -> Option<(f64, MusicRule)> {
+        if !self.music.enabled || self.zone.is_none() { return None; }
+        let (hit, rule) = self.pending.iter().rev().find_map(|p| {
+            (time_ms >= p.at_ms).then(|| self.music.rules[p.bucket].map(|r| (p, r))).flatten()
+        })?;
+        (time_ms < hit.at_ms + rule.duration_ms).then_some((hit.at_ms, rule))
+    }
+
+    pub fn reset_hits(&mut self) {
+        self.pending.clear();
+        self.seen = [0; BUCKETS];
+        self.hits = 0;
+        self.last_ms = 0.0;
+        self.watcher = self.zone.map(|zone| Hero::new(Options { zone, direction: self.direction }));
+    }
+
+
     pub fn push(&mut self, rgb: &[u8], width: usize, height: usize, time_ms: f64) -> bool {
+        if time_ms < self.last_ms || time_ms - self.last_ms > 2000.0 { self.reset_hits(); }
         let Some(w) = self.watcher.as_mut() else {
             return false;
         };
@@ -224,7 +262,7 @@ impl HeroState {
                 }
             }
         }
-        self.pending.retain(|p| p.at_ms > time_ms - self.keep_ms);
+        self.pending.retain(|p| p.at_ms > time_ms - self.keep_ms.max(30000.0));
         self.pending.sort_by(|a, b| a.at_ms.total_cmp(&b.at_ms));
         true
     }
@@ -425,6 +463,43 @@ mod tests {
             smooth: 0.0,
             ignore: false,
         }
+    }
+
+    fn music_rule(duration_ms: f64, tempo: f64) -> MusicRule {
+        MusicRule { duration_ms, tempo, intensity: 1.2, playback_speed: 1.5, stroke_speed: None, estim_max: Some(0.9) }
+    }
+
+    #[test]
+    fn music_matches_colour_and_expires_without_stacking() {
+        let mut h = hero_with(&[(1000.0, 0), (1500.0, 1), (1800.0, 2)], rule(Flourish::None));
+        h.zone = Some(Rect { x: 0.1, y: 0.4, w: 0.1, h: 0.2 });
+        h.music.enabled = true;
+        h.music.rules[0] = Some(music_rule(2000.0, 2.0));
+        h.music.rules[1] = Some(music_rule(2000.0, 0.5));
+        assert!(h.music_at(999.0).is_none());
+        assert_eq!(h.music_at(1000.0).unwrap().1.tempo, 2.0);
+        assert_eq!(h.music_at(1500.0).unwrap().1.tempo, 0.5);
+        assert_eq!(h.music_at(2000.0).unwrap().1.tempo, 0.5);
+        assert!(h.music_at(3500.0).is_none());
+
+        h.music.rules[1] = Some(music_rule(100.0, 0.5));
+        assert!(h.music_at(1600.0).is_none());
+        assert!(h.music_at(2000.0).is_none());
+        h.music.enabled = false;
+        assert!(h.music_at(2000.0).is_none());
+    }
+
+    #[test]
+    fn music_clears_on_seek_and_retains_configuration() {
+        let mut h = hero_with(&[(1000.0, 0)], rule(Flourish::None));
+        h.zone = Some(Rect { x: 0.1, y: 0.4, w: 0.1, h: 0.2 });
+        h.music.enabled = true;
+        h.music.rules[0] = Some(music_rule(30000.0, 2.0));
+        assert!(h.music_at(20000.0).is_some());
+        h.reset_hits();
+        assert!(h.music_at(20000.0).is_none());
+        assert!(h.music.rules[0].is_some());
+        assert_eq!(h.snapshot().hits, 0);
     }
 
     #[test]

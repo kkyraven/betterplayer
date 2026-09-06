@@ -48,6 +48,7 @@ struct AxisState {
 
 
     ramp_onset: bool,
+    colour_speed_limited: bool,
 }
 
 
@@ -92,7 +93,20 @@ impl ScriptTable {
     }
 }
 
+
+#[derive(Clone, Copy, Debug)]
+pub struct ScriptEffect {
+    pub stroke_speed: Option<f64>,
+    pub start_ms: f64,
+    pub end_ms: f64,
+    pub tempo: f64,
+    pub intensity: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
 pub struct Mixer {
+    effects: [Option<ScriptEffect>; Axis::COUNT],
     scripts: [Option<Arc<Script>>; Axis::COUNT],
 
     extents: [Option<(f64, f64)>; Axis::COUNT],
@@ -133,6 +147,7 @@ impl Default for Mixer {
 impl Mixer {
     pub fn new() -> Mixer {
         let mut m = Mixer {
+            effects: [None; Axis::COUNT],
             scripts: std::array::from_fn(|_| None),
             extents: [None; Axis::COUNT],
             loaded: Vec::new(),
@@ -159,6 +174,10 @@ impl Mixer {
         }
         m.last_values = std::array::from_fn(|i| m.state[i].last);
         m
+    }
+
+    pub fn set_script_effect(&mut self, axis: Axis, effect: Option<ScriptEffect>) {
+        self.effects[axis.index()] = effect;
     }
 
 
@@ -390,6 +409,8 @@ impl Mixer {
             return default;
         }
         let t = media_ms - self.global_offset_ms - cfg.offset_ms;
+        let effect = self.effects[i].filter(|e| t >= e.start_ms && t < e.end_ms);
+
 
 
 
@@ -398,8 +419,21 @@ impl Mixer {
         let external = self.external[i];
 
         let extent = self.extents[source.index()].filter(|(lo, hi)| cfg.extend_range && hi - lo > 1e-6);
-        let sampled = external.or_else(|| script.and_then(|s| interp::sample(s, t, cfg.interpolation)).map(|v| extent.map_or(v, |(lo, hi)| ((v - lo) / (hi - lo)).clamp(0.0, 1.0))));
+        let sampled = external.or_else(|| {
+            let script = script?;
+            let base = interp::sample(script, t, cfg.interpolation)?;
+            let value = effect.map_or(base, |e| {
+                let shifted = e.start_ms + (t - e.start_ms) * e.tempo;
+                let target = interp::sample(script, shifted, cfg.interpolation).unwrap_or(base);
+                let centre = (e.min + e.max) / 2.0;
+                let target = (centre + (target - centre) * e.intensity).clamp(e.min, e.max);
 
+                let fade = 150.0_f64.min((e.end_ms - e.start_ms) / 2.0);
+                let weight = smoothstep(((t - e.start_ms).min(e.end_ms - t) / fade).clamp(0.0, 1.0));
+                base + (target - base) * weight
+            });
+            Some(extent.map_or(value, |(lo, hi)| ((value - lo) / (hi - lo)).clamp(0.0, 1.0)))
+        });
 
         let in_gap = external.is_none() && cfg.provider != Provider::None && script.is_some_and(|s| gap_at(s, t) > cfg.fill_gaps_over_ms);
         let sampled = sampled.filter(|_| !in_gap).or_else(|| self.fallback[i].value(&mut self.state[i].fallback, dt_ms));
@@ -445,6 +479,16 @@ impl Mixer {
         let _ = value;
         let mut out = in_range.unwrap_or(st.last);
 
+        let colour_speed = effect.and_then(|e| e.stroke_speed);
+        if st.colour_speed_limited && colour_speed.is_none() && st.ramp_len_ms - st.ramp_ms <= 150.0 {
+
+            st.ramp_from = st.last;
+            st.ramp_ms = 0.0;
+            st.ramp_len_ms = 150.0;
+            st.ramp_onset = true;
+        }
+        st.colour_speed_limited = colour_speed.is_some();
+
 
 
 
@@ -462,8 +506,13 @@ impl Mixer {
         }
 
 
-        if cfg.speed_limit > 0.0 {
-            let max_step = cfg.speed_limit * dt_ms / 1000.0;
+        let speed_limit = match colour_speed {
+            Some(speed) if cfg.speed_limit > 0.0 => speed.min(cfg.speed_limit),
+            Some(speed) => speed,
+            None => cfg.speed_limit,
+        };
+        if speed_limit > 0.0 {
+            let max_step = speed_limit * dt_ms / 1000.0;
             out = st.last + (out - st.last).clamp(-max_step, max_step);
         }
 
@@ -519,6 +568,66 @@ mod tests {
     fn settled(m: &mut Mixer) {
         m.sync_ms = 0.0;
         m.resync();
+    }
+
+    #[test]
+    fn colour_stroke_speed_caps_travel_and_releases_at_expiry() {
+        let mut m = Mixer::new();
+        m.sync_ms = 0.0;
+        m.set_scripts([(Axis::L0, script(&[(0.0, 1.0), (3000.0, 1.0)]))]);
+        m.set_script_effect(Axis::L0, Some(ScriptEffect {
+            start_ms: 0.0, end_ms: 1000.0, tempo: 1.0, intensity: 1.0,
+            min: 0.0, max: 1.0, stroke_speed: Some(0.5),
+        }));
+        let before = Axis::L0.default_value();
+        let limited = m.tick(500.0, 100.0)[Axis::L0.index()];
+        assert!((limited - before).abs() <= 0.050001);
+        let release = m.tick(1000.0, 1.0)[Axis::L0.index()];
+        assert!((release - limited).abs() < 0.001);
+        let restored = m.tick(1150.0, 150.0)[Axis::L0.index()];
+        assert!((restored - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn colour_speed_release_preserves_seek_and_pause_resync() {
+        let mut m = Mixer::new();
+        m.sync_ms = 0.0;
+        m.set_scripts([(Axis::L0, script(&[(0.0, 1.0), (3000.0, 1.0)]))]);
+        m.set_script_effect(Axis::L0, Some(ScriptEffect {
+            start_ms: 0.0, end_ms: 1000.0, tempo: 1.0, intensity: 1.0,
+            min: 0.0, max: 1.0, stroke_speed: Some(0.5),
+        }));
+        m.tick(500.0, 100.0);
+        m.sync_ms = 4000.0;
+        m.resync();
+        m.set_script_effect(Axis::L0, None);
+        let value = m.tick(500.0, 200.0)[Axis::L0.index()];
+        assert!(value < 0.75, "the pause ramp was replaced by the shorter colour release");
+        assert_eq!(m.state[Axis::L0.index()].ramp_len_ms, 4000.0);
+    }
+
+    #[test]
+    fn timed_script_effect_respects_offsets_limits_and_expiry() {
+        let mut m = Mixer::new();
+        m.sync_ms = 0.0;
+        m.set_scripts([(Axis::L0, script(&[(0.0, 0.2), (1000.0, 0.8), (2000.0, 0.2), (3000.0, 0.8)]))]);
+        m.global_offset_ms = 100.0;
+        m.set_script_effect(Axis::L0, Some(ScriptEffect {
+            start_ms: 1000.0, end_ms: 2000.0, tempo: 2.0, intensity: 2.0, min: 0.2, max: 0.8, stroke_speed: None,
+        }));
+        let unaffected = m.tick(600.0, 10.0)[Axis::L0.index()];
+        assert!((unaffected - 0.5).abs() < 1e-6);
+        let boosted = m.tick(1100.0, 10.0)[Axis::L0.index()];
+        assert!((boosted - 0.8).abs() < 1e-6);
+        let accelerated = m.tick(1350.0, 10.0)[Axis::L0.index()];
+        assert!((accelerated - 0.5).abs() < 1e-6);
+        let before_expiry = m.tick(2099.9, 10.0)[Axis::L0.index()];
+        let expired = m.tick(2100.0, 10.0)[Axis::L0.index()];
+        assert!((expired - 0.2).abs() < 1e-6);
+        assert!((before_expiry - expired).abs() < 0.001);
+        m.set_script_effect(Axis::L0, None);
+        let restored = m.tick(1350.0, 10.0)[Axis::L0.index()];
+        assert!((restored - 0.65).abs() < 1e-6);
     }
 
     #[test]

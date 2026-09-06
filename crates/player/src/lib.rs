@@ -151,7 +151,16 @@ impl MediaLoader {
 
 fn load_file(mpv: &Mpv, path: &str, start_seconds: Option<f64>) -> Result<(), String> {
     match start_seconds {
-        Some(s) if s > 0.0 => mpv.command(&["loadfile", path, "replace", "-1", &format!("start={s}")]),
+        Some(s) if s > 0.0 => {
+            let start = format!("start={s}");
+
+
+            if unsafe { mpv::mpv_client_api_version() } < (2 << 16 | 3) {
+                mpv.command(&["loadfile", path, "replace", &start])
+            } else {
+                mpv.command(&["loadfile", path, "replace", "-1", &start])
+            }
+        },
         _ => mpv.command(&["loadfile", path]),
     }
 }
@@ -175,6 +184,10 @@ impl Player {
         mpv.set_option("idle", "yes")?;
         mpv.set_option("keep-open", "yes")?;
         mpv.set_option("pause", "yes")?;
+        #[cfg(target_os = "linux")]
+        for scaler in ["scale", "cscale", "dscale"] {
+            mpv.set_option(scaler, enhance::DEFAULT_SCALE)?;
+        }
         for (k, v) in &opts.mpv_options {
             mpv.set_option(k, v)?;
         }
@@ -294,6 +307,8 @@ impl Player {
                 return Err(e);
             }
         };
+        #[cfg(target_os = "linux")]
+        enhance.lock().unwrap().set_gpu(context.clone());
         push_log(&log, format!("render context: {context}"));
         *picture_back.lock().unwrap() = Some(tx.clone());
 

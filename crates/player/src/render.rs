@@ -368,10 +368,16 @@ fn run(
     LOAD_GL.call_once(load_gl);
 
     let mut init = mpv_opengl_init_params { get_proc_address: Some(get_proc), get_proc_address_ctx: &*gl as *const GlContext as *mut c_void };
+    #[cfg(target_os = "linux")]
+    let mut drm = mpv_opengl_drm_params_v2 {
+        fd: -1, crtc_id: 0, connector_id: 0, atomic_request_ptr: ptr::null_mut(), render_fd: gl.render_fd(),
+    };
     let mut advanced: c_int = 1;
     let mut params = [
         mpv_render_param { type_: MPV_RENDER_PARAM_API_TYPE, data: c"opengl".as_ptr() as *mut c_void },
         mpv_render_param { type_: MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, data: &mut init as *mut _ as *mut c_void },
+        #[cfg(target_os = "linux")]
+        mpv_render_param { type_: MPV_RENDER_PARAM_DRM_DISPLAY_V2, data: &mut drm as *mut _ as *mut c_void },
         mpv_render_param { type_: MPV_RENDER_PARAM_ADVANCED_CONTROL, data: &mut advanced as *mut _ as *mut c_void },
         mpv_render_param { type_: MPV_RENDER_PARAM_INVALID, data: ptr::null_mut() },
     ];
