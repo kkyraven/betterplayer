@@ -1762,6 +1762,16 @@ impl Engine {
             .find_map(|o| o.slider())
     }
 
+
+    pub fn set_output_session_scale(&self, id: u32, scale: f64) -> bool {
+        if !scale.is_finite() || !(0.0..=1.0).contains(&scale) { return false; }
+        let mut outputs = self.shared.outputs.lock().unwrap();
+        let Some(output) = outputs.iter_mut().find(|o| o.id == id) else { return false; };
+        if matches!(output.transport, bp_devices::Transport::Howl { .. }) && scale != 0.0 && scale != 1.0 { return false; }
+        output.session_scale = scale;
+        true
+    }
+
     pub fn set_output_clamp(&self, id: u32, axis: Axis, clamp: AxisClamp) -> bool {
         let mut outputs = self.shared.outputs.lock().unwrap();
         match outputs.iter_mut().find(|o| o.id == id) {

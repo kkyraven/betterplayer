@@ -776,6 +776,17 @@ impl ToyLink {
         interval_ms: u32,
         active: &[bool; Axis::COUNT],
     ) -> io::Result<bool> {
+        self.send_scaled(values, clamps, interval_ms, active, 1.0)
+    }
+
+    pub fn send_scaled(
+        &mut self,
+        values: &[f64; Axis::COUNT],
+        clamps: &[AxisClamp; Axis::COUNT],
+        interval_ms: u32,
+        active: &[bool; Axis::COUNT],
+        scale: f64,
+    ) -> io::Result<bool> {
         self.track_speed(values, interval_ms);
         for i in 0..Axis::COUNT {
             if !active[i] {
@@ -816,6 +827,7 @@ impl ToyLink {
                 .filter(|a| clamps[a.index()].enabled)
                 .and_then(|a| {
                     let c = clamps[a.index()];
+                    if scale == 0.0 { return None; }
                     if let Some(ms) = testing.filter(|_| testable) {
                         let phase = ms as f64 / TEST_MS as f64 * std::f64::consts::TAU;
                         return Some(if f.is_level() {
@@ -831,7 +843,7 @@ impl ToyLink {
                     }
                     let raw = self.raw(f, a, values);
                     Some(if f.is_level() {
-                        level.apply(raw)
+                        level.apply(raw) * scale
                     } else {
                         (c.min + raw * (c.max - c.min)).clamp(0.0, 1.0)
                     })

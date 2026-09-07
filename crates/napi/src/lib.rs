@@ -2147,6 +2147,12 @@ impl Engine {
         Ok(self.inner.set_openshock_trigger(id, trigger.to_core()?))
     }
 
+
+    #[napi]
+    pub fn set_output_session_scale(&self, id: u32, scale: f64) -> bool {
+        self.inner.set_output_session_scale(id, scale)
+    }
+
     #[napi]
     pub fn set_output_clamp(&self, id: u32, axis_id: String, clamp: AxisClamp) -> Result<bool> {
         Ok(self.inner.set_output_clamp(

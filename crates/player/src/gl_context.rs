@@ -5,10 +5,48 @@ pub struct GlContext {
     ctx: platform::Context,
 }
 
+
+
+
+#[cfg(windows)]
+pub use crate::windows::egl::Gpu;
+
+#[cfg(not(windows))]
+mod gpu {
+    #[derive(Clone, Copy)]
+    pub struct Gpu;
+    pub struct Section;
+
+    impl Gpu {
+        pub fn none() -> Gpu {
+            Gpu
+        }
+        pub fn section(&self) -> Section {
+            Section
+        }
+    }
+}
+#[cfg(not(windows))]
+pub use gpu::Gpu;
+
 impl GlContext {
 
+
     pub fn new() -> Result<GlContext, String> {
+        let _gpu = Gpu::none().section();
         Ok(GlContext { ctx: platform::Context::new()? })
+    }
+
+
+    pub fn gpu(&self) -> Gpu {
+        #[cfg(windows)]
+        {
+            self.ctx.gpu()
+        }
+        #[cfg(not(windows))]
+        {
+            Gpu
+        }
     }
 
 

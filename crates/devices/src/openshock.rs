@@ -210,6 +210,14 @@ impl OpenShockLink {
         self.tick_at(Instant::now(), values, driven, playing)
     }
 
+    pub fn tick_scaled(&mut self, values: &[f64; Axis::COUNT], driven: &[bool; Axis::COUNT], playing: bool, scale: f64) -> bool {
+        let original = self.trigger;
+        self.trigger.intensity = (f64::from(original.intensity) * scale).floor() as u8;
+        let sent = self.tick(values, driven, playing && scale > 0.0);
+        self.trigger = original;
+        sent
+    }
+
     fn tick_at(&mut self, now: Instant, values: &[f64; Axis::COUNT], driven: &[bool; Axis::COUNT], playing: bool) -> bool {
         let i = self.trigger.axis.index();
         let past = playing && driven[i] && self.trigger.past(values[i]);

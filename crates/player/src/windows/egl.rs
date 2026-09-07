@@ -1,6 +1,7 @@
+use std::cell::Cell;
 use std::ffi::{CStr, c_char, c_void};
 use std::ptr;
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use libloading::{Library, Symbol};
 
@@ -105,6 +106,78 @@ pub struct Context {
     context: EGLContext,
 }
 
+
+
+
+
+static GPU: Mutex<()> = Mutex::new(());
+
+thread_local! {
+
+    static DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+
+#[derive(Clone, Copy)]
+pub struct Gpu(Option<Handles>);
+
+#[derive(Clone, Copy)]
+struct Handles {
+    egl: &'static Egl,
+    display: EGLDisplay,
+    surface: EGLSurface,
+    context: EGLContext,
+}
+
+
+pub struct Section {
+
+    _guard: Option<MutexGuard<'static, ()>>,
+}
+
+impl Gpu {
+
+    pub fn none() -> Gpu {
+        Gpu(None)
+    }
+
+
+
+
+
+
+    pub fn section(&self) -> Section {
+        let nested = DEPTH.with(|d| {
+            let n = d.get();
+            d.set(n + 1);
+            n > 0
+        });
+        if nested {
+            return Section { _guard: None };
+        }
+        let guard = GPU.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(h) = self.0 {
+            let ok = unsafe {
+                (h.egl.make_current)(h.display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
+                (h.egl.make_current)(h.display, h.surface, h.surface, h.context)
+            };
+
+            static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if ok != EGL_TRUE && !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("bp-player: {}", h.egl.err("eglMakeCurrent on section entry"));
+            }
+        }
+        Section { _guard: Some(guard) }
+    }
+}
+
+impl Drop for Section {
+    fn drop(&mut self) {
+        DEPTH.with(|d| d.set(d.get() - 1));
+
+    }
+}
+
 impl Context {
 
     pub fn new() -> Result<Context, String> {
@@ -173,6 +246,10 @@ impl Context {
 
     pub fn describe(&self) -> String {
         format!("{} {}", self.egl.query(self.display, EGL_VENDOR), self.egl.query(self.display, EGL_VERSION))
+    }
+
+    pub fn gpu(&self) -> Gpu {
+        Gpu(Some(Handles { egl: self.egl, display: self.display, surface: self.surface, context: self.context }))
     }
 
     pub fn make_current(&self) -> Result<(), String> {

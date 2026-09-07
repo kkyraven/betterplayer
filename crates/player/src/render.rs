@@ -8,7 +8,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::frames::{External, Frames, frame_len};
-use crate::gl_context::GlContext;
+use crate::gl_context::{GlContext, Gpu};
 use crate::mpv::*;
 use crate::stats::RenderStats;
 
@@ -107,10 +107,21 @@ struct Target {
     cur: usize,
 
     inflight: VecDeque<Inflight>,
+
+    gpu: Gpu,
+}
+
+
+
+struct Done {
+    t0: Instant,
+    render_ms: f32,
+    pts: Option<f64>,
 }
 
 impl Target {
-    fn new(w: u32, h: u32, cfg: RenderConfig) -> Result<Target, String> {
+    fn new(w: u32, h: u32, cfg: RenderConfig, gpu: Gpu) -> Result<Target, String> {
+        let _gpu = gpu.section();
         let len = frame_len(w, h)?;
         let mut limit = 0;
         unsafe { gl::GetIntegerv(gl::MAX_TEXTURE_SIZE, &mut limit) };
@@ -149,7 +160,7 @@ impl Target {
                 gl::BindBuffer(gl::PIXEL_PACK_BUFFER, 0);
             }
         }
-        let target = Target { fbo, tex, w, h, len, cfg, pbos, cur: 0, inflight: VecDeque::with_capacity(2) };
+        let target = Target { fbo, tex, w, h, len, cfg, pbos, cur: 0, inflight: VecDeque::with_capacity(2), gpu };
         if let Some(e) = take_gl_error() {
             return Err(format!("framebuffer allocation: GL error 0x{e:x}"));
         }
@@ -174,7 +185,8 @@ impl Target {
 
 
 
-    fn readback(&mut self, ctx: *mut mpv_render_context, frames: &Frames, stats: &RenderStats, render_ms: f32, pts: Option<f64>) {
+    fn readback(&mut self, ctx: *mut mpv_render_context, frames: &Frames, stats: &RenderStats, render_ms: f32, pts: Option<f64>) -> Option<Done> {
+        let _gpu = self.gpu.section();
         let (fmt, ty) = self.format();
         unsafe {
             gl::BindFramebuffer(gl::READ_FRAMEBUFFER, self.fbo);
@@ -193,12 +205,9 @@ impl Target {
             }
             if let Some(e) = take_gl_error() {
                 stats.gl_error(e);
-                return;
+                return None;
             }
-            let dropped = frames.publish(pts);
-            unsafe { mpv_render_context_report_swap(ctx) };
-            stats.record(render_ms, ms(t0.elapsed()), dropped);
-            return;
+            return Some(Done { t0, render_ms, pts });
         }
 
         if self.inflight.iter().any(|f| f.pbo == self.cur) {
@@ -211,22 +220,28 @@ impl Target {
             gl::BindBuffer(gl::PIXEL_PACK_BUFFER, 0);
             if let Some(e) = take_gl_error() {
                 stats.gl_error(e);
-                return;
+                return None;
             }
             let fence = gl::FenceSync(gl::SYNC_GPU_COMMANDS_COMPLETE, 0);
             if fence.is_null() {
                 stats.gl_error(take_gl_error().unwrap_or(gl::INVALID_OPERATION));
-                return;
+                return None;
             }
             gl::Flush();
             self.inflight.push_back(Inflight { pbo: self.cur, fence, issued: Instant::now(), render_ms, pts });
         }
         self.cur = 1 - self.cur;
+        None
     }
 
 
 
+
     fn poll(&mut self, ctx: *mut mpv_render_context, frames: &Frames, stats: &RenderStats, wait: bool) {
+        if self.inflight.is_empty() {
+            return;
+        }
+        let _gpu = self.gpu.section();
         let mut waited = false;
         while let Some(&f) = self.inflight.front() {
             let block = wait && !waited;
@@ -271,6 +286,7 @@ impl Target {
 
 impl Drop for Target {
     fn drop(&mut self) {
+        let _gpu = self.gpu.section();
         unsafe {
             for f in &self.inflight {
                 gl::DeleteSync(f.fence);
@@ -381,18 +397,27 @@ fn run(
         mpv_render_param { type_: MPV_RENDER_PARAM_ADVANCED_CONTROL, data: &mut advanced as *mut _ as *mut c_void },
         mpv_render_param { type_: MPV_RENDER_PARAM_INVALID, data: ptr::null_mut() },
     ];
+    let gpu = gl.gpu();
     let mut ctx: *mut mpv_render_context = ptr::null_mut();
-    let r = unsafe { mpv_render_context_create(&mut ctx, mpv.handle, params.as_mut_ptr()) };
+    let r = {
+        let _gpu = gpu.section();
+        unsafe { mpv_render_context_create(&mut ctx, mpv.handle, params.as_mut_ptr()) }
+    };
     if r < 0 {
         let _ = ready.send(Err(format!("mpv_render_context_create: {}", error_string(r))));
+
+        let _gpu = gpu.section();
+        drop(gl);
         return;
     }
 
     let (w, h) = frames.size();
-    let mut target = match Target::new(w, h, cfg) {
+    let mut target = match Target::new(w, h, cfg, gpu) {
         Ok(t) => t,
         Err(e) => {
+            let _gpu = gpu.section();
             unsafe { mpv_render_context_free(ctx) };
+            drop(gl);
             let _ = ready.send(Err(e));
             return;
         }
@@ -408,8 +433,13 @@ fn run(
 
     let wanted = |presenting: bool| presenting && has_video.load(Ordering::Relaxed) && mpv.picture_ready.load(Ordering::Relaxed);
     loop {
+
+
         #[cfg(windows)]
-        dlss.poll();
+        if dlss.has_worker() {
+            let _gpu = gpu.section();
+            dlss.poll();
+        }
 
         #[cfg(windows)]
         let enhancement_wake = if wanted(presenting) && !cfg.stamp { dlss.next_wake() } else { None };
@@ -441,7 +471,10 @@ fn run(
         };
         match msg {
             Some(Msg::Update) => {
-                let flags = unsafe { mpv_render_context_update(ctx) };
+                let flags = {
+                    let _gpu = gpu.section();
+                    unsafe { mpv_render_context_update(ctx) }
+                };
                 if flags & MPV_RENDER_UPDATE_FRAME != 0 {
                     let mut info = mpv_render_frame_info::default();
                     unsafe {
@@ -455,7 +488,11 @@ fn run(
                     if decoded {
                         mpv.picture_ready.store(true, Ordering::Relaxed);
                         #[cfg(windows)]
-                        dlss.new_frame();
+                        {
+
+                            let _gpu = gpu.section();
+                            dlss.new_frame();
+                        }
                     }
                     if wanted(presenting) {
 
@@ -468,7 +505,7 @@ fn run(
                         if cfg.stamp && pts.is_none() {
 
 
-                            skip_one(ctx);
+                            skip_one(gpu, ctx);
                         } else {
                             skipped_frame = false;
                             render_one(
@@ -490,7 +527,7 @@ fn run(
                             skipped_frame = true;
                             stats.skipped();
                         }
-                        skip_one(ctx);
+                        skip_one(gpu, ctx);
                     }
                 }
             }
@@ -515,7 +552,10 @@ fn run(
             }
             Some(Msg::Presenting(on)) => {
                 #[cfg(windows)]
-                if !on { dlss.suspend(); }
+                if !on {
+                    let _gpu = gpu.section();
+                    dlss.suspend();
+                }
                 let resumed = on && !presenting;
                 presenting = on;
 
@@ -536,7 +576,7 @@ fn run(
             Some(Msg::Resize(w, h, external, done)) => {
 
 
-                let next = Target::new(w, h, cfg);
+                let next = Target::new(w, h, cfg, gpu);
                 let mut old = None;
                 let applied = done.finish(|| {
                     let next = next?;
@@ -588,6 +628,7 @@ fn run(
         target.poll(ctx, &frames, &stats, false);
     }
 
+    let _gpu = gpu.section();
     unsafe {
         mpv_render_context_set_update_callback(ctx, None, ptr::null_mut());
         mpv_render_context_free(ctx);
@@ -610,6 +651,9 @@ fn render_one(
     #[cfg(windows)] dlss: &mut crate::windows::dlss::DlssRender,
 ) {
     let t0 = Instant::now();
+
+
+    let gpu = target.gpu.section();
 
 
     #[cfg(target_os = "macos")]
@@ -651,7 +695,13 @@ fn render_one(
         stats.gl_error(e);
         return;
     }
-    target.readback(ctx, frames, stats, ms(t0.elapsed()), pts);
+    let done = target.readback(ctx, frames, stats, ms(t0.elapsed()), pts);
+    drop(gpu);
+    if let Some(d) = done {
+        let dropped = frames.publish(d.pts);
+        unsafe { mpv_render_context_report_swap(ctx) };
+        stats.record(d.render_ms, ms(d.t0.elapsed()), dropped);
+    }
 }
 
 
@@ -667,7 +717,8 @@ fn take_gl_error() -> Option<u32> {
 
 
 
-fn skip_one(ctx: *mut mpv_render_context) {
+fn skip_one(gpu: Gpu, ctx: *mut mpv_render_context) {
+    let _gpu = gpu.section();
     let mut skip: c_int = 1;
     let mut params = [
         mpv_render_param { type_: MPV_RENDER_PARAM_SKIP_RENDERING, data: &mut skip as *mut _ as *mut c_void },
@@ -762,7 +813,7 @@ mod tests {
                 let mut target = Target {
                     fbo: 1, tex: 2, w: 2, h: 2, len: 16,
                     cfg: RenderConfig { bgra: false, async_readback, stamp: false },
-                    pbos: [3, 4], cur: 0, inflight: VecDeque::new(),
+                    pbos: [3, 4], cur: 0, inflight: VecDeque::new(), gpu: Gpu::none(),
                 };
                 if fault <= 1 {
 

@@ -78,6 +78,25 @@ impl Vibration {
     }
 }
 
+
+fn session_clamps(mut clamps: [AxisClamp; Axis::COUNT], scale: f64, profile: Profile) -> [AxisClamp; Axis::COUNT] {
+    if profile == Profile::Stroker {
+        for axis in Axis::ALL {
+            let c = &mut clamps[axis.index()];
+            match axis.kind() {
+                Kind::Position | Kind::Rotation => {
+                    let centre = (c.min + c.max) / 2.0;
+                    c.min = centre + (c.min - centre) * scale;
+                    c.max = centre + (c.max - centre) * scale;
+                }
+                Kind::Intensity | Kind::Aux => { c.min *= scale; c.max *= scale; }
+                _ => {}
+            }
+        }
+    }
+    clamps
+}
+
 enum State {
     Connecting(Receiver<io::Result<Link>>),
     Connected(Link),
@@ -91,6 +110,8 @@ pub struct Output {
     pub clamps: [AxisClamp; Axis::COUNT],
 
     pub ramp: Ramp,
+
+    pub session_scale: f64,
     volume: Volume,
     state: State,
     last: Units,
@@ -182,6 +203,7 @@ impl Output {
             profile,
             clamps: [AxisClamp::default(); Axis::COUNT],
             ramp: Ramp::default(),
+            session_scale: 1.0,
             volume: Volume::default(),
             state: State::Error(String::new()),
             last: [None; Axis::COUNT],
@@ -402,9 +424,13 @@ impl Output {
         ctx: &TickContext,
     ) -> bool {
         let t0 = Instant::now();
+        let scale = self.session_scale;
+        let muted = scale == 0.0;
+        let muted_ctx = TickContext { playing: false, manual_axes: [false; Axis::COUNT], estim_manual: false, stop_on_pause: true, ..*ctx };
+        let ctx = if muted { &muted_ctx } else { ctx };
 
         let mut ramped = (*values, *driven);
-        let mut clamps = self.clamps;
+        let mut clamps = session_clamps(self.clamps, scale, self.profile);
         let (values, driven) =
             if self.profile == Profile::Restim && matches!(self.state, State::Connected(_)) {
                 self.ramp.advance(ctx.playing, ctx.interval_ms as f64);
@@ -414,7 +440,7 @@ impl Output {
                 let volume = if ramped.1[i] { ramped.0[i] } else { 1.0 };
                 let boost_axis = ctx.estim_volume.boost.axis.index();
                 let boost_source = driven[boost_axis].then_some(values[boost_axis]);
-                let target = ctx.estim_volume.target(volume, c.min, c.max, boost_source);
+                let target = ctx.estim_volume.target(volume, c.min, c.max, boost_source) * scale;
 
                 let source_active = [Axis::EA, Axis::EB, Axis::EV, Axis::E1, Axis::E2, Axis::E3, Axis::E4]
                     .into_iter().any(|a| driven[a.index()] && self.clamps[a.index()].enabled);
@@ -488,6 +514,14 @@ impl Output {
         let mut write_us = None;
         let result = match &mut self.state {
             State::Connected(Link::Lines(conn)) => {
+                let mut clamps = clamps;
+                if muted && self.profile == Profile::Stroker {
+                    for axis in Axis::ALL {
+                        if matches!(axis.kind(), Kind::Position | Kind::Rotation) {
+                            clamps[axis.index()].enabled = false;
+                        }
+                    }
+                }
                 if tcode::encode(
                     self.profile,
                     values,
@@ -506,7 +540,9 @@ impl Output {
                 r
             }
             State::Connected(Link::Buttplug(bp)) => {
-                match bp.send(values, &self.clamps, ctx.interval_ms, &level_active) {
+                let mut clamps = clamps;
+                if muted { clamps[Axis::L0.index()].enabled = false; }
+                match bp.send(values, &clamps, ctx.interval_ms, &level_active) {
                     Ok(true) => Ok(()),
                     Ok(false) => return false,
                     Err(e) => Err(e),
@@ -520,7 +556,7 @@ impl Output {
                 };
                 match coyote.send(
                     values[Axis::L0.index()],
-                    volume,
+                    volume * scale,
                     driven[Axis::L0.index()],
                     ctx.playing,
                     ctx.interval_ms,
@@ -531,8 +567,8 @@ impl Output {
                 }
             }
             State::Connected(Link::Ossm(o)) => {
-                let c = self.clamps[Axis::L0.index()];
-                if !c.enabled {
+                let c = clamps[Axis::L0.index()];
+                if muted || !c.enabled {
                     return false;
                 }
                 match o.send(c.min + values[Axis::L0.index()].clamp(0.0, 1.0) * (c.max - c.min)) {
@@ -542,7 +578,7 @@ impl Output {
                 }
             }
             State::Connected(Link::Handy(h)) => {
-                h.tick(ctx, &self.clamps);
+                h.tick(ctx, &clamps);
                 return false;
             }
             State::Connected(Link::Howl(h)) => {
@@ -551,14 +587,14 @@ impl Output {
             }
             State::Connected(Link::Toy(toy)) => {
                 let active = std::array::from_fn(|i| driven[i] && level_active[i]);
-                match toy.send(values, &self.clamps, ctx.interval_ms, &active) {
+                match toy.send_scaled(values, &clamps, ctx.interval_ms, &active, scale) {
                     Ok(true) => Ok(()),
                     Ok(false) => return false,
                     Err(e) => Err(e),
                 }
             }
             State::Connected(Link::OpenShock(o)) => {
-                if !o.tick(values, driven, ctx.playing) {
+                if !o.tick_scaled(values, driven, ctx.playing, scale) {
                     return false;
                 }
                 Ok(())
@@ -1151,6 +1187,43 @@ mod slider_tests {
 mod toy_tests {
     use super::*;
     use crate::toys::{tests::{fixture, output_value}, FeatureKind};
+
+    #[test]
+    fn session_scaling_attenuates_the_mapped_level_and_off_overrides_manual_hold() {
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let (mut link, mut rx) = fixture(&[FeatureKind::Vibrate]);
+        link.set_axes(&HashMap::from([(0, Some(Axis::V0))]));
+        link.set_levels(&HashMap::from([(0, LevelMap { floor: 0.4, cap: 0.8, ..LevelMap::default() })]));
+        let mut o = Output::new(1, Transport::Udp { host: "127.0.0.1".into(), port: receiver.local_addr().unwrap().port() }, Profile::Stroker);
+        o.state = State::Connected(Link::Toy(link));
+        let ctx = TickContext { media_ms: 0.0, playing: true, manual_axes: [true; Axis::COUNT], estim_manual: true, stop_on_pause: false, estim_volume: VolumeSettings::default(), rate: 1.0, interval_ms: 100 };
+        let values = [1.0; Axis::COUNT];
+        let driven = [true; Axis::COUNT];
+        o.session_scale = 0.5;
+        o.send(&values, &driven, &ctx);
+        assert_eq!(output_value(&mut rx).1, 0.4);
+        o.session_scale = 0.0;
+        o.send(&values, &driven, &ctx);
+        assert_eq!(output_value(&mut rx).1, 0.0);
+        o.session_scale = 1.0;
+        o.send(&values, &driven, &ctx);
+        assert_eq!(output_value(&mut rx).1, 0.8);
+    }
+
+    #[test]
+    fn session_ranges_preserve_device_limits_and_estim_balance() {
+        let mut original = [AxisClamp::default(); Axis::COUNT];
+        original[Axis::L0.index()] = AxisClamp { min: 0.2, max: 0.8, enabled: true };
+        original[Axis::V0.index()] = AxisClamp { min: 0.4, max: 0.8, enabled: true };
+        let half = session_clamps(original, 0.5, Profile::Stroker);
+        assert!((half[Axis::L0.index()].min - 0.35).abs() < 1e-9);
+        assert!((half[Axis::L0.index()].max - 0.65).abs() < 1e-9);
+        assert_eq!(half[Axis::V0.index()].min, 0.2);
+        assert_eq!(half[Axis::V0.index()].max, 0.4);
+        let estim = session_clamps(original, 0.0, Profile::Restim);
+        assert_eq!(estim[Axis::EA.index()], original[Axis::EA.index()]);
+        assert_eq!(original[Axis::L0.index()].min, 0.2);
+    }
 
     #[test]
     fn pause_and_source_release_stop_toys_but_manual_overrides_work() {

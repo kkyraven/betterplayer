@@ -294,6 +294,9 @@ impl DlssRender {
     pub fn poll(&mut self) { self.poll_worker(); }
 
 
+    pub fn has_worker(&self) -> bool { self.worker.is_some() }
+
+
     pub fn next_wake(&self) -> Option<Duration> {
         if self.capture.is_some() {
             return Some(Duration::from_millis(2));
