@@ -32,7 +32,7 @@ pub use howl::HowlStatus;
 pub use intiface::{IntifaceServer, IntifaceStatus, SERVER_NAME as INTIFACE_SERVER_NAME};
 pub use openshock::{API as OPENSHOCK_API, OpenShockControl, OpenShockTrigger};
 pub use ossm::OssmStatus;
-pub use output::{Media, Output, OutputSnapshot, OutputStats, Status, TickContext, Vibration};
+pub use output::{Keyframe, Media, Output, OutputSnapshot, OutputStats, Status, TickContext, Vibration};
 pub use probe::{ProbedPort, probe_ports};
 pub use ramp::{Ramp, RampConfig, RampProgress};
 pub use tcode::{AxisClamp, Profile};

@@ -3,11 +3,14 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use crate::ble::{BleConn, OSSM_COMMAND, OSSM_SERVICE, OSSM_STATE};
-use crate::output::CONNECT_GLIDE_MS;
+use crate::output::{CONNECT_GLIDE_MS, Keyframe};
 
 
 
 pub const LINE_MS: u32 = 50;
+
+
+const KEYFRAME_SLIP: Duration = Duration::from_millis(40);
 
 
 
@@ -43,7 +46,10 @@ pub struct OssmLink {
 
     armed: bool,
 
+
     last: Option<u8>,
+
+    keyframe: Option<(f64, Instant)>,
     last_line_at: Option<Instant>,
 
 
@@ -68,6 +74,7 @@ impl OssmLink {
             configured: None,
             armed: false,
             last: None,
+            keyframe: None,
             last_line_at: None,
             last_attempt_at: None,
             glide: false,
@@ -113,6 +120,7 @@ impl OssmLink {
         }
         if !was {
             self.last = None;
+            self.keyframe = None;
             self.glide = true;
             self.hold_until = None;
         }
@@ -127,17 +135,40 @@ impl OssmLink {
 
 
 
-    pub fn send(&mut self, stroke: f64) -> io::Result<bool> {
+
+
+    pub fn send(&mut self, stroke: f64, keyframe: Option<Keyframe>) -> io::Result<bool> {
         if !self.status.streaming() {
             return Ok(false);
         }
         let now = Instant::now();
-        if self.hold_until.is_some_and(|t| now < t) || self.last_line_at.is_some_and(|t| now.duration_since(t) < Duration::from_millis(LINE_MS as u64)) {
+        if self.hold_until.is_some_and(|t| now < t) {
             return Ok(false);
         }
-        let since_attempt = self.last_attempt_at.map_or(LINE_MS, |t| (now.duration_since(t).as_millis() as u32).clamp(LINE_MS, 4 * LINE_MS));
-        self.last_attempt_at = Some(now);
-        let pos = (stroke.clamp(0.0, 1.0) * 100.0).round() as u8;
+        let (target, ms) = match keyframe.filter(|_| !self.glide) {
+            Some(k) => {
+                let arrival = now + Duration::from_secs_f64(k.in_ms.max(0.0) / 1000.0);
+                if self.keyframe.is_some_and(|(at, was)| at == k.at_ms && arrival.saturating_duration_since(was).max(was.saturating_duration_since(arrival)) <= KEYFRAME_SLIP) {
+                    return Ok(false);
+                }
+                self.keyframe = Some((k.at_ms, arrival));
+                (k.pos, (k.in_ms.round() as u32).max(1))
+            }
+            None => {
+                self.keyframe = None;
+                if self.last_line_at.is_some_and(|t| now.duration_since(t) < Duration::from_millis(LINE_MS as u64)) {
+                    return Ok(false);
+                }
+                let since_attempt = self.last_attempt_at.map_or(LINE_MS, |t| (now.duration_since(t).as_millis() as u32).clamp(LINE_MS, 4 * LINE_MS));
+                self.last_attempt_at = Some(now);
+                (stroke, since_attempt)
+            }
+        };
+        let mut pos = (target.clamp(0.0, 1.0) * 100.0).round() as u8;
+
+        if self.last.is_none() && pos == 0 {
+            pos = 1;
+        }
         if self.last == Some(pos) {
             return Ok(false);
         }
@@ -146,7 +177,7 @@ impl OssmLink {
             self.hold_until = Some(now + Duration::from_millis(CONNECT_GLIDE_MS as u64));
             CONNECT_GLIDE_MS
         } else {
-            since_attempt
+            ms
         };
         stream_line(&mut self.line, pos, ms);
         self.conn.write_latest(self.line.as_bytes())?;

@@ -3,7 +3,7 @@ mod settings;
 
 use std::sync::Arc;
 
-use bp_script::{Axis, Interpolation, Script, expand, interp};
+use bp_script::{Action, Axis, Interpolation, Script, expand, interp};
 
 pub use provider::Provider;
 pub use settings::{AxisSettings, SmartLimit};
@@ -286,6 +286,44 @@ impl Mixer {
         &self.settings[axis.index()]
     }
 
+
+    fn range_max(&self, axis: Axis) -> f64 {
+        let cfg = &self.settings[axis.index()];
+        self.max_override[axis.index()].map_or(cfg.max, |m| m.clamp(cfg.min, 1.0))
+    }
+
+
+
+
+
+
+
+    pub fn next_keyframe(&self, axis: Axis, media_ms: f64) -> Option<Action> {
+        let i = axis.index();
+        let cfg = &self.settings[i];
+        if !cfg.enabled
+            || self.external[i].is_some()
+            || self.live[i].is_some()
+            || cfg.provider != Provider::None
+            || cfg.smart_limit.is_some()
+            || cfg.speed_limit > 0.0
+        {
+            return None;
+        }
+        let offset = self.global_offset_ms + cfg.offset_ms;
+        let t = media_ms - offset;
+        if self.effects[i].is_some_and(|e| t >= e.start_ms && t < e.end_ms) {
+            return None;
+        }
+        let source = cfg.link.unwrap_or(axis);
+        let script = self.scripts[source.index()].as_deref()?;
+        let next = script.actions.get(script.index_at(t)? + 1)?;
+        let extent = self.extents[source.index()].filter(|(lo, hi)| cfg.extend_range && hi - lo > 1e-6);
+        let v = extent.map_or(next.pos, |(lo, hi)| ((next.pos - lo) / (hi - lo)).clamp(0.0, 1.0));
+        let v = shape(cfg, axis.default_value(), v);
+        Some(Action { at: next.at + offset, pos: cfg.min + v * (self.range_max(axis) - cfg.min) })
+    }
+
     pub fn set_settings(&mut self, axis: Axis, settings: AxisSettings) {
         self.settings[axis.index()] = settings;
     }
@@ -445,13 +483,10 @@ impl Mixer {
 
         let in_gap = external.is_none() && cfg.provider != Provider::None && script.is_some_and(|s| gap_at(s, t) > cfg.fill_gaps_over_ms);
         let sampled = sampled.filter(|_| !in_gap).or_else(|| self.fallback[i].value(&mut self.state[i].fallback, dt_ms));
-        let scripted = sampled.map(|v| {
-            let v = default + (v - default) * cfg.amplitude;
-            let v = if cfg.invert { 1.0 - v } else { v };
-            v.clamp(0.0, 1.0)
-        });
+        let scripted = sampled.map(|v| shape(cfg, default, v));
 
 
+        let max = self.range_max(axis);
         let st = &mut self.state[i];
         let provided = cfg.provider.value(&mut st.provider, dt_ms);
         let mut value = match (scripted, provided) {
@@ -469,7 +504,6 @@ impl Mixer {
         } else {
             st.idle_ms += dt_ms;
         }
-        let max = self.max_override[i].map_or(cfg.max, |m| m.clamp(cfg.min, 1.0));
         let mut in_range = value.map(|v| cfg.min + v * (max - cfg.min));
         let target_home = cfg.min + default * (max - cfg.min);
         if in_range.is_none() && cfg.auto_home_delay_ms > 0.0 && st.idle_ms >= cfg.auto_home_delay_ms {
@@ -531,6 +565,13 @@ impl Mixer {
     }
 }
 
+
+fn shape(cfg: &AxisSettings, default: f64, v: f64) -> f64 {
+    let v = default + (v - default) * cfg.amplitude;
+    let v = if cfg.invert { 1.0 - v } else { v };
+    v.clamp(0.0, 1.0)
+}
+
 const ELECTRODES: [Axis; 4] = [Axis::E1, Axis::E2, Axis::E3, Axis::E4];
 
 #[derive(Default)]
@@ -568,7 +609,6 @@ pub fn interpolation_from(s: &str) -> Interpolation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bp_script::Action;
 
     fn script(pts: &[(f64, f64)]) -> Script {
         Script { actions: pts.iter().map(|(at, pos)| Action { at: *at, pos: *pos }).collect(), ..Default::default() }
@@ -577,6 +617,32 @@ mod tests {
     fn settled(m: &mut Mixer) {
         m.sync_ms = 0.0;
         m.resync();
+    }
+
+    #[test]
+    fn next_keyframe_carries_offsets_and_shaping() {
+        let mut m = Mixer::new();
+        m.set_scripts([(Axis::L0, script(&[(0.0, 0.0), (1000.0, 1.0), (2000.0, 0.5)]))]);
+        m.global_offset_ms = 100.0;
+        let mut cfg = m.settings(Axis::L0).clone();
+        cfg.offset_ms = 50.0;
+        cfg.invert = true;
+        cfg.min = 0.2;
+        cfg.max = 0.8;
+        m.set_settings(Axis::L0, cfg);
+
+        assert_eq!(m.next_keyframe(Axis::L0, 100.0), None);
+
+
+        let k = m.next_keyframe(Axis::L0, 500.0).unwrap();
+        assert_eq!(k.at, 1150.0);
+        assert!((k.pos - 0.2).abs() < 1e-9, "{}", k.pos);
+        let k = m.next_keyframe(Axis::L0, 1150.0).unwrap();
+        assert_eq!((k.at, k.pos), (2150.0, 0.5));
+
+        assert_eq!(m.next_keyframe(Axis::L0, 2150.0), None);
+        m.set_source(Axis::L0, Some(0.3));
+        assert_eq!(m.next_keyframe(Axis::L0, 500.0), None);
     }
 
     #[test]

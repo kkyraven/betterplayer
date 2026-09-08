@@ -9,11 +9,14 @@ use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 
 use crate::intiface;
-use crate::output::CONNECT_GLIDE_MS;
+use crate::output::{CONNECT_GLIDE_MS, Keyframe};
 use crate::tcode::AxisClamp;
 use crate::transport::{websocket, ws_send};
 
 const SEND_EVERY_MS: f64 = 100.0;
+
+
+const KEYFRAME_SLIP: Duration = Duration::from_millis(40);
 
 struct Device {
     index: u64,
@@ -24,6 +27,56 @@ struct Device {
     last: [Option<u16>; 3],
 
     glide_until: Option<Instant>,
+
+    keyframe: Option<(f64, Instant)>,
+}
+
+impl Device {
+
+
+
+    fn stroke(
+        &mut self,
+        sampled: Option<f64>,
+        keyframe: Option<(f64, Keyframe)>,
+        due: bool,
+        duration: u64,
+        now: Instant,
+    ) -> Option<(f64, u64)> {
+        let unit = |v: f64| (v * 1000.0).round() as u16;
+        if self.linear == 0 || self.glide_until.is_some_and(|t| now < t) {
+            return None;
+        }
+        if self.last[0].is_none() {
+            let v = sampled?;
+            self.glide_until = Some(now + Duration::from_millis(CONNECT_GLIDE_MS as u64));
+            self.last[0] = Some(unit(v));
+            return Some((v, CONNECT_GLIDE_MS as u64));
+        }
+        match keyframe {
+            Some((pos, k)) if sampled.is_some() => {
+                let arrival = now + Duration::from_secs_f64(k.in_ms.max(0.0) / 1000.0);
+                let same = self.keyframe.is_some_and(|(at, was)| {
+                    at == k.at_ms && arrival.saturating_duration_since(was).max(was.saturating_duration_since(arrival)) <= KEYFRAME_SLIP
+                });
+                if same {
+                    return None;
+                }
+                self.keyframe = Some((k.at_ms, arrival));
+                self.last[0] = Some(unit(pos));
+                Some((pos, (k.in_ms.round() as u64).max(1)))
+            }
+            _ => {
+                self.keyframe = None;
+                let v = sampled.filter(|_| due)?;
+                if self.last[0] == Some(unit(v)) {
+                    return None;
+                }
+                self.last[0] = Some(unit(v));
+                Some((v, duration))
+            }
+        }
+    }
 }
 
 pub struct Buttplug {
@@ -182,27 +235,29 @@ impl Buttplug {
 
 
 
+
     pub fn send(
         &mut self,
         values: &[f64; Axis::COUNT],
         clamps: &[AxisClamp; Axis::COUNT],
         interval_ms: u32,
         active: &[bool; Axis::COUNT],
+        keyframe: Option<Keyframe>,
     ) -> io::Result<bool> {
         self.since_send_ms += interval_ms as f64;
-        if self.since_send_ms < SEND_EVERY_MS {
-            return Ok(false);
-        }
+        let due = self.since_send_ms >= SEND_EVERY_MS;
         let duration = self.since_send_ms.round() as u64;
-        self.since_send_ms = 0.0;
-        let clamped = |axis: Axis| {
+        if due {
+            self.since_send_ms = 0.0;
+        }
+        let ranged = |axis: Axis, v: f64| {
             let c = clamps[axis.index()];
-            c.enabled.then(|| {
-                (c.min + values[axis.index()].clamp(0.0, 1.0) * (c.max - c.min)).clamp(0.0, 1.0)
-            })
+            c.enabled.then(|| (c.min + v.clamp(0.0, 1.0) * (c.max - c.min)).clamp(0.0, 1.0))
         };
+        let clamped = |axis: Axis| ranged(axis, values[axis.index()]);
         let level = |axis: Axis, rest: f64| clamped(axis).map(|v| if active[axis.index()] { v } else { rest });
         let stroke = clamped(Axis::L0);
+        let keyframe = keyframe.and_then(|k| Some((ranged(Axis::L0, k.pos)?, k)));
         let vibrate = level(Axis::V0, 0.0);
 
         let twist = level(Axis::R0, 0.5);
@@ -210,18 +265,7 @@ impl Buttplug {
         let now = Instant::now();
         for d in &mut self.devices {
             let unit = |v: f64| (v * 1000.0).round() as u16;
-            let gliding = d.glide_until.is_some_and(|t| now < t);
-            if let Some(v) = stroke
-                .filter(|_| d.linear > 0 && !gliding)
-                .filter(|v| d.last[0] != Some(unit(*v)))
-            {
-                let duration = if d.last[0].is_none() {
-                    d.glide_until = Some(now + Duration::from_millis(CONNECT_GLIDE_MS as u64));
-                    CONNECT_GLIDE_MS as u64
-                } else {
-                    duration
-                };
-                d.last[0] = Some(unit(v));
+            if let Some((v, duration)) = d.stroke(stroke, keyframe, due, duration, now) {
                 let vectors: Vec<Value> = (0..d.linear)
                     .map(|i| json!({ "Index": i, "Duration": duration, "Position": v }))
                     .collect();
@@ -229,6 +273,9 @@ impl Buttplug {
                     "LinearCmd",
                     json!({ "DeviceIndex": d.index, "Vectors": vectors }),
                 ));
+            }
+            if !due {
+                continue;
             }
             if let Some(v) = vibrate
                 .filter(|_| !d.vibrate.is_empty())
@@ -308,6 +355,7 @@ fn parse_device(v: &Value) -> Option<Device> {
         rotate: count("RotateCmd"),
         last: [None; 3],
         glide_until: None,
+        keyframe: None,
     })
 }
 
@@ -331,6 +379,33 @@ mod tests {
             (2, "Kiiroo Keon", 1, 0)
         );
         assert_eq!(d.vibrate, vec![0]);
+    }
+
+    fn linear() -> Device {
+        Device { index: 0, name: "Handy".into(), linear: 1, vibrate: Vec::new(), rotate: 0, last: [None; 3], glide_until: None, keyframe: None }
+    }
+
+    #[test]
+    fn keyframes_go_out_once_as_they_start_and_samples_fill_in() {
+        let mut d = linear();
+        let t0 = Instant::now();
+
+        assert_eq!(d.stroke(Some(0.5), None, true, 100, t0), Some((0.5, CONNECT_GLIDE_MS as u64)));
+        assert_eq!(d.stroke(Some(0.6), None, true, 100, t0 + Duration::from_millis(100)), None);
+        let t1 = t0 + Duration::from_millis(CONNECT_GLIDE_MS as u64);
+
+        let k = Keyframe { at_ms: 1000.0, pos: 0.9, in_ms: 300.0 };
+        assert_eq!(d.stroke(Some(0.55), Some((0.9, k)), false, 10, t1), Some((0.9, 300)));
+        let later = Keyframe { in_ms: 290.0, ..k };
+        assert_eq!(d.stroke(Some(0.6), Some((0.9, later)), true, 100, t1 + Duration::from_millis(10)), None);
+
+        let seek = Keyframe { in_ms: 500.0, ..k };
+        assert_eq!(d.stroke(Some(0.6), Some((0.9, seek)), false, 10, t1 + Duration::from_millis(20)), Some((0.9, 500)));
+
+        assert_eq!(d.stroke(Some(0.7), None, false, 10, t1 + Duration::from_millis(30)), None);
+        assert_eq!(d.stroke(Some(0.7), None, true, 100, t1 + Duration::from_millis(100)), Some((0.7, 100)));
+
+        assert_eq!(d.stroke(Some(0.7), Some((0.9, k)), false, 10, t1 + Duration::from_millis(110)), Some((0.9, 300)));
     }
 
     #[test]

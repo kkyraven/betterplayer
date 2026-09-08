@@ -185,10 +185,27 @@ pub enum Kind {
     Feet,
 
     Skin,
+
+
+    GenitalsCovered,
+    BreastsCovered,
+    ButtocksCovered,
+    FeetCovered,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 6] = [Kind::Genitals, Kind::Breasts, Kind::Buttocks, Kind::Faces, Kind::Feet, Kind::Skin];
+    pub const ALL: [Kind; 10] = [
+        Kind::Genitals,
+        Kind::Breasts,
+        Kind::Buttocks,
+        Kind::Faces,
+        Kind::Feet,
+        Kind::Skin,
+        Kind::GenitalsCovered,
+        Kind::BreastsCovered,
+        Kind::ButtocksCovered,
+        Kind::FeetCovered,
+    ];
     pub const COUNT: usize = Self::ALL.len();
 
     pub fn id(self) -> &'static str {
@@ -199,6 +216,10 @@ impl Kind {
             Kind::Faces => "faces",
             Kind::Feet => "feet",
             Kind::Skin => "skin",
+            Kind::GenitalsCovered => "genitalsCovered",
+            Kind::BreastsCovered => "breastsCovered",
+            Kind::ButtocksCovered => "buttocksCovered",
+            Kind::FeetCovered => "feetCovered",
         }
     }
 
@@ -218,6 +239,10 @@ impl Kind {
             Kind::Faces => class.contains("FACE"),
             Kind::Feet => class == "FEET_EXPOSED",
             Kind::Skin => class.ends_with("EXPOSED"),
+            Kind::GenitalsCovered => class.contains("GENITALIA") && class.ends_with("COVERED"),
+            Kind::BreastsCovered => class.contains("BREAST") && class.ends_with("COVERED"),
+            Kind::ButtocksCovered => class == "BUTTOCKS_COVERED" || class == "ANUS_COVERED",
+            Kind::FeetCovered => class == "FEET_COVERED",
         }
     }
 }
@@ -505,6 +530,10 @@ mod tests {
         assert!((c[Kind::Breasts.index()] - 0.1).abs() < 1e-9);
         assert!((c[Kind::Faces.index()] - 0.025).abs() < 1e-9);
         assert_eq!(c[Kind::Buttocks.index()], 0.0, "covered classes do not count");
+        assert!((c[Kind::ButtocksCovered.index()] - 0.625).abs() < 1e-9, "but count for the covered kind");
+        assert_eq!(c[Kind::GenitalsCovered.index()], 0.0);
+        assert!(Kind::GenitalsCovered.matches("FEMALE_GENITALIA_COVERED") && !Kind::Genitals.matches("FEMALE_GENITALIA_COVERED"));
+        assert!(Kind::ButtocksCovered.matches("ANUS_COVERED") && Kind::FeetCovered.matches("FEET_COVERED"));
         assert!((c[Kind::Skin.index()] - 0.35).abs() < 1e-9, "every exposed class");
         assert_eq!(coverage(&[d("ANUS_EXPOSED", 1.0, 1.0)])[Kind::Buttocks.index()], 1.0);
         for k in Kind::ALL {

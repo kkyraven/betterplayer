@@ -41,9 +41,23 @@ pub struct Media {
 }
 
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Keyframe {
+
+    pub at_ms: f64,
+
+    pub pos: f64,
+
+    pub in_ms: f64,
+}
+
+
 #[derive(Clone, Copy, Debug)]
 pub struct TickContext {
     pub media_ms: f64,
+
+
+    pub stroke_next: Option<Keyframe>,
     pub playing: bool,
 
     pub manual_axes: [bool; Axis::COUNT],
@@ -145,6 +159,9 @@ pub struct Output {
     feature_levels: HashMap<u32, LevelMap>,
     vibration: Option<Vibration>,
     vibration_phase: f64,
+
+
+    pub delay_ms: f64,
 }
 
 
@@ -225,6 +242,7 @@ impl Output {
             feature_levels: HashMap::new(),
             vibration: None,
             vibration_phase: 0.0,
+            delay_ms: 0.0,
         };
         o.connect();
         o
@@ -426,7 +444,7 @@ impl Output {
         let t0 = Instant::now();
         let scale = self.session_scale;
         let muted = scale == 0.0;
-        let muted_ctx = TickContext { playing: false, manual_axes: [false; Axis::COUNT], estim_manual: false, stop_on_pause: true, ..*ctx };
+        let muted_ctx = TickContext { playing: false, manual_axes: [false; Axis::COUNT], estim_manual: false, stop_on_pause: true, stroke_next: None, ..*ctx };
         let ctx = if muted { &muted_ctx } else { ctx };
 
         let mut ramped = (*values, *driven);
@@ -457,8 +475,10 @@ impl Output {
 
 
         let shaken: [f64; Axis::COUNT];
+        let mut shaking = false;
         let values = match self.vibration {
             Some(v) if self.profile == Profile::Stroker && driven[v.source.index()] && matches!(self.state, State::Connected(Link::Lines(_) | Link::Ossm(_))) => {
+                shaking = true;
                 let offset = v.offset(values[v.source.index()], &mut self.vibration_phase, ctx.interval_ms as f64);
                 let mut out = *values;
                 let i = Axis::L0.index();
@@ -474,6 +494,13 @@ impl Output {
 
         let level_active: [bool; Axis::COUNT] =
             std::array::from_fn(|i| ctx.playing || ctx.manual_axes[i] || !ctx.stop_on_pause);
+
+
+
+
+        let stroke_next = ctx
+            .stroke_next
+            .filter(|_| ctx.playing && driven[Axis::L0.index()] && !ctx.manual_axes[Axis::L0.index()] && !shaking);
         let rested: [f64; Axis::COUNT];
         let (values, clamps) = if self.profile == Profile::Stroker
             && matches!(self.state, State::Connected(Link::Lines(_)))
@@ -542,7 +569,7 @@ impl Output {
             State::Connected(Link::Buttplug(bp)) => {
                 let mut clamps = clamps;
                 if muted { clamps[Axis::L0.index()].enabled = false; }
-                match bp.send(values, &clamps, ctx.interval_ms, &level_active) {
+                match bp.send(values, &clamps, ctx.interval_ms, &level_active, stroke_next) {
                     Ok(true) => Ok(()),
                     Ok(false) => return false,
                     Err(e) => Err(e),
@@ -571,7 +598,8 @@ impl Output {
                 if muted || !c.enabled {
                     return false;
                 }
-                match o.send(c.min + values[Axis::L0.index()].clamp(0.0, 1.0) * (c.max - c.min)) {
+                let ranged = |v: f64| c.min + v.clamp(0.0, 1.0) * (c.max - c.min);
+                match o.send(ranged(values[Axis::L0.index()]), stroke_next.map(|k| Keyframe { pos: ranged(k.pos), ..k })) {
                     Ok(true) => Ok(()),
                     Ok(false) => return false,
                     Err(e) => Err(e),
@@ -587,7 +615,7 @@ impl Output {
             }
             State::Connected(Link::Toy(toy)) => {
                 let active = std::array::from_fn(|i| driven[i] && level_active[i]);
-                match toy.send_scaled(values, &clamps, ctx.interval_ms, &active, scale) {
+                match toy.send_scaled(values, &clamps, ctx.interval_ms, &active, scale, stroke_next) {
                     Ok(true) => Ok(()),
                     Ok(false) => return false,
                     Err(e) => Err(e),
@@ -678,6 +706,16 @@ impl Output {
         }
         self.vibration = vibration;
         self.vibration_phase = 0.0;
+        true
+    }
+
+
+
+    pub fn set_delay(&mut self, ms: f64) -> bool {
+        if matches!(self.transport, Transport::Handy { .. } | Transport::Howl { .. }) {
+            return false;
+        }
+        self.delay_ms = ms;
         true
     }
 
@@ -852,7 +890,7 @@ mod tests {
     }
 
     fn context() -> TickContext {
-        TickContext { media_ms: 0.0, playing: true, manual_axes: [false; Axis::COUNT], estim_manual: false, stop_on_pause: true, estim_volume: crate::ramp::VolumeSettings::default(), rate: 1.0, interval_ms: 10 }
+        TickContext { media_ms: 0.0, stroke_next: None, playing: true, manual_axes: [false; Axis::COUNT], estim_manual: false, stop_on_pause: true, estim_volume: crate::ramp::VolumeSettings::default(), rate: 1.0, interval_ms: 10 }
     }
 
     fn volume_units(o: &Output) -> u16 {
@@ -1196,7 +1234,7 @@ mod toy_tests {
         link.set_levels(&HashMap::from([(0, LevelMap { floor: 0.4, cap: 0.8, ..LevelMap::default() })]));
         let mut o = Output::new(1, Transport::Udp { host: "127.0.0.1".into(), port: receiver.local_addr().unwrap().port() }, Profile::Stroker);
         o.state = State::Connected(Link::Toy(link));
-        let ctx = TickContext { media_ms: 0.0, playing: true, manual_axes: [true; Axis::COUNT], estim_manual: true, stop_on_pause: false, estim_volume: VolumeSettings::default(), rate: 1.0, interval_ms: 100 };
+        let ctx = TickContext { media_ms: 0.0, stroke_next: None, playing: true, manual_axes: [true; Axis::COUNT], estim_manual: true, stop_on_pause: false, estim_volume: VolumeSettings::default(), rate: 1.0, interval_ms: 100 };
         let values = [1.0; Axis::COUNT];
         let driven = [true; Axis::COUNT];
         o.session_scale = 0.5;
@@ -1232,7 +1270,7 @@ mod toy_tests {
         link.set_axes(&HashMap::from([(0, Some(Axis::V0))]));
         let mut output = Output::new(1, Transport::Udp { host: "127.0.0.1".into(), port: receiver.local_addr().unwrap().port() }, Profile::Stroker);
         output.state = State::Connected(Link::Toy(link));
-        let mut ctx = TickContext { media_ms: 0.0, playing: true, manual_axes: [false; Axis::COUNT], estim_manual: false, stop_on_pause: true, estim_volume: crate::ramp::VolumeSettings::default(), rate: 1.0, interval_ms: 100 };
+        let mut ctx = TickContext { media_ms: 0.0, stroke_next: None, playing: true, manual_axes: [false; Axis::COUNT], estim_manual: false, stop_on_pause: true, estim_volume: crate::ramp::VolumeSettings::default(), rate: 1.0, interval_ms: 100 };
         let mut driven = [false; Axis::COUNT];
         driven[Axis::V0.index()] = true;
         let values = [0.6; Axis::COUNT];
@@ -1264,7 +1302,7 @@ mod toy_tests {
 
         link.set_levels(&output.feature_levels);
         output.state = State::Connected(Link::Toy(link));
-        let mut ctx = TickContext { media_ms: 0.0, playing: true, manual_axes: [false; Axis::COUNT], estim_manual: false, stop_on_pause: false, estim_volume: crate::ramp::VolumeSettings::default(), rate: 1.0, interval_ms: 100 };
+        let mut ctx = TickContext { media_ms: 0.0, stroke_next: None, playing: true, manual_axes: [false; Axis::COUNT], estim_manual: false, stop_on_pause: false, estim_volume: crate::ramp::VolumeSettings::default(), rate: 1.0, interval_ms: 100 };
         let mut driven = [false; Axis::COUNT];
         driven[Axis::V0.index()] = true;
         let values = [1.0; Axis::COUNT];
@@ -1295,7 +1333,7 @@ mod toy_tests {
         }
         o.glide = None;
         o.clamps[Axis::V0.index()].min = 0.4;
-        let mut ctx = TickContext { media_ms: 0.0, playing: true, manual_axes: [false; Axis::COUNT], estim_manual: false, stop_on_pause: true, estim_volume: crate::ramp::VolumeSettings::default(), rate: 1.0, interval_ms: 10 };
+        let mut ctx = TickContext { media_ms: 0.0, stroke_next: None, playing: true, manual_axes: [false; Axis::COUNT], estim_manual: false, stop_on_pause: true, estim_volume: crate::ramp::VolumeSettings::default(), rate: 1.0, interval_ms: 10 };
         let mut driven = [false; Axis::COUNT];
         driven[Axis::L0.index()] = true;
         driven[Axis::V0.index()] = true;

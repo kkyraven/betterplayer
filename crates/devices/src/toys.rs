@@ -18,13 +18,16 @@ use buttplug_server_hwmgr_btleplug::BtlePlugCommunicationManagerBuilder;
 use futures_util::StreamExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::output::CONNECT_GLIDE_MS;
+use crate::output::{CONNECT_GLIDE_MS, Keyframe};
 use crate::tcode::AxisClamp;
 
 
 pub const BIND_TIMEOUT: Duration = Duration::from_secs(15);
 
 const SEND_EVERY_MS: f64 = 100.0;
+
+
+const KEYFRAME_SLIP: Duration = Duration::from_millis(40);
 
 const SPEED_FULL: f64 = 4.0;
 
@@ -367,6 +370,7 @@ impl Hub {
             prev: [None; Axis::COUNT],
             since_send_ms: 0.0,
             glide_until: vec![None; n],
+            keyframe: vec![None; n],
             testing_since: None,
         })
     }
@@ -676,6 +680,8 @@ pub struct ToyLink {
     since_send_ms: f64,
 
     glide_until: Vec<Option<Instant>>,
+
+    keyframe: Vec<Option<(f64, Instant)>>,
     testing_since: Option<Instant>,
 }
 
@@ -776,8 +782,11 @@ impl ToyLink {
         interval_ms: u32,
         active: &[bool; Axis::COUNT],
     ) -> io::Result<bool> {
-        self.send_scaled(values, clamps, interval_ms, active, 1.0)
+        self.send_scaled(values, clamps, interval_ms, active, 1.0, None)
     }
+
+
+
 
     pub fn send_scaled(
         &mut self,
@@ -786,6 +795,7 @@ impl ToyLink {
         interval_ms: u32,
         active: &[bool; Axis::COUNT],
         scale: f64,
+        keyframe: Option<Keyframe>,
     ) -> io::Result<bool> {
         self.track_speed(values, interval_ms);
         for i in 0..Axis::COUNT {
@@ -801,23 +811,56 @@ impl ToyLink {
                 .map(|a| self.raw(f, a, values));
         }
         self.since_send_ms += interval_ms as f64;
-        if self.since_send_ms < SEND_EVERY_MS {
+        let due = self.since_send_ms >= SEND_EVERY_MS;
+        if !due && keyframe.is_none() {
             return Ok(false);
         }
         let duration = self.since_send_ms.round() as u32;
-        self.since_send_ms = 0.0;
+        if due {
+            self.since_send_ms = 0.0;
+        }
         let now = Instant::now();
+
         let test = self
             .testing_since
+            .filter(|_| due)
             .map(|start| now.duration_since(start).as_millis() as u32);
         let finishing_test = test.is_some_and(|ms| ms >= TEST_MS);
         if finishing_test {
             self.testing_since = None;
         }
         let testing = test.filter(|ms| *ms < TEST_MS);
+        let l0 = Axis::L0.index();
+        let keyed = keyframe.filter(|_| {
+            self.testing_since.is_none() && scale != 0.0 && active[l0] && clamps[l0].enabled
+        });
         let mut sent = false;
         for i in 0..self.info.features.len() {
             let f = &self.info.features[i];
+
+            if let Some(k) = keyed.filter(|_| {
+                f.kind == FeatureKind::TimedPosition && self.axes[i] == Some(Axis::L0) && self.glide_until[i].is_some()
+            }) {
+                if self.glide_until[i].is_some_and(|t| now < t) {
+                    continue;
+                }
+                let arrival = now + Duration::from_secs_f64(k.in_ms.max(0.0) / 1000.0);
+                if self.keyframe[i].is_some_and(|(at, was)| at == k.at_ms && arrival.saturating_duration_since(was).max(was.saturating_duration_since(arrival)) <= KEYFRAME_SLIP) {
+                    continue;
+                }
+                self.keyframe[i] = Some((k.at_ms, arrival));
+                let c = clamps[l0];
+                let pos = (c.min + k.pos.clamp(0.0, 1.0) * (c.max - c.min)).clamp(0.0, 1.0);
+                let (unit, cmd) = command(f, pos, (k.in_ms.round() as u32).max(1));
+                self.hub.send(self.info.index, &self.tx, f.index, cmd)?;
+                self.last[i] = Some(unit);
+                sent = true;
+                continue;
+            }
+            self.keyframe[i] = None;
+            if !due {
+                continue;
+            }
             let testable = !matches!(
                 f.kind,
                 FeatureKind::Temperature | FeatureKind::Led | FeatureKind::Spray
@@ -1251,6 +1294,35 @@ pub(crate) mod tests {
                 )
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn stroke_keyframes_go_out_once_beside_the_cadence() {
+        let (mut link, mut rx) = fixture(&[FeatureKind::TimedPosition, FeatureKind::Vibrate]);
+        link.set_axes(&HashMap::from([(0, Some(Axis::L0)), (1, Some(Axis::V0))]));
+        let clamps = [AxisClamp::default(); Axis::COUNT];
+        let on = [true; Axis::COUNT];
+
+        link.send_scaled(&[0.5; Axis::COUNT], &clamps, 100, &on, 1.0, Some(Keyframe { at_ms: 1000.0, pos: 0.9, in_ms: 300.0 })).unwrap();
+        assert!(matches!(rx.try_recv(), Ok(DevCmd::Output(0, ClientDeviceOutputCommand::HwPositionWithDuration(_, CONNECT_GLIDE_MS)))));
+        assert_eq!(output_value(&mut rx), (1, 0.5));
+        link.glide_until[0] = Some(Instant::now() - Duration::from_millis(1));
+
+        let k = Keyframe { at_ms: 1000.0, pos: 0.9, in_ms: 300.0 };
+        assert!(link.send_scaled(&[0.6; Axis::COUNT], &clamps, 10, &on, 1.0, Some(k)).unwrap());
+        assert!(matches!(rx.try_recv(), Ok(DevCmd::Output(0, ClientDeviceOutputCommand::HwPositionWithDuration(ClientDeviceCommandValue::Percent(p), 300))) if (p - 0.9).abs() < 1e-9));
+        assert!(rx.try_recv().is_err());
+        assert!(!link.send_scaled(&[0.6; Axis::COUNT], &clamps, 10, &on, 1.0, Some(Keyframe { in_ms: 290.0, ..k })).unwrap());
+        for _ in 0..8 {
+            link.send_scaled(&[0.6; Axis::COUNT], &clamps, 10, &on, 1.0, Some(k)).unwrap();
+        }
+        assert_eq!(output_value(&mut rx), (1, 0.6));
+        assert!(rx.try_recv().is_err());
+
+        assert!(link.send_scaled(&[0.7; Axis::COUNT], &clamps, 10, &on, 1.0, Some(Keyframe { at_ms: 1300.0, pos: 0.1, in_ms: 250.0 })).unwrap());
+        assert!(matches!(rx.try_recv(), Ok(DevCmd::Output(0, ClientDeviceOutputCommand::HwPositionWithDuration(ClientDeviceCommandValue::Percent(p), 250))) if (p - 0.1).abs() < 1e-9));
+        assert!(link.send_scaled(&[0.7; Axis::COUNT], &clamps, 100, &on, 1.0, None).unwrap());
+        assert!(matches!(rx.try_recv(), Ok(DevCmd::Output(0, ClientDeviceOutputCommand::HwPositionWithDuration(ClientDeviceCommandValue::Percent(p), d))) if (p - 0.7).abs() < 1e-9 && d >= 100));
     }
 
     #[test]

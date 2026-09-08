@@ -551,7 +551,7 @@ impl ParamSource {
             }),
             "audio" => bp_core::ParamSource::Audio,
             "detection" => {
-                let mut mask = 0u8;
+                let mut mask = 0u16;
                 for id in self.kinds.iter().flatten() {
                     let kind = bp_core::DetectKind::from_id(id)
                         .ok_or_else(|| err(format!("unknown detection kind {id}")))?;
@@ -2133,6 +2133,17 @@ impl Engine {
             })
             .transpose()?;
         Ok(self.inner.set_output_vibration(id, vibration))
+    }
+
+
+
+
+    #[napi]
+    pub fn set_output_delay(&self, id: u32, ms: f64) -> Result<bool> {
+        if !ms.is_finite() {
+            return Err(err("delay must be finite".into()));
+        }
+        Ok(self.inner.set_output_delay(id, ms.clamp(-5000.0, 5000.0)))
     }
 
 

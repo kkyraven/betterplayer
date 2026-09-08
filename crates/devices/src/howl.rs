@@ -626,6 +626,7 @@ mod tests {
             stop_on_pause: true,
             estim_volume: crate::ramp::VolumeSettings::default(),
             media_ms,
+            stroke_next: None,
             playing: !paused,
             rate: 1.0,
             interval_ms: 10,

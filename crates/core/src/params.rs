@@ -14,14 +14,14 @@ pub struct Hold {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DetectionSource {
 
-    pub kinds: u8,
+    pub kinds: u16,
 
     pub bias: f64,
     pub hold: Option<Hold>,
 }
 
 impl DetectionSource {
-    pub fn new(kinds: u8) -> DetectionSource {
+    pub fn new(kinds: u16) -> DetectionSource {
         DetectionSource {
             kinds,
             bias: 0.0,
@@ -116,7 +116,8 @@ mod tests {
 
     #[test]
     fn coverage_sums_the_chosen_kinds() {
-        let per = [0.2, 0.5, 0.0, 0.9, 0.0, 0.0];
+        let mut per = [0.0; Kind::COUNT];
+        per[..4].copy_from_slice(&[0.2, 0.5, 0.0, 0.9]);
         assert!((DetectionSource::new(0b11).coverage(&per) - 0.7).abs() < 1e-9);
         assert_eq!(
             DetectionSource::new(0b1011).coverage(&per),

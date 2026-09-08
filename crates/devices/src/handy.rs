@@ -52,7 +52,10 @@ impl Default for Endpoints {
 
 enum Cmd {
 
-    Setup(Vec<u8>),
+    Setup {
+        generation: u64,
+        bytes: Vec<u8>,
+    },
     Play {
         media_ms: f64,
         rate: f64,
@@ -71,7 +74,7 @@ enum Cmd {
 
 enum Reply {
 
-    Ready,
+    Ready(u64),
     Log(String),
     Error(String),
 }
@@ -84,6 +87,8 @@ pub struct HandyLink {
 
     pub device: String,
     v3: bool,
+
+    generation: u64,
     ready: bool,
     playing: bool,
 
@@ -114,9 +119,15 @@ impl HandyLink {
     ) -> io::Result<HandyLink> {
         let agent: Agent = Agent::config_builder()
             .timeout_global(Some(TIMEOUT))
+            .http_status_as_error(false)
             .build()
             .into();
         let v3 = app_key.is_some();
+        if v3 && matches!(hosting, HandyHosting::Lan) {
+            return Err(io::Error::other(
+                "Handy API v3 requires cloud script hosting",
+            ));
+        }
         let mut api = Api {
             agent,
             base: if v3 { ep.v3.clone() } else { ep.v2.clone() },
@@ -141,6 +152,7 @@ impl HandyLink {
             reply,
             device,
             v3,
+            generation: 0,
             ready: false,
             playing: false,
             play_ms: 0.0,
@@ -158,9 +170,11 @@ impl HandyLink {
         let mut logs = Vec::new();
         loop {
             match self.reply.try_recv() {
-                Ok(Reply::Ready) => {
-                    self.ready = true;
-                    self.playing = false;
+                Ok(Reply::Ready(generation)) => {
+                    if generation == self.generation {
+                        self.ready = true;
+                        self.playing = false;
+                    }
                 }
                 Ok(Reply::Log(line)) => logs.push(line),
                 Ok(Reply::Error(e)) => return Err(e),
@@ -172,13 +186,17 @@ impl HandyLink {
 
 
     pub fn set_stroke(&mut self, script: Option<&Script>) {
+        self.generation = self.generation.wrapping_add(1);
         self.ready = false;
         if self.playing {
             self.playing = false;
             self.send(Cmd::Stop);
         }
         if let Some(script) = script.filter(|s| !s.is_empty()) {
-            self.send(Cmd::Setup(funscript_json(script).into_bytes()));
+            self.send(Cmd::Setup {
+                generation: self.generation,
+                bytes: script_csv(script).into_bytes(),
+            });
         }
     }
 
@@ -186,11 +204,14 @@ impl HandyLink {
 
     pub fn tick(&mut self, ctx: &TickContext, clamps: &[AxisClamp; Axis::COUNT]) {
         let c = clamps[Axis::L0.index()];
-        let slide = if c.enabled {
-            (c.min, c.max)
-        } else {
-            (0.0, 1.0)
-        };
+        if !c.enabled {
+            if self.playing {
+                self.playing = false;
+                self.send(Cmd::Stop);
+            }
+            return;
+        }
+        let slide = (c.min, c.max);
         if self.slide != Some(slide) {
             self.slide = Some(slide);
             self.send(Cmd::Slide {
@@ -259,10 +280,12 @@ fn worker(
     let mut lan: Option<LanScript> = None;
     for c in cmd {
         let done = match c {
-            Cmd::Setup(bytes) => host(&api, hosting, &upload, &bytes, &mut lan).and_then(|url| {
-                let _ = reply.send(Reply::Log(format!("script at {url}")));
-                api.setup(&url, &bytes).map(|()| Some(Reply::Ready))
-            }),
+            Cmd::Setup { generation, bytes } => host(&api, hosting, &upload, &bytes, &mut lan)
+                .and_then(|url| {
+                    let _ = reply.send(Reply::Log(format!("script at {url}")));
+                    api.setup(&url, &bytes)
+                        .map(|()| Some(Reply::Ready(generation)))
+                }),
             Cmd::Play { media_ms, rate } => api.play(media_ms, rate).map(|()| None),
             Cmd::Stop => api.stop().map(|()| None),
             Cmd::Sync { media_ms } => api.sync(media_ms).map(|()| None),
@@ -319,15 +342,15 @@ impl Api {
         match app_key {
             Some(app_key) => {
                 self.token = Some(self.issue_token(app_key)?);
-                let device = self
-                    .get("info")
-                    .map(|i| device_name(&i))
-                    .unwrap_or_else(|_| "Handy".into());
-                let time = self.get("hstp/time")?;
-                self.offset = time
-                    .get("clock_offset")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0);
+                let info = self.get("info")?;
+                if info.get("fw_status").and_then(Value::as_i64) == Some(2) {
+                    return Err(
+                        "firmware update required; update the Handy in the Handy app".into(),
+                    );
+                }
+                self.put("mode", json!({ "mode": 1 }))?;
+                self.offset = self.measure_offset()?;
+                let device = device_name(&info);
                 Ok(device)
             }
             None => {
@@ -355,15 +378,18 @@ impl Api {
 
     fn issue_token(&self, app_key: &str) -> Result<String, String> {
         let path = "auth/token/issue";
-        let url = format!("{}{path}?ttl=86400&to={}", self.base, self.key);
+        let url = format!("{}{path}", self.base);
         let res = self
             .agent
             .get(url)
+            .query("ttl", "86400")
+            .query("to", &self.key)
             .header("X-Api-Key", app_key)
             .call()
             .map_err(|e| format!("{path}: {e}"))?;
         let v = read_json(path, res)?;
-        v.get("token")
+        v.get("result")
+            .and_then(|v| v.get("token"))
             .and_then(Value::as_str)
             .map(str::to_string)
             .ok_or_else(|| format!("{path}: no token in the reply"))
@@ -378,9 +404,9 @@ impl Api {
             let v = self.get("servertime")?;
             let received = now_ms();
             let server = v
-                .get("serverTime")
+                .get(if self.v3 { "server_time" } else { "serverTime" })
                 .and_then(Value::as_f64)
-                .ok_or("servertime: no serverTime in the reply")?;
+                .ok_or("servertime: no server time in the reply")?;
             samples.push(server + (received - sent) / 2.0 - received);
         }
         Ok(trimmed_mean(samples, OFFSET_TRIM))
@@ -398,7 +424,7 @@ impl Api {
 
     fn play(&self, media_ms: f64, rate: f64) -> Result<(), String> {
         let body = if self.v3 {
-            json!({ "start_time": media_ms.round(), "server_time": self.server_ms(), "playback_rate": rate, "loop": false })
+            json!({ "start_time": media_ms.round() as u64, "server_time": self.server_ms(), "playback_rate": rate, "loop": false })
         } else {
             json!({ "estimatedServerTime": self.server_ms(), "startTime": media_ms.round() })
         };
@@ -411,7 +437,7 @@ impl Api {
 
 
     fn sync(&self, media_ms: f64) -> Result<(), String> {
-        self.put("hssp/synctime", json!({ "current_time": media_ms.round(), "server_time": self.server_ms(), "filter": 0.5 })).map(drop)
+        self.put("hssp/synctime", json!({ "current_time": media_ms.round() as u64, "server_time": self.server_ms(), "filter": 0.5 })).map(drop)
     }
 
 
@@ -421,12 +447,13 @@ impl Api {
         } else {
             json!({ "min": (min * 100.0).round(), "max": (max * 100.0).round() })
         };
-        self.put("slide", body).map(drop)
+        self.put(if self.v3 { "slider/stroke" } else { "slide" }, body)
+            .map(drop)
     }
 
 
-    fn server_ms(&self) -> f64 {
-        (now_ms() + self.offset).round()
+    fn server_ms(&self) -> u64 {
+        (now_ms() + self.offset).round() as u64
     }
 
     fn get(&self, path: &str) -> Result<Value, String> {
@@ -438,7 +465,12 @@ impl Api {
             req = req.header("Authorization", format!("Bearer {t}"));
         }
         let res = req.call().map_err(|e| format!("{path}: {e}"))?;
-        read_json(path, res)
+        let value = read_json(path, res)?;
+        Ok(if self.v3 {
+            value.get("result").cloned().unwrap_or(value)
+        } else {
+            value
+        })
     }
 
     fn put(&self, path: &str, body: Value) -> Result<Value, String> {
@@ -453,15 +485,35 @@ impl Api {
         let res = req
             .send(body.to_string())
             .map_err(|e| format!("{path}: {e}"))?;
-        read_json(path, res)
+        let value = read_json(path, res)?;
+        Ok(if self.v3 {
+            value.get("result").cloned().unwrap_or(value)
+        } else {
+            value
+        })
     }
 }
 
 fn read_json(path: &str, mut res: ureq::http::Response<ureq::Body>) -> Result<Value, String> {
+    let status = res.status();
     let body = res
         .body_mut()
         .read_to_string()
         .map_err(|e| format!("{path}: {e}"))?;
+    if !status.is_success() {
+        let value = serde_json::from_str::<Value>(&body).ok();
+        let detail = value
+            .as_ref()
+            .and_then(|v| {
+                v.get("message")
+                    .or_else(|| v.get("error").and_then(|e| e.get("message")))
+            })
+            .and_then(Value::as_str);
+        return Err(match detail {
+            Some(message) => format!("{path}: HTTP {}: {message}", status.as_u16()),
+            None => format!("{path}: HTTP {}", status.as_u16()),
+        });
+    }
     parse_body(path, &body)
 }
 
@@ -470,20 +522,28 @@ fn read_json(path: &str, mut res: ureq::http::Response<ureq::Body>) -> Result<Va
 fn parse_body(path: &str, body: &str) -> Result<Value, String> {
     let v: Value = serde_json::from_str(body).map_err(|e| format!("{path}: {e}"))?;
     match v.get("error") {
-        Some(e) => Err(format!(
+        Some(e) if !e.is_null() => Err(format!(
             "{path}: {}",
             e.get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("the Handy refused the request")
         )),
-        None => Ok(v),
+        _ => Ok(v),
     }
 }
 
 
 fn device_name(info: &Value) -> String {
-    let model = info.get("model").and_then(Value::as_str).unwrap_or("Handy");
-    let fw = info.get("fwVersion").and_then(Value::as_str).unwrap_or("");
+    let model = info
+        .get("model")
+        .or_else(|| info.get("hw_model_name"))
+        .and_then(Value::as_str)
+        .unwrap_or("Handy");
+    let fw = info
+        .get("fwVersion")
+        .or_else(|| info.get("fw_version"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
     match fw.split('.').next().filter(|major| !major.is_empty()) {
         Some(major) => format!("{model} FW{major} {fw}"),
         None => model.to_string(),
@@ -519,17 +579,14 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 
-fn funscript_json(script: &Script) -> String {
-    let mut s = String::from("{\"actions\":[");
-    for (i, a) in script.actions.iter().enumerate() {
-        if i > 0 {
-            s.push(',');
-        }
-        let pos = (a.pos * 100.0).round().clamp(0.0, 100.0) as i64;
-        let _ = write!(s, "{{\"at\":{},\"pos\":{pos}}}", a.at.round() as i64);
+
+fn script_csv(script: &Script) -> String {
+    let mut csv = String::from("\n");
+    for a in &script.actions {
+        let pos = (a.pos * 100.0).round().clamp(0.0, 100.0) as u64;
+        let _ = writeln!(csv, "{},{pos}", a.at.round() as u64);
     }
-    s.push_str("]}");
-    s
+    csv
 }
 
 
@@ -567,7 +624,7 @@ impl LanScript {
             })
             .map_err(|e| format!("script server: {e}"))?;
         Ok(LanScript {
-            url: format!("http://{}:{port}/script.funscript", lan_ip()),
+            url: format!("http://{}:{port}/script.csv", lan_ip()),
             stop,
         })
     }
@@ -593,7 +650,7 @@ fn serve(mut stream: TcpStream, bytes: &[u8]) {
         }
     }
     let head = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         bytes.len()
     );
     let _ = stream.write_all(head.as_bytes());
@@ -616,7 +673,7 @@ fn lan_ip() -> String {
 fn upload_script(agent: &Agent, url: &str, bytes: &[u8]) -> Result<String, String> {
     let boundary = format!("----betterplayer{:x}", now_ms() as u64);
     let mut body = format!(
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"script.funscript\"\r\nContent-Type: application/json\r\n\r\n"
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"script.csv\"\r\nContent-Type: text/csv\r\n\r\n"
     )
     .into_bytes();
     body.extend_from_slice(bytes);
@@ -699,7 +756,7 @@ mod tests {
         fn endpoints(&self) -> Endpoints {
             Endpoints {
                 v2: self.base.clone(),
-                v3: self.base.clone(),
+                v3: format!("{}v3/", self.base),
                 upload: format!("{}upload", self.base),
             }
         }
@@ -764,9 +821,13 @@ mod tests {
                 .map_or((target.clone(), String::new()), |(p, q)| {
                     (p.to_string(), q.to_string())
                 });
-            let reply = canned(
+            let v3 = path.starts_with("v3/");
+            let path = path.strip_prefix("v3/").unwrap_or(&path).to_string();
+            let (status, reply) = canned(
                 &path,
                 &query,
+                v3,
+                &body,
                 headers.get("x-connection-key").map_or("", String::as_str),
             );
             seen.lock().unwrap().push(Req {
@@ -776,7 +837,7 @@ mod tests {
                 body: String::from_utf8_lossy(&body).to_string(),
             });
             let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
                 reply.len()
             );
             if stream.write_all(head.as_bytes()).is_err()
@@ -830,26 +891,83 @@ mod tests {
     }
 
 
-    fn canned(path: &str, query: &str, key: &str) -> String {
-        match path {
-            "connected" => json!({ "connected": true }).to_string(),
+    fn canned(path: &str, query: &str, v3: bool, body: &[u8], key: &str) -> (&'static str, String) {
+        let payload = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+        let bad = |message: &str| ("400 Bad Request", json!({ "message": message }).to_string());
+        let value = match path {
+            "connected" => json!({ "connected": true }),
+            "info" if v3 => {
+                json!({ "fw_status": if key == "OLDFW" { 2 } else { 0 }, "fw_version": "4.0.1", "hw_model_name": "H01" })
+            }
             "info" => {
-                let status = if key == "OLDFW" { 1 } else { 0 };
-                json!({ "fwVersion": "3.2.4", "fwStatus": status, "model": "Handy", "hwVersion": 3 }).to_string()
+                json!({ "fwVersion": "3.2.4", "fwStatus": if key == "OLDFW" { 1 } else { 0 }, "model": "Handy", "hwVersion": 3 })
             }
-            "servertime" => json!({ "serverTime": now_ms().round() + 5_000.0 }).to_string(),
-            "hstp/time" => {
-                json!({ "time": now_ms().round(), "clock_offset": 7.0, "rtd": 40 }).to_string()
+            "servertime" => {
+                return (
+                    "200 OK",
+                    if v3 {
+                        json!({ "server_time": now_ms() as u64 + 5000 })
+                    } else {
+                        json!({ "serverTime": now_ms() as u64 + 5000 })
+                    }
+                    .to_string(),
+                );
             }
-            "auth/token/issue" => {
-                json!({ "token": format!("tok-{query}"), "renew": "" }).to_string()
-            }
+            "auth/token/issue" if v3 => json!({ "token": format!("tok-{query}"), "renew": "" }),
             "upload" => {
-                json!({ "success": true, "url": "https://handyfeeling.com/scripts/abc.funscript" })
-                    .to_string()
+                json!({ "success": true, "url": "https://handyfeeling.com/scripts/abc.csv" })
             }
-            _ => json!({ "result": 1 }).to_string(),
-        }
+            "slider/stroke" if v3 => {
+                if !["min", "max"].iter().all(|field| {
+                    payload[field]
+                        .as_f64()
+                        .is_some_and(|n| (0.0..=1.0).contains(&n))
+                }) {
+                    return bad("Stroke limits must be between 0 and 1");
+                }
+                payload
+            }
+            "slide" if !v3 => {
+                if key == "BADSLIDE" {
+                    return bad("Invalid connection key or channel reference");
+                }
+                if !["min", "max"].iter().all(|field| {
+                    payload[field]
+                        .as_f64()
+                        .is_some_and(|n| (0.0..=100.0).contains(&n))
+                }) {
+                    return bad("Slide limits must be between 0 and 100");
+                }
+                json!({ "result": 0 })
+            }
+            "hssp/play" | "hssp/synctime" if v3 => {
+                let field = if path == "hssp/play" {
+                    "start_time"
+                } else {
+                    "current_time"
+                };
+                if payload[field].as_u64().is_none() || payload["server_time"].as_u64().is_none() {
+                    return bad("Times must be nonnegative integers");
+                }
+                json!({ "state": 1 })
+            }
+            "mode" | "hssp/setup" | "hssp/play" | "hssp/stop" => json!({ "result": 1 }),
+            _ => {
+                return (
+                    "404 Not Found",
+                    json!({ "message": "Unknown endpoint" }).to_string(),
+                );
+            }
+        };
+        (
+            "200 OK",
+            if v3 {
+                json!({ "result": value })
+            } else {
+                value
+            }
+            .to_string(),
+        )
     }
 
     fn clamps() -> [AxisClamp; Axis::COUNT] {
@@ -863,6 +981,7 @@ mod tests {
             stop_on_pause: true,
             estim_volume: crate::ramp::VolumeSettings::default(),
             media_ms,
+            stroke_next: None,
             playing: !paused,
             rate: 1.0,
             interval_ms: 10,
@@ -871,6 +990,168 @@ mod tests {
 
     fn script() -> Script {
         Script::parse(r#"{"actions":[{"at":0,"pos":0},{"at":500,"pos":100}]}"#).unwrap()
+    }
+
+    fn controlled_link(v3: bool) -> (HandyLink, Receiver<Cmd>, Sender<Reply>) {
+        let (cmd, commands) = channel();
+        let (replies, reply) = channel();
+        let now = Instant::now();
+        let link = HandyLink {
+            cmd,
+            reply,
+            device: "Handy test".into(),
+            v3,
+            generation: 0,
+            ready: false,
+            playing: false,
+            play_ms: 0.0,
+            play_at: now,
+            rate: 1.0,
+            slide: None,
+            last_sync: now,
+            sync_every: Duration::ZERO,
+        };
+        (link, commands, replies)
+    }
+
+    fn setup_reply(commands: &Receiver<Cmd>) -> Reply {
+        match commands.try_recv().unwrap() {
+            Cmd::Setup { generation, .. } => Reply::Ready(generation),
+            _ => panic!("expected script setup"),
+        }
+    }
+
+    #[test]
+    fn clearing_the_script_ignores_a_delayed_setup_reply() {
+        let empty = Script::parse(r#"{"actions":[]}"#).unwrap();
+        for next in [None, Some(&empty)] {
+            let (mut link, commands, replies) = controlled_link(false);
+            link.set_stroke(Some(&script()));
+            let delayed = setup_reply(&commands);
+            link.set_stroke(next);
+            replies.send(delayed).unwrap();
+            link.poll().unwrap();
+            link.tick(&ctx(4_000.0, false), &clamps());
+            assert!(!link.ready);
+            assert!(!link.playing);
+            assert!(
+                commands
+                    .try_iter()
+                    .all(|cmd| matches!(cmd, Cmd::Slide { .. }))
+            );
+        }
+    }
+
+    #[test]
+    fn replacing_the_script_waits_for_its_own_setup_reply() {
+        let (mut link, commands, replies) = controlled_link(false);
+        link.set_stroke(Some(&script()));
+        let old = setup_reply(&commands);
+        let replacement = Script::parse(r#"{"actions":[{"at":0,"pos":50}]}"#).unwrap();
+        link.set_stroke(Some(&replacement));
+        let current = setup_reply(&commands);
+        replies.send(old).unwrap();
+        link.poll().unwrap();
+        link.tick(&ctx(4_000.0, false), &clamps());
+        assert!(!link.ready);
+        assert!(!link.playing);
+        assert!(
+            commands
+                .try_iter()
+                .all(|cmd| matches!(cmd, Cmd::Slide { .. }))
+        );
+
+        replies.send(current).unwrap();
+        link.poll().unwrap();
+        link.tick(&ctx(8_000.0, false), &clamps());
+        assert!(link.ready);
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Cmd::Play {
+                media_ms: 8_000.0,
+                ..
+            }
+        ));
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn disabling_stroke_stops_without_resetting_limits_and_resumes_at_current_time() {
+        for v3 in [false, true] {
+            let (mut link, commands, replies) = controlled_link(v3);
+            link.set_stroke(Some(&script()));
+            replies.send(setup_reply(&commands)).unwrap();
+            link.poll().unwrap();
+            let mut limits = clamps();
+            limits[Axis::L0.index()] = AxisClamp {
+                enabled: true,
+                min: 0.2,
+                max: 0.8,
+            };
+            link.tick(&ctx(4_000.0, false), &limits);
+            assert!(matches!(
+                commands.try_recv().unwrap(),
+                Cmd::Slide { min: 0.2, max: 0.8 }
+            ));
+            assert!(matches!(commands.try_recv().unwrap(), Cmd::Play { .. }));
+
+            limits[Axis::L0.index()].enabled = false;
+            link.tick(&ctx(4_100.0, false), &limits);
+            assert!(matches!(commands.try_recv().unwrap(), Cmd::Stop));
+            assert!(!link.playing);
+            assert!(link.ready);
+            link.tick(&ctx(8_000.0, false), &limits);
+            assert!(commands.try_recv().is_err());
+            assert_eq!(link.slide, Some((0.2, 0.8)));
+
+            limits[Axis::L0.index()].enabled = true;
+            link.tick(&ctx(9_000.0, true), &limits);
+            assert!(commands.try_recv().is_err());
+            link.tick(&ctx(9_000.0, false), &limits);
+            assert!(matches!(
+                commands.try_recv().unwrap(),
+                Cmd::Play {
+                    media_ms: 9_000.0,
+                    ..
+                }
+            ));
+            assert!(commands.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn setup_finishing_while_stroke_is_disabled_does_not_start_playback() {
+        let (mut link, commands, replies) = controlled_link(true);
+        link.set_stroke(Some(&script()));
+        let delayed = setup_reply(&commands);
+        let mut limits = clamps();
+        limits[Axis::L0.index()].enabled = false;
+        link.tick(&ctx(4_000.0, false), &limits);
+        replies.send(delayed).unwrap();
+        link.poll().unwrap();
+        link.tick(&ctx(8_000.0, false), &limits);
+        assert!(link.ready);
+        assert!(!link.playing);
+        assert!(commands.try_recv().is_err());
+
+        limits[Axis::L0.index()] = AxisClamp {
+            enabled: true,
+            min: 0.3,
+            max: 0.7,
+        };
+        link.tick(&ctx(9_000.0, false), &limits);
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Cmd::Slide { min: 0.3, max: 0.7 }
+        ));
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Cmd::Play {
+                media_ms: 9_000.0,
+                ..
+            }
+        ));
+        assert!(commands.try_recv().is_err());
     }
 
 
@@ -962,10 +1243,10 @@ mod tests {
         let body: Value = serde_json::from_str(&mock.last("hssp/setup").body).unwrap();
         let url = body["url"].as_str().unwrap();
         assert!(
-            url.starts_with("http://") && url.ends_with("/script.funscript"),
+            url.starts_with("http://") && url.ends_with("/script.csv"),
             "{url}"
         );
-        let expected = sha256_hex(funscript_json(&script()).as_bytes());
+        let expected = sha256_hex(script_csv(&script()).as_bytes());
         assert_eq!(body["sha256"].as_str().unwrap(), expected);
 
         run(&mut link, &mock, "slide", 1, Some(0.0), true);
@@ -991,7 +1272,18 @@ mod tests {
             (ahead - 5_000.0).abs() < 500.0,
             "estimated server time {ahead} ms ahead"
         );
-        assert_eq!(mock.last("upload").method, "POST");
+        let upload = mock.last("upload");
+        assert_eq!(upload.method, "POST");
+        assert!(upload.body.contains("filename=\"script.csv\""));
+        assert!(upload.body.contains(&format!(
+            "Content-Type: text/csv\r\n\r\n{}",
+            script_csv(&script())
+        )));
+        let setup: Value = serde_json::from_str(&mock.last("hssp/setup").body).unwrap();
+        assert_eq!(
+            setup["sha256"],
+            sha256_hex(script_csv(&script()).as_bytes())
+        );
 
         run(&mut link, &mock, "hssp/stop", 1, Some(4_100.0), true);
         run(&mut link, &mock, "hssp/play", 2, Some(60_000.0), false);
@@ -1016,7 +1308,9 @@ mod tests {
         link.sync_every = Duration::from_millis(20);
         let issue = mock.last("auth/token/issue");
         assert_eq!(issue.headers.get("x-api-key").unwrap(), "APPKEY");
-        assert_eq!(mock.paths()[..3], ["auth/token/issue", "info", "hstp/time"]);
+        assert_eq!(mock.paths()[..3], ["auth/token/issue", "info", "mode"]);
+        assert_eq!(link.device, "H01 FW4 4.0.1");
+
         assert_eq!(
             mock.last("info").headers.get("authorization").unwrap(),
             "Bearer tok-ttl=86400&to=KEY"
@@ -1027,10 +1321,17 @@ mod tests {
         let setup: Value = serde_json::from_str(&mock.last("hssp/setup").body).unwrap();
         assert_eq!(
             setup["url"].as_str(),
-            Some("https://handyfeeling.com/scripts/abc.funscript")
+            Some("https://handyfeeling.com/scripts/abc.csv")
         );
         assert!(setup.get("sha256").is_none());
         let play: Value = serde_json::from_str(&mock.last("hssp/play").body).unwrap();
+        let ahead = play["server_time"].as_u64().unwrap() as f64 - now_ms();
+        assert!(
+            (ahead - 5000.0).abs() < 500.0,
+            "server time {ahead} ms ahead"
+        );
+        assert_eq!(mock.count("slide"), 0);
+        assert_eq!(mock.count("slider/stroke"), 1);
         assert_eq!(
             (
                 play["start_time"].as_f64(),
@@ -1049,15 +1350,87 @@ mod tests {
     }
 
     #[test]
-    fn actions_serialise_as_a_funscript_the_lan_server_hands_out() {
-        let s = Script::parse(r#"{"actions":[{"at":0.4,"pos":0},{"at":250,"pos":99.6}]}"#).unwrap();
-        let json = funscript_json(&s);
-        assert_eq!(
-            json,
-            r#"{"actions":[{"at":0,"pos":0},{"at":250,"pos":100}]}"#
-        );
+    fn stroke_limits_use_each_api_contract_and_are_only_sent_when_changed() {
+        for app_key in [None, Some("APPKEY")] {
+            let mock = Mock::start();
+            let mut link =
+                HandyLink::connect_to("KEY", app_key, HandyHosting::Cloud, mock.endpoints())
+                    .unwrap();
+            let path = if app_key.is_some() {
+                "slider/stroke"
+            } else {
+                "slide"
+            };
+            run(&mut link, &mock, path, 1, Some(0.0), true);
+            let mut limits = clamps();
+            limits[Axis::L0.index()] = AxisClamp {
+                enabled: true,
+                min: 0.2,
+                max: 0.8,
+            };
+            link.tick(&ctx(0.0, true), &limits);
 
-        let server = LanScript::start(json.clone().into_bytes()).unwrap();
+            link.send(Cmd::Stop);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while mock.count("hssp/stop") == 0 {
+                link.poll().unwrap();
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(5));
+            }
+            let body: Value = serde_json::from_str(&mock.last(path).body).unwrap();
+            let scale = if app_key.is_some() { 1.0 } else { 100.0 };
+            assert_eq!(body, json!({ "min": 0.2 * scale, "max": 0.8 * scale }));
+            link.tick(&ctx(0.0, true), &limits);
+            link.send(Cmd::Stop);
+            while mock.count("hssp/stop") < 2 {
+                link.poll().unwrap();
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(mock.count(path), 2);
+        }
+    }
+
+    #[test]
+    fn http_errors_preserve_the_server_explanation_and_remain_fatal() {
+        let mock = Mock::start();
+        let mut link =
+            HandyLink::connect_to("BADSLIDE", None, HandyHosting::Cloud, mock.endpoints()).unwrap();
+        link.tick(&ctx(0.0, true), &clamps());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let error = loop {
+            if let Err(error) = link.poll() {
+                break error;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(
+            error,
+            "slide: HTTP 400: Invalid connection key or channel reference"
+        );
+    }
+
+    #[test]
+    fn v3_rejects_old_firmware_and_private_script_hosting() {
+        let mock = Mock::start();
+        for (key, hosting, expected) in [
+            ("OLDFW", HandyHosting::Cloud, "firmware update required"),
+            ("KEY", HandyHosting::Lan, "requires cloud script hosting"),
+        ] {
+            let error = HandyLink::connect_to(key, Some("APPKEY"), hosting, mock.endpoints())
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+    #[test]
+    fn actions_serialise_as_csv_the_lan_server_hands_out() {
+        let s = Script::parse(r#"{"actions":[{"at":0.4,"pos":0},{"at":250,"pos":99.6}]}"#).unwrap();
+        let csv = script_csv(&s);
+        assert_eq!(csv, "\n0,0\n250,100\n");
+
+        let server = LanScript::start(csv.clone().into_bytes()).unwrap();
         let port = server
             .url
             .rsplit(':')
@@ -1069,12 +1442,12 @@ mod tests {
             .to_string();
         let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
         stream
-            .write_all(b"GET /script.funscript HTTP/1.1\r\nHost: x\r\n\r\n")
+            .write_all(b"GET /script.csv HTTP/1.1\r\nHost: x\r\n\r\n")
             .unwrap();
         let mut got = String::new();
         stream.read_to_string(&mut got).unwrap();
         assert!(got.starts_with("HTTP/1.1 200 OK"), "{got}");
-        assert!(got.contains("Content-Type: application/json"), "{got}");
-        assert!(got.ends_with(&json), "{got}");
+        assert!(got.contains("Content-Type: text/csv"), "{got}");
+        assert!(got.ends_with(&csv), "{got}");
     }
 }

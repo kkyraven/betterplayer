@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use bp_axes::{AxisSettings, Fallback, Frame, Mixer, ScriptTable};
 use bp_devices::{
     AxisClamp, IntifaceServer, IntifaceStatus, Media, OpenShockTrigger, Output, OutputSnapshot,
-    OutputStats, Pace, PercentilesUs, Profile, TickContext, Transport, Vibration, deadline,
+    Keyframe, OutputStats, Pace, PercentilesUs, Profile, TickContext, Transport, Vibration, deadline,
     percentiles,
 };
 use bp_player::{Player, PlayerEvent, PlayerOptions};
@@ -554,6 +554,35 @@ fn push_sample(q: &mut VecDeque<u32>, v: u32) {
 }
 
 
+struct Mixed {
+    at: Instant,
+    frame: Frame,
+    driven: [bool; Axis::COUNT],
+}
+
+
+
+struct History {
+    frames: VecDeque<Mixed>,
+    expected_ms: f64,
+    lead: f64,
+}
+
+
+const JUMP_MS: f64 = 100.0;
+
+const DELAY_MAX_MS: f64 = 5000.0;
+
+
+fn frame_back(history: &VecDeque<Mixed>, now: Instant, delay: Duration) -> Option<&Mixed> {
+    history
+        .iter()
+        .rev()
+        .find(|m| now.duration_since(m.at) >= delay)
+        .or_else(|| history.front())
+}
+
+
 
 struct Published {
     values: Frame,
@@ -567,6 +596,9 @@ struct Shared {
     browser_clock: Mutex<Clock>,
     mixer: Mutex<Mixer>,
     outputs: Mutex<Vec<Output>>,
+
+
+    history: Mutex<History>,
 
     scripts: Mutex<Vec<(Axis, Arc<Script>)>>,
 
@@ -687,6 +719,7 @@ impl Engine {
             browser_clock: Mutex::new(Clock::new()),
             mixer: Mutex::new(Mixer::new()),
             outputs: Mutex::new(Vec::new()),
+            history: Mutex::new(History { frames: VecDeque::new(), expected_ms: 0.0, lead: 0.0 }),
             scripts: Mutex::new(Vec::new()),
             generated: Mutex::new(Vec::new()),
             pool: Mutex::new(Vec::new()),
@@ -1794,6 +1827,21 @@ impl Engine {
     }
 
 
+
+
+    pub fn set_output_delay(&self, id: u32, ms: f64) -> bool {
+        if !ms.is_finite() {
+            return false;
+        }
+        let ms = ms.clamp(-DELAY_MAX_MS, DELAY_MAX_MS);
+        let mut outputs = self.shared.outputs.lock().unwrap();
+        outputs
+            .iter_mut()
+            .find(|o| o.id == id)
+            .is_some_and(|o| o.set_delay(ms))
+    }
+
+
     pub fn set_output_feature_axis(&self, id: u32, feature: u32, axis: Option<Axis>) -> bool {
         let mut outputs = self.shared.outputs.lock().unwrap();
         outputs
@@ -2736,10 +2784,31 @@ impl Shared {
 
 
 
+
+
+
+        let video_ms = media_ms;
+        let mut delays: Vec<f64> = if playing {
+            self.outputs.lock().unwrap().iter().filter(|o| o.connected()).map(|o| o.delay_ms).collect()
+        } else {
+            Vec::new()
+        };
+        delays.sort_by(f64::total_cmp);
+        delays.dedup();
+        let (earliest, latest) = delays.iter().fold((0.0_f64, 0.0_f64), |(lo, hi), d| (lo.min(*d), hi.max(*d)));
+        let lead = -earliest;
+        let media_ms = video_ms + lead * rate;
+
+
+
+
         let tracking = self.timeline.lock().unwrap().active;
 
         let stroke_row = tracking.then(|| self.track_axes.lock().unwrap()[Axis::L0.index()]);
         let stroke_source = stroke_row.map(|r| r.source);
+
+
+        let mut from_live = [false; Axis::COUNT];
         let tracked: Option<[Option<f64>; Axis::COUNT]> = tracking.then(|| {
             let axes = *self.track_axes.lock().unwrap();
             let offsets: [f64; Axis::COUNT] = {
@@ -2760,18 +2829,21 @@ impl Shared {
 
 
                 if a.source == TrackSource::AiMotion && model {
-                    let scored = lookahead
+                    let ahead = lookahead
                         .as_ref()
-                        .and_then(|l| l.model_value_at(media_ms - offsets[i]))
-                        .or_else(|| model_tl.value_at(now, offsets[i]));
-                    if let Some(m) = scored {
+                        .and_then(|l| l.model_value_at(media_ms - offsets[i]));
+                    let live = ahead.is_none();
+                    if let Some(m) = ahead.or_else(|| model_tl.value_at(now, offsets[i])) {
+                        from_live[i] = live;
                         return m[c.index()].is_finite().then(|| a.map(m[c.index()]));
                     }
                 }
-                let motion = lookahead
+                let ahead = lookahead
                     .as_ref()
-                    .and_then(|l| l.value_at(media_ms - offsets[i]))
-                    .or_else(|| tl.value_at(now, offsets[i]))?;
+                    .and_then(|l| l.value_at(media_ms - offsets[i]));
+                let live = ahead.is_none();
+                let motion = ahead.or_else(|| tl.value_at(now, offsets[i]))?;
+                from_live[i] = live;
                 Some(a.map(motion[c.index()]))
             })
         });
@@ -2835,7 +2907,7 @@ impl Shared {
         } else {
             Vec::new()
         };
-        let (frame, driven, flags) = {
+        let (frame, driven, flags, keyframes) = {
             let mut mixer = self.mixer.lock().unwrap();
             for axis in Axis::ALL {
                 mixer.set_script_effect(axis, effects[axis.index()]);
@@ -2874,6 +2946,7 @@ impl Shared {
                     _ => remote,
                 };
                 mixer.set_source(Axis::L0, value);
+                from_live[Axis::L0.index()] = true;
             }
             let frame = mixer.tick(media_ms, t.dt_ms);
             let flags: [u8; Axis::COUNT] = std::array::from_fn(|i| {
@@ -2883,7 +2956,30 @@ impl Shared {
                     | (mixer.is_live(a) as u8 * FLAG_LIVE)
                     | (mixer.has_external(a) as u8 * FLAG_TRACKED)
             });
-            (frame, *mixer.driven(), flags)
+
+
+            for i in (0..Axis::COUNT)
+                .filter(|i| flags[*i] & FLAG_TRACKED != 0 && track_component(Axis::ALL[*i]).is_none())
+            {
+                from_live[i] = from_live[Axis::L0.index()];
+            }
+
+
+
+            let keyframes: Vec<(f64, Option<Keyframe>)> = delays
+                .iter()
+                .filter(|_| rate > 0.0)
+                .map(|d| {
+                    let at = video_ms - d * rate;
+                    let k = mixer.next_keyframe(Axis::L0, at).map(|k| Keyframe {
+                        at_ms: k.at,
+                        pos: k.pos,
+                        in_ms: ((k.at - at) / rate).max(0.0),
+                    });
+                    (*d, k)
+                })
+                .collect();
+            (frame, *mixer.driven(), flags, keyframes)
         };
 
 
@@ -2899,18 +2995,11 @@ impl Shared {
             }
             d
         };
-        {
-            let mut p = self.published.lock().unwrap();
-            p.values = frame;
-            if p.flags != flags {
-                p.flags = flags;
-                p.version += 1;
-            }
-        }
         let estim_volume = estim_with_override(*self.estim_volume.lock().unwrap(), estim_max, estim_max_relative);
         let ctx = TickContext {
             manual_axes: std::array::from_fn(|i| flags[i] & (FLAG_LIVE | FLAG_TRACKED) != 0),
-            media_ms,
+            media_ms: video_ms,
+            stroke_next: None,
             playing,
             estim_manual: [Axis::EA, Axis::EB, Axis::EV, Axis::E1, Axis::E2, Axis::E3, Axis::E4]
                 .into_iter().any(|a| flags[a.index()] & FLAG_LIVE != 0 && driven[a.index()]),
@@ -2919,16 +3008,60 @@ impl Shared {
             rate,
             interval_ms: ((t.dt_ms + 0.75).floor() as u32).clamp(1, 100),
         };
-        let (connected, wrote) = {
+        let (connected, wrote, shown) = {
             let mut outputs = self.outputs.lock().unwrap();
             let (mut connected, mut wrote) = (false, false);
+            let mut h = self.history.lock().unwrap();
+
+
+            if (video_ms - h.expected_ms).abs() > JUMP_MS || h.lead != lead {
+                h.frames.clear();
+            }
+            h.expected_ms = video_ms + if playing { t.dt_ms * rate } else { 0.0 };
+            h.lead = lead;
+            h.frames.push_back(Mixed { at: t.fired, frame, driven });
+            let keep = Duration::from_secs_f64((latest - earliest) / 1000.0 + 0.05);
+            while h.frames.front().is_some_and(|m| t.fired.duration_since(m.at) > keep) {
+                h.frames.pop_front();
+            }
+            let back = |delay: f64| {
+                (delay > 0.0)
+                    .then(|| frame_back(&h.frames, t.fired, Duration::from_secs_f64(delay / 1000.0)))
+                    .flatten()
+            };
             for o in outputs.iter_mut() {
                 o.poll();
                 connected |= o.connected();
-                wrote |= o.send(&frame, &driven, &ctx);
+
+                let stroke_next = keyframes.iter().find(|(d, _)| *d == o.delay_ms).and_then(|(_, k)| *k);
+                let ctx = TickContext { stroke_next, ..ctx };
+                wrote |= match back(o.delay_ms - earliest) {
+                    Some(m) => {
+
+
+
+                        let (mut f, mut d) = (m.frame, m.driven);
+                        for i in (0..Axis::COUNT).filter(|i| flags[*i] & FLAG_LIVE != 0 || (flags[*i] & FLAG_TRACKED != 0 && from_live[*i])) {
+                            f[i] = frame[i];
+                            d[i] = driven[i];
+                        }
+                        o.send(&f, &d, &ctx)
+                    }
+                    None => o.send(&frame, &driven, &ctx),
+                };
             }
-            (connected, wrote)
+
+            let shown = back(lead).map_or(frame, |m| m.frame);
+            (connected, wrote, shown)
         };
+        {
+            let mut p = self.published.lock().unwrap();
+            p.values = shown;
+            if p.flags != flags {
+                p.flags = flags;
+                p.version += 1;
+            }
+        }
         let mut s = self.tick.lock().unwrap();
         s.realtime = t.realtime;
         if t.pace == Pace::Precise {
@@ -3140,6 +3273,21 @@ mod tests {
 
     use super::*;
     use std::fs;
+
+    #[test]
+    fn frame_back_picks_the_newest_frame_old_enough() {
+        let start = Instant::now();
+        let mixed = |ms: u64| Mixed { at: start + Duration::from_millis(ms), frame: [ms as f64; Axis::COUNT], driven: [false; Axis::COUNT] };
+        let history: VecDeque<Mixed> = (0..=5).map(|i| mixed(i * 10)).collect();
+        let now = start + Duration::from_millis(50);
+        let at = |delay| frame_back(&history, now, Duration::from_millis(delay)).map(|m| m.frame[0]);
+        assert_eq!(at(0), Some(50.0));
+        assert_eq!(at(25), Some(20.0));
+        assert_eq!(at(30), Some(20.0));
+
+        assert_eq!(at(500), Some(0.0));
+        assert_eq!(frame_back(&VecDeque::new(), now, Duration::ZERO).map(|m| m.frame[0]), None);
+    }
 
     #[test]
     fn generated_scripts_replace_the_files_on_their_axes_only() {
