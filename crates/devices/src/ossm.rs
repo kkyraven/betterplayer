@@ -1,3 +1,16 @@
+//! The OSSM (KinkyMakers) over its firmware's BLE service. `go:streaming` puts the machine
+//! in streaming mode, then `stream:<pos>:<ms>` lines carry the stroke as a percent of the
+//! calibrated travel and the time to get there; the firmware plans each move within its
+//! speed and acceleration limits. It reports its state machine as JSON on a notify
+//! characteristic. The physical speed knob stays the master speed limit: it must be at zero
+//! to enter streaming (the firmware's preflight) and turned up after, which the status
+//! shown in the app says.
+//!
+//! The firmware queues stream lines and caps each move's distance by its acceleration over
+//! the square of half the move's time, so a 50 ms sample barely moves the carriage. While a
+//! script drives the stroke each keyframe goes out once as one move over the time until it;
+//! samples only fill in for a live stroke or a paused one.
+
 use std::fmt::Write as _;
 use std::io;
 use std::time::{Duration, Instant};
@@ -5,31 +18,31 @@ use std::time::{Duration, Instant};
 use crate::ble::{BleConn, OSSM_COMMAND, OSSM_SERVICE, OSSM_STATE};
 use crate::output::{CONNECT_GLIDE_MS, Keyframe};
 
-
-
+/// Stream lines are spaced at least this far apart. Longer moves suit the firmware's
+/// planner: the distance it allows per move grows with the square of the move's time.
 pub const LINE_MS: u32 = 50;
-
-
+/// A keyframe already sent goes again when its arrival moved by more than this (a seek
+/// within its segment, a rate change), not for tick jitter.
 const KEYFRAME_SLIP: Duration = Duration::from_millis(40);
-
-
-
+/// Settings sent whenever a streaming session starts: our stream positions span the whole
+/// calibrated travel (the output's range clamps it), the machine's own speed limit is the
+/// knob alone, and acceleration is unrestricted so moves track their timing.
 const SESSION_SETTINGS: [&str; 4] = ["set:speed:100", "set:stroke:100", "set:depth:100", "set:sensation:100"];
 
-
+/// What the firmware last reported, for the UI.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct OssmStatus {
-
-
+    /// The firmware's state: `streaming.idle`, `streaming.preflight`, `homing.forward`,
+    /// `menu.idle` and so on.
     pub state: String,
-
+    /// Effective speed 0..100: the knob, scaled by the `set:speed` we send.
     pub speed: u8,
-
+    /// Where the carriage is, in mm from home.
     pub position_mm: f64,
 }
 
 impl OssmStatus {
-
+    /// Whether stream lines move the machine now.
     pub fn streaming(&self) -> bool {
         self.state == "streaming.idle"
     }
@@ -38,35 +51,35 @@ impl OssmStatus {
 pub struct OssmLink {
     conn: BleConn,
     pub status: OssmStatus,
-
+    /// The streaming session the settings went to; the firmware resets them on every new one.
     configured: Option<String>,
-
-
-
-
+    /// Whether `go:streaming` has gone out on this connection. Once only: a long press on the
+    /// machine is an emergency stop back to its menu, and the app must not start it again
+    /// (streaming begins with homing, which moves the carriage). A new connection (the app
+    /// starting, the output added, a BLE drop) arms again: connecting is the user's choice.
     armed: bool,
-
-
+    /// Last position sent this session, so an unchanged stroke sends nothing. Never repeat
+    /// a position: the firmware divides by the distance to find the move's direction.
     last: Option<u8>,
-
+    /// The keyframe last sent (its video time) and when the machine was told to arrive.
     keyframe: Option<(f64, Instant)>,
     last_line_at: Option<Instant>,
-
-
+    /// When `send` last had a chance to write, so a line's time is the spacing of lines, not
+    /// how long the stroke held still before it.
     last_attempt_at: Option<Instant>,
-
-
+    /// The first line of a session eases the carriage over the connect glide, and nothing
+    /// follows until that has played out.
     glide: bool,
     hold_until: Option<Instant>,
     line: String,
 }
 
 impl OssmLink {
-
-
+    /// Connects to the OSSM whose name or address starts with `target` (empty takes the first
+    /// one advertising the service) and subscribes to its state. Blocks; call it off the tick.
     pub fn open(target: &str) -> io::Result<OssmLink> {
         let conn = BleConn::open(target, OSSM_SERVICE, OSSM_COMMAND, OSSM_STATE)?;
-
+        // A read alongside the subscription, so the state is known before it next changes.
         conn.watch(OSSM_STATE);
         Ok(OssmLink {
             conn,
@@ -83,14 +96,14 @@ impl OssmLink {
         })
     }
 
-
+    /// The advertised name.
     pub fn name(&self) -> &str {
         &self.conn.name
     }
 
-
-
-
+    /// Reads state notifications, starts streaming the first time the machine reports its
+    /// menu, and sends the session settings when a session starts. Returns the state lines
+    /// for the diagnostics log.
     pub fn poll(&mut self) -> io::Result<Vec<String>> {
         self.conn.check()?;
         let mut lines = Vec::new();
@@ -111,7 +124,7 @@ impl OssmLink {
         Ok(lines)
     }
 
-
+    /// A notification cut short by the MTU has no session id; the settings are left as they are.
     fn apply(&mut self, status: OssmStatus, session: Option<String>) -> io::Result<()> {
         let was = self.status.streaming();
         self.status = status;
@@ -133,10 +146,10 @@ impl OssmLink {
         Ok(())
     }
 
-
-
-
-
+    /// Sends the stroke (0..1, already clamped to the output's range) when it changed and the
+    /// machine is streaming: a `keyframe` (its position clamped the same way) as one move the
+    /// moment it starts, else the sampled stroke at the line spacing. Returns whether a line
+    /// went out.
     pub fn send(&mut self, stroke: f64, keyframe: Option<Keyframe>) -> io::Result<bool> {
         if !self.status.streaming() {
             return Ok(false);
@@ -165,7 +178,7 @@ impl OssmLink {
             }
         };
         let mut pos = (target.clamp(0.0, 1.0) * 100.0).round() as u8;
-
+        // The firmware's last position starts at zero, so the session's first line is never zero.
         if self.last.is_none() && pos == 0 {
             pos = 1;
         }
@@ -187,15 +200,15 @@ impl OssmLink {
     }
 }
 
-
+/// `stream:<pos>:<ms>`: the position as a whole percent and the time to reach it.
 pub fn stream_line(line: &mut String, pos: u8, ms: u32) {
     line.clear();
     let _ = write!(line, "stream:{}:{ms}", pos.min(100));
 }
 
-
-
-
+/// The state and session id from the firmware's JSON, read by key so a notification cut
+/// short by the MTU still yields what arrived (the session id is last, so it is what goes
+/// missing). None for anything without a state.
 pub fn parse_state(json: &str) -> Option<(OssmStatus, Option<String>)> {
     let state = string_field(json, "state")?.to_string();
     let speed = number_field(json, "speed").map_or(0, |v| v.clamp(0.0, 100.0) as u8);

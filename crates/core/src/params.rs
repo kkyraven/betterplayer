@@ -1,21 +1,26 @@
+//! Shaping for the Detection parameter source: a bias that skews the coverage toward one
+//! end of the axis range, and a hold that keeps the value where it is until a scene cut or
+//! the coverage crossing a threshold lets it move, by at most a set jump. Both are pure and
+//! deterministic for the same detections and cuts, so a replay plays the same values.
+
 use bp_detect::Kind;
 
-
+/// What lets a held value change, and by how much.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Hold {
     pub on_cut: bool,
-
+    /// Coverage (0..1, the same share the source sends) that, crossed upward, is a trigger.
     pub coverage_over: Option<f64>,
-
+    /// How far one trigger may move the value, 0..1 of the axis range.
     pub jump: f64,
 }
 
-
+/// A Detection source: which kinds, how the coverage is skewed, and whether it is held.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DetectionSource {
-
+    /// A bit per `Kind::ALL` index.
     pub kinds: u16,
-
+    /// −1..1: negative pushes the value down, positive up, 0 leaves the coverage as it is.
     pub bias: f64,
     pub hold: Option<Hold>,
 }
@@ -29,7 +34,7 @@ impl DetectionSource {
         }
     }
 
-
+    /// The chosen kinds' coverage added up, capped at full.
     pub fn coverage(&self, per_kind: &[f64; Kind::COUNT]) -> f64 {
         per_kind
             .iter()
@@ -40,32 +45,32 @@ impl DetectionSource {
             .min(1.0)
     }
 
-
+    /// The coverage after the bias.
     pub fn shape(&self, coverage: f64) -> f64 {
         bias(coverage, self.bias)
     }
 }
 
-
-
+/// A gamma curve through 0 and 1: `bias` 1 is the fourth root (most of the range reads
+/// high), −1 the fourth power (most reads low), 0 the value itself.
 pub fn bias(v: f64, bias: f64) -> f64 {
     v.clamp(0.0, 1.0)
         .powf(2f64.powf(-2.0 * bias.clamp(-1.0, 1.0)))
 }
 
-
+/// One axis's held value between triggers.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct HoldState {
-
+    /// The value in force and the media time it was set, once the first coverage arrived.
     pub held: Option<(f64, f64)>,
     cuts_seen: u64,
     above: bool,
 }
 
 impl HoldState {
-
-
-
+    /// One tick: `coverage` is the raw share, `shaped` the value after the bias, `cuts` the
+    /// scene cut count so far. Returns the value to send. The first call takes the value as
+    /// it is; after that it only moves on a trigger, and then by at most the jump.
     pub fn step(
         &mut self,
         hold: &Hold,

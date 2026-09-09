@@ -1,3 +1,8 @@
+//! The movement runner: rows in, dense heads out for the frames the caller asks for. The
+//! window is 144 frames (128 past and 16 future) and the model emits every frame, so the live
+//! path reads the newest few, the lookahead reads a handful behind its 16 frames of future,
+//! and whole-file generation reads the scored 64..128 as `predict.py` does.
+
 use std::sync::{Arc, Mutex};
 
 use crate::features::MOVEMENT_WIDTH;
@@ -8,10 +13,10 @@ use crate::session::{Head, Session};
 pub const PAST: usize = 128;
 pub const FUTURE: usize = 16;
 pub const WINDOW: usize = PAST + FUTURE;
-
+/// First frame of the window the training loss scored; earlier frames are context.
 pub const SCORE_START: usize = 64;
 
-
+/// One frame's heads per axis, in the metadata's axis order. `pos` is 0..1; the rest are logits.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Heads {
     pub time_ms: f64,
@@ -33,9 +38,9 @@ impl Movement {
         Movement { session, meta, ring: Ring::new(), window: vec![0.0; WINDOW * MOVEMENT_WIDTH] }
     }
 
-
-
-
+    /// Runs the window whose present is `future` rows behind the newest and returns the heads
+    /// for window indices `from..to`, skipping padded and blank ones. The last run's cost is
+    /// on the session.
     pub fn run(&mut self, future: usize, from: usize, to: usize) -> Result<Vec<Heads>, String> {
         if self.ring.is_empty() {
             return Ok(Vec::new());
@@ -53,7 +58,7 @@ impl Movement {
         Ok(out)
     }
 
-
+    /// The last run's cost in ms.
     pub fn run_ms(&self) -> f64 {
         self.session.lock().unwrap().run_ms
     }

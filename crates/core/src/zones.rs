@@ -1,20 +1,26 @@
+//! Zone effects: boxes on the picture that apply temporary overrides (tempo, intensity,
+//! playback speed, stroke speed, the estim and vibration maximums) while a colour or a detected
+//! body part is in them. Colour zones read every colour frame; body part zones read the
+//! detector's last boxes. Overrides never stack: the zone that started matching most recently
+//! wins, and stays on for `hold_ms` after its match ends.
+
 use bp_detect::{Kind, Rect};
 use bp_hero::{BUCKETS, WHITE_BUCKET, bucket_of};
 
 use crate::detect::Found;
 
-
+/// What a match changes. 1 and `None` leave the setting as it is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Override {
     pub tempo: f64,
     pub intensity: f64,
     pub playback_speed: f64,
-
+    /// Full-range travel per second on the stroke.
     pub stroke_speed: Option<f64>,
-
+    /// The estim volume maximum while on.
     pub estim_max: Option<f64>,
     pub estim_max_relative: Option<f64>,
-
+    /// The vibration axis's output maximum while on.
     pub vibe_max: Option<f64>,
 }
 
@@ -26,58 +32,58 @@ impl Default for Override {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ZoneTrigger {
-
+    /// Pixels in these colour buckets count.
     Colour([bool; BUCKETS]),
-
+    /// Custom RGB matches alongside any unchanged preset buckets.
     CustomColour { buckets: [bool; BUCKETS], matches: Vec<(u32, f64)> },
-
+    /// The detector's boxes of this kind count.
     Part(Kind),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Zone {
     pub id: String,
-
+    /// In 0..1 of the frame.
     pub rect: Rect,
     pub trigger: ZoneTrigger,
-
-
+    /// The share of the zone the colour must fill, or of the box (or zone, whichever is
+    /// smaller) the two must overlap by, 0..1.
     pub cover: f64,
-
+    /// How long the effect stays after the match ends.
     pub hold_ms: f64,
     pub effect: Override,
 }
 
-
+/// One zone's standing, for the bar.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ZoneMatch {
     pub id: String,
-
+    /// The last measured share, 0..1.
     pub share: f64,
-
+    /// Matching now, or within its hold.
     pub active: bool,
-
+    /// The zone whose override is in force: the active one that started last.
     pub leading: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Match {
     share: f64,
-
+    /// Matching on the last observation.
     on: bool,
-
+    /// When the current run of matches began, media ms.
     since_ms: Option<f64>,
-
+    /// The last observation that matched, media ms.
     last_ms: Option<f64>,
 }
 
-
+/// A zone that is on stays on until its share falls this far under its cover.
 const HYSTERESIS: f64 = 0.7;
-
+/// Pixels darker than this (max channel) are nothing, not white or a hue.
 const DARK: f32 = 0.18;
-
+/// A grey must be at least this bright to count as white.
 const WHITE_MIN: f32 = 0.6;
-
+/// A zone that is on reads as ending this far ahead, so the mixer never fades it early.
 const OPEN_END_MS: f64 = 1000.0;
 
 pub struct ZoneState {
@@ -98,7 +104,7 @@ impl ZoneState {
         ZoneState { enabled: false, zones: Vec::new(), matches: Vec::new(), last_ms: 0.0 }
     }
 
-
+    /// Replaces the setup. A zone that keeps its id keeps its standing.
     pub fn set(&mut self, enabled: bool, zones: Vec<Zone>) {
         let matches = zones
             .iter()
@@ -109,17 +115,17 @@ impl ZoneState {
         self.matches = matches;
     }
 
-
+    /// Some zone reads colour frames.
     pub fn wants_frames(&self) -> bool {
         self.enabled && self.zones.iter().any(|z| matches!(z.trigger, ZoneTrigger::Colour(_) | ZoneTrigger::CustomColour { .. }))
     }
 
-
+    /// Some zone reads the detector.
     pub fn wants_detector(&self) -> bool {
         self.enabled && self.zones.iter().any(|z| matches!(z.trigger, ZoneTrigger::Part(_)))
     }
 
-
+    /// Every zone off, as after a seek.
     pub fn reset(&mut self) {
         for m in &mut self.matches {
             *m = Match::default();
@@ -151,7 +157,7 @@ impl ZoneState {
         }
     }
 
-
+    /// One packed RGB colour frame: each colour zone's share of pixels in its buckets.
     pub fn push_colour(&mut self, rgb: &[u8], width: usize, height: usize, time_ms: f64) {
         if !self.enabled || width == 0 || height == 0 || rgb.len() < width * height * 3 {
             return;
@@ -168,7 +174,7 @@ impl ZoneState {
         }
     }
 
-
+    /// The detector's last boxes: each body part zone's overlap with a box of its kind.
     pub fn push_boxes(&mut self, boxes: &[Found], time_ms: f64) {
         if !self.enabled {
             return;
@@ -195,8 +201,8 @@ impl ZoneState {
         (time_ms < end).then_some((since, end))
     }
 
-
-
+    /// The override in force: the zone that started matching most recently, as (start, end,
+    /// effect). `end` moves ahead while the zone still matches.
     pub fn active_at(&self, time_ms: f64) -> Option<(f64, f64, &Override)> {
         if !self.enabled {
             return None;
@@ -219,7 +225,7 @@ impl ZoneState {
     }
 }
 
-
+/// The bucket a pixel counts in: none for a dark one, white only for a bright grey.
 fn zone_bucket(r: u8, g: u8, b: u8) -> Option<usize> {
     let max = r.max(g).max(b) as f32 / 255.0;
     if max < DARK {
@@ -232,7 +238,7 @@ fn zone_bucket(r: u8, g: u8, b: u8) -> Option<usize> {
     Some(bucket)
 }
 
-
+/// The share of the zone's pixels in the chosen buckets.
 fn colour_share_matching(rgb: &[u8], width: usize, height: usize, rect: Rect, buckets: &[bool; BUCKETS], matches: &[(u32, f64)]) -> f64 {
     let px = |v: f64, n: usize| ((v * n as f64).round() as isize).clamp(0, n as isize) as usize;
     let (x0, y0, x1, y1) = (px(rect.x, width), px(rect.y, height), px(rect.x + rect.w, width), px(rect.y + rect.h, height));
@@ -253,8 +259,8 @@ fn colour_share_matching(rgb: &[u8], width: usize, height: usize, rect: Rect, bu
     hits as f64 / ((x1 - x0) * (y1 - y0)) as f64
 }
 
-
-
+/// How much a box and the zone overlap, over the smaller of the two, 0..1: a part inside the
+/// zone reads as 1 whether it fills the zone or the zone fits inside it.
 fn overlap(zone: Rect, b: Rect) -> f64 {
     let w = (zone.x + zone.w).min(b.x + b.w) - zone.x.max(b.x);
     let h = (zone.y + zone.h).min(b.y + b.h) - zone.y.max(b.y);
@@ -314,13 +320,13 @@ mod tests {
     fn colour_share_counts_the_zone_and_dark_pixels_are_nothing() {
         let mut z = ZoneState::new();
         z.set(true, vec![colour_zone("a", 0, 0.2, 500.0)]);
-
+        // Red over the left quarter of the frame: half the zone's width.
         z.push_colour(&frame(BLACK, Some((Rect { x: 0.0, y: 0.0, w: 0.25, h: 1.0 }, RED))), W, H, 1000.0);
         let s = z.snapshot(1000.0);
         assert!((s[0].share - 0.5).abs() < 0.05, "share {}", s[0].share);
         assert!(s[0].active);
         assert_eq!(z.active_at(1000.0).unwrap().2.tempo, 2.0);
-
+        // A grey frame is neither white nor a hue.
         let mut white = [false; BUCKETS];
         white[WHITE_BUCKET] = true;
         z.set(true, vec![Zone { trigger: ZoneTrigger::Colour(white), ..colour_zone("w", 0, 0.2, 500.0) }]);
@@ -370,7 +376,7 @@ mod tests {
         z.set(true, vec![colour_zone("a", 0, 0.2, 500.0), b]);
         z.push_colour(&frame(BLACK, Some((Rect { x: 0.0, y: 0.0, w: 0.5, h: 0.5 }, RED))), W, H, 1000.0);
         assert_eq!(z.active_at(1000.0).unwrap().2.tempo, 2.0);
-
+        // Cyan fills the second zone while red stays: the newer one wins, the first keeps its start.
         let mut both = frame(BLACK, Some((Rect { x: 0.0, y: 0.0, w: 0.5, h: 0.5 }, RED)));
         let cyan = frame(BLACK, Some((Rect { x: 0.5, y: 0.5, w: 0.5, h: 0.5 }, [40, 230, 255])));
         for (d, s) in both.iter_mut().zip(cyan.iter()) {
@@ -408,7 +414,7 @@ mod tests {
         z.push_boxes(&[breast, face], 1100.0);
         assert_eq!(z.active_at(1100.0).unwrap().2.estim_max, Some(0.9));
         assert_eq!(z.snapshot(1100.0)[0].share, 1.0);
-
+        // The same id with a new effect keeps matching; a new id starts over.
         z.set(true, vec![Zone { effect: Override { tempo: 3.0, ..Override::default() }, ..part.clone() }]);
         assert_eq!(z.active_at(1100.0).unwrap().2.tempo, 3.0);
         z.set(true, vec![Zone { id: "q".into(), ..part }]);

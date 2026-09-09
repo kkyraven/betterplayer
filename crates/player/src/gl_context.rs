@@ -1,13 +1,18 @@
+//! Offscreen GL context for the render thread. No window, no main thread requirement.
+//! macOS uses CGL directly; Windows uses ANGLE's D3D11 backend through EGL (see
+//! `windows/egl.rs`), which is what libmpv's zero-copy D3D11 interop and the `d3d11vpp`
+//! filter need. Linux uses desktop OpenGL through EGL, independently of the window system.
+
 use std::ffi::{CStr, c_void};
 
 pub struct GlContext {
-
+    /// Kept alive for its Drop; the context stays current on the render thread.
     ctx: platform::Context,
 }
 
-
-
-
+/// A stretch of GL work on one render thread. On Windows every ANGLE context shares one
+/// D3D11 device, so sections of all render threads take turns and each entry re-syncs the
+/// context (see `windows::egl::Gpu`). Elsewhere contexts are independent and this is free.
 #[cfg(windows)]
 pub use crate::windows::egl::Gpu;
 
@@ -30,14 +35,14 @@ mod gpu {
 pub use gpu::Gpu;
 
 impl GlContext {
-
-
+    /// Creates a context and makes it current on the calling thread. Taken inside a section:
+    /// on Windows, creating a context touches ANGLE's shared renderer.
     pub fn new() -> Result<GlContext, String> {
         let _gpu = Gpu::none().section();
         Ok(GlContext { ctx: platform::Context::new()? })
     }
 
-
+    /// The handle sections are taken from; `Copy`, so a render target keeps one.
     pub fn gpu(&self) -> Gpu {
         #[cfg(windows)]
         {
@@ -49,7 +54,7 @@ impl GlContext {
         }
     }
 
-
+    /// Symbol lookup for both the `gl` crate and mpv.
     pub fn get_proc_address(&self, name: &CStr) -> *mut c_void {
         self.ctx.get_proc_address(name)
     }
@@ -59,7 +64,7 @@ impl GlContext {
         self.ctx.render_fd()
     }
 
-
+    /// Context and renderer description for the player log, including the GPU on Linux.
     pub fn describe(&self) -> String {
         self.ctx.describe()
     }
@@ -95,7 +100,7 @@ mod platform {
 
     pub struct Context {
         ctx: CGLContextObj,
-
+        /// The OpenGL framework, for symbol lookup.
         lib: *mut c_void,
     }
 

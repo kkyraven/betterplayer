@@ -1,31 +1,34 @@
+//! The Hero source's home in the engine: the note watcher fed from the track worker's colour
+//! frames, the colour table, and the script that grows as hits are predicted.
+
 use std::collections::HashMap;
 
 use bp_hero::{BUCKETS, Direction, Hero, Hit, Note, Options, Rect};
 use bp_script::{Action, Axis, Script};
 
-
+/// What a colour does on top of the stroke that ends low on its hit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flourish {
     None,
-
+    /// Stays low a moment after the hit.
     Hold,
-
+    /// A short buzz after the hit.
     Vibrate,
-
+    /// Two strokes into the hit instead of one.
     Double,
-
+    /// Three strokes into the hit.
     Triple,
-
+    /// Waits at the top and drops late.
     Slam,
-
+    /// One rebound to the middle after the hit.
     Bounce,
-
+    /// The stroke ends high on the hit instead of low.
     Rise,
-
+    /// Past the hit to the axis's full extreme, then back.
     Whip,
-
+    /// Full-range swings after the hit.
     Shake,
-
+    /// A slow, wide oscillation held after the hit.
     Grind,
 }
 
@@ -69,9 +72,9 @@ impl Flourish {
 pub struct ColourRule {
     pub intensity: f64,
     pub flourish: Flourish,
-
+    /// 0 keeps the stroke's straight legs; 1 eases every leg in and out.
     pub smooth: f64,
-
+    /// Hits in this colour make no stroke at all.
     pub ignore: bool,
 }
 
@@ -86,7 +89,7 @@ impl ColourRule {
     }
 }
 
-
+/// A colour's temporary AI music overrides. Unconfigured colours leave the music alone.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MusicRule {
     pub duration_ms: f64,
@@ -98,7 +101,7 @@ pub struct MusicRule {
     pub estim_max_relative: Option<f64>,
     pub colour: Option<u32>,
     pub tolerance: f64,
-
+    /// The vibration axis's output maximum while on.
     pub vibe_max: Option<f64>,
 }
 
@@ -108,12 +111,12 @@ pub struct MusicOptions {
     pub rules: [Option<MusicRule>; BUCKETS],
 }
 
-
+/// A leg eased by `s`: linear at 0, a smoothstep at 1.
 fn ease(u: f64, s: f64) -> f64 {
     u + s * (u * u * (3.0 - 2.0 * u) - u)
 }
 
-
+/// Legs shorter than this stay straight; nothing is gained subdividing a buzz.
 const SMOOTH_MIN_MS: f64 = 60.0;
 const SMOOTH_STEPS: usize = 6;
 
@@ -121,17 +124,17 @@ const SMOOTH_STEPS: usize = 6;
 pub struct HeroSnapshot {
     pub zone: Option<Rect>,
     pub direction: Direction,
-
+    /// What Auto settled on, or the option; `None` while Auto is still looking.
     pub found: Option<Direction>,
     pub notes: Vec<Note>,
-
+    /// Hits seen per colour bucket.
     pub seen: [u32; BUCKETS],
     pub colours: [ColourRule; BUCKETS],
     pub next_hit_ms: Option<f64>,
     pub hits: u64,
 }
 
-
+/// A hit as the generator sees it, the latest prediction per note.
 #[derive(Clone, Copy, Debug)]
 struct Pending {
     id: u64,
@@ -142,23 +145,23 @@ struct Pending {
     settled: bool,
 }
 
-
+/// Hits older than this fall out of the script; nothing plays backwards that far.
 const KEEP_MS: f64 = 60_000.0;
 
 pub struct HeroState {
     pub music: MusicOptions,
     pub zone: Option<Rect>,
     pub direction: Direction,
-
+    /// The colour table every axis follows unless it has its own.
     pub colours: [ColourRule; BUCKETS],
-
+    /// Axes with their own table.
     pub axis_colours: HashMap<Axis, [ColourRule; BUCKETS]>,
     watcher: Option<Hero>,
     pending: Vec<Pending>,
     seen: [u32; BUCKETS],
     hits: u64,
     last_ms: f64,
-
+    /// How far back hits are kept; a whole-file generation keeps every one.
     keep_ms: f64,
 }
 
@@ -179,8 +182,8 @@ impl HeroState {
         }
     }
 
-
-
+    /// The same zone, direction and colour tables with a fresh watcher that keeps every hit,
+    /// for a run through the whole file that must not disturb the live one.
     pub fn fresh(&self) -> HeroState {
         HeroState {
             music: self.music.clone(),
@@ -213,7 +216,7 @@ impl HeroState {
         self.pending.clear();
     }
 
-
+    /// The newest matching hit wins. Effects never stack or survive their media-time window.
     pub fn music_at(&self, time_ms: f64) -> Option<(f64, MusicRule)> {
         if !self.music.enabled || self.zone.is_none() { return None; }
         let (hit, rule) = self.pending.iter().rev().find_map(|p| {
@@ -232,7 +235,7 @@ impl HeroState {
         self.watcher = self.zone.map(|zone| Hero::new(Options { zone, direction: self.direction }));
     }
 
-
+    /// One colour frame. Returns whether the script changed.
     pub fn push(&mut self, rgb: &[u8], width: usize, height: usize, time_ms: f64) -> bool {
         if time_ms < self.last_ms || time_ms - self.last_ms > 2000.0 { self.reset_hits(); }
         let Some(w) = self.watcher.as_mut() else {
@@ -277,18 +280,18 @@ impl HeroState {
         true
     }
 
-
+    /// The table an axis uses: its own, or the shared one.
     pub fn colours_for(&self, axis: Axis) -> &[ColourRule; BUCKETS] {
         self.axis_colours.get(&axis).unwrap_or(&self.colours)
     }
 
-
-
-
-
+    /// The script for one axis from the hits so far: low on every hit, the top midway from the
+    /// previous one (or a stroke's length before a lone hit), depth from the colour and size,
+    /// with the colour's flourish and smoothing. A rotation axis alternates direction instead.
+    /// Ignored colours leave no trace, as if the note were never there.
     pub fn script(&self, axis: Axis, intensity: f64, invert: bool, alternate: bool) -> Script {
         let colours = self.colours_for(axis);
-
+        // (at, pos, smoothing of the leg that ends here)
         let mut keys: Vec<(f64, f64, f64)> = Vec::with_capacity(self.pending.len() * 6);
         let mut push = |at: f64, pos: f64, smooth: f64| {
             let pos = if invert { 1.0 - pos } else { pos };
@@ -397,7 +400,7 @@ impl HeroState {
         }
     }
 
-
+    /// The axis follows the shared table again.
     pub fn clear_axis_colours(&mut self, axis: Axis) {
         self.axis_colours.remove(&axis);
     }
@@ -424,7 +427,7 @@ impl HeroState {
     }
 }
 
-
+/// Keyframes to actions: a leg whose end has smoothing gets eased through a few points.
 fn expand(keys: &[(f64, f64, f64)]) -> Vec<Action> {
     let mut actions: Vec<Action> = Vec::with_capacity(keys.len() * 2);
     for (k, &(at, pos, smooth)) in keys.iter().enumerate() {
@@ -492,7 +495,7 @@ mod tests {
         assert_eq!(h.music_at(1500.0).unwrap().1.tempo, 0.5);
         assert_eq!(h.music_at(2000.0).unwrap().1.tempo, 0.5);
         assert!(h.music_at(3500.0).is_none());
-
+        // A newer short rule cancels an older long rule, even after the newer one expires.
         h.music.rules[1] = Some(music_rule(100.0, 0.5));
         assert!(h.music_at(1600.0).is_none());
         assert!(h.music_at(2000.0).is_none());
@@ -539,7 +542,7 @@ mod tests {
             script.actions.iter().all(|a| (a.at - 2000.0).abs() > 1.0),
             "the ignored hit still made an action"
         );
-
+        // Two hits stroke: top, low, top, low.
         assert_eq!(script.actions.len(), 4);
     }
 
@@ -558,12 +561,12 @@ mod tests {
         let mut r = rule(Flourish::None);
         r.smooth = 1.0;
         let smooth = hero_with(&[(1000.0, 0)], r).script(Axis::L0, 1.0, false, false);
-
+        // Top then low; only the drop has a leg before it to ease.
         assert_eq!(sharp.actions.len(), 2);
         assert_eq!(smooth.actions.len(), 2 + SMOOTH_STEPS - 1);
         assert_eq!(smooth.actions.first().unwrap().pos, sharp.actions[0].pos);
         assert_eq!(smooth.actions.last().unwrap().pos, sharp.actions[1].pos);
-
+        // The first eased point lags a straight leg: it has moved less than a step's share.
         let (top, low) = (sharp.actions[0].pos, sharp.actions[1].pos);
         let first = smooth.actions[1].pos;
         assert!((first - top).abs() < (low - top).abs() / SMOOTH_STEPS as f64);

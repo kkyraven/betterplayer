@@ -1,3 +1,6 @@
+//! Serial port probing for the device wizard: opens each port, asks `D0` and `D1`, and
+//! reports what answered. Blocking, so the host calls it off the UI thread.
+
 use std::io::{ErrorKind, Read, Write};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -7,14 +10,14 @@ use crate::transport::split_lines;
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProbedPort {
     pub path: String,
-
+    /// The `D0` answer (`SR6-OSR2-CraftyHandy-NTC v2.0`), when the port replied.
     pub device: Option<String>,
-
+    /// The `D1` answer (`TCode v0.3`).
     pub tcode: Option<String>,
     pub error: Option<String>,
 }
 
-
+/// Probes every path at 115200 baud in parallel, waiting up to `wait` for replies.
 pub fn probe_ports(paths: &[String], wait: Duration) -> Vec<ProbedPort> {
     let handles: Vec<_> = paths
         .iter()
@@ -34,8 +37,8 @@ pub fn probe_ports(paths: &[String], wait: Duration) -> Vec<ProbedPort> {
         .collect()
 }
 
-
-
+/// Whether a reply line could be a firmware name: readable, at least three characters,
+/// not telemetry or boot noise (ESP32 boot messages arrive as garbage at 115200 baud).
 pub(crate) fn is_identity(line: &str) -> bool {
     let l = line.trim();
     l.chars().count() >= 3
@@ -55,8 +58,8 @@ fn probe_port(path: &str, wait: Duration) -> ProbedPort {
             return out;
         }
     };
-
-
+    // ESP32 boards reboot when the port opens and take about a second to listen again,
+    // so the question is repeated every 400 ms until something answers.
     let start = Instant::now();
     let deadline = start + wait;
     let mut next_ask = start + Duration::from_millis(200);

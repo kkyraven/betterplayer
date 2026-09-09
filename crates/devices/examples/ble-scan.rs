@@ -1,3 +1,5 @@
+//! Lists BLE devices in range. `cargo run -p bp-devices --example ble-scan -- 5`
+
 fn main() {
     let seconds = std::env::args()
         .nth(1)

@@ -1,3 +1,7 @@
+// Links libmpv. macOS (Homebrew) and Linux (libmpv-dev) have it in pkg-config. Windows has no
+// pkg-config install of libmpv, so BP_MPV_DIR, an extracted mpv-dev package holding the mpv.lib
+// import library that scripts/mpv-windows.ps1 makes from libmpv-2.dll, is linked directly and no
+// pkg-config is needed there. BP_MPV_DIR wins on every platform when set.
 use std::path::PathBuf;
 
 fn main() {
@@ -23,7 +27,7 @@ fn main() {
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         cc::Build::new()
-
+            // Preserve runtime availability checks instead of adopting the SDK's minimum OS.
             .env("MACOSX_DEPLOYMENT_TARGET", "11.0")
             .file("src/macos/scaler.m")
             .flag("-fobjc-arc")

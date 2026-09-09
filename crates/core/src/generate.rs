@@ -1,3 +1,10 @@
+//! Whole-file generation: a second, silent decode runs through the loaded local file at full
+//! speed (`pass.rs`), the flow tracker, the detector, the Hero watcher and the movement model
+//! see every frame, and the tracking table turns what they found into one script per axis.
+//! Beat axes take the analysed audio's script; AI CH/PMV axes take the music model's, running
+//! its video pass first when the cache is cold. Playback and the live tracker are not touched;
+//! the host waits on `Generation::run` off its UI thread and polls the progress meanwhile.
+
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -17,10 +24,10 @@ use crate::{Shared, TrackSource, smoothing, track_component};
 #[derive(Clone, Debug, PartialEq)]
 pub enum GenerateStatus {
     Idle,
-
+    /// Opening the file and, with a model on Auto, loading the detector.
     Loading,
     Running,
-
+    /// Waiting on the music model's own pass over the file.
     Music,
     Done,
     Cancelled,
@@ -51,15 +58,15 @@ impl GenerateStatus {
 #[derive(Clone, Debug)]
 pub struct GenerateProgress {
     pub status: GenerateStatus,
-
+    /// Media time reached and the file's length.
     pub time_ms: f64,
     pub duration_ms: f64,
-
+    /// Frames got through per wall second, once running.
     pub fps: f64,
     pub frames: u64,
-
+    /// Hero hits seen so far.
     pub hits: u64,
-
+    /// The movement model's provider and the time its windows have taken, when it ran.
     pub provider: Option<&'static str>,
     pub model_ms: f64,
 }
@@ -79,7 +86,7 @@ impl GenerateProgress {
     }
 }
 
-
+/// What the host polls and the cancel flag, kept on `Shared` so they outlive the run.
 pub struct State {
     pub progress: Mutex<GenerateProgress>,
     pub cancel: AtomicBool,
@@ -98,8 +105,8 @@ impl State {
     }
 }
 
-
-
+/// A generation the host runs to completion with `run`. One at a time: `Shared::generate`
+/// says Loading from the moment it is made.
 pub struct Generation {
     shared: Arc<Shared>,
     state: Arc<State>,
@@ -107,14 +114,14 @@ pub struct Generation {
     hwdec: Option<String>,
 }
 
-
+/// Actions closer than this to the line between their neighbours are dropped, in 0..1.
 const SIMPLIFY_EPS: f64 = 0.01;
 
-
+/// What the decode collected for the table to build from.
 #[derive(Default)]
 struct Collected {
     motion: Vec<(f64, Motion)>,
-
+    /// The movement model's heads per frame, in the metadata's axis order.
     dense: Vec<Heads>,
 }
 
@@ -138,8 +145,8 @@ impl Generation {
         }
     }
 
-
-
+    /// Runs the whole file through and builds the scripts, on the calling thread. The
+    /// progress ends in Done, Cancelled or Error, whichever way this returns.
     pub fn run(self) -> Result<Vec<(Axis, Script)>, String> {
         let result = self.decode_and_build();
         let mut p = self.state.progress.lock().unwrap();
@@ -165,17 +172,17 @@ impl Generation {
         };
         let wants_video = on(TrackSource::Video);
         let wants_hero = axes.iter().any(|a| a.source == TrackSource::Hero);
-
+        // The Hero watcher's own copy: the live one must not see frames from another time.
         let mut hero = wants_hero
             .then(|| shared.hero.lock().unwrap().fresh())
             .filter(|h| h.zone.is_some());
         let model = on(TrackSource::AiMotion)
             .then(|| shared.motion_loaded())
             .flatten();
-
+        // An AI Motion axis with no model behaves as Video.
         let wants_video = wants_video || (on(TrackSource::AiMotion) && model.is_none());
         let mut collected = Collected::default();
-
+        // Beat alone needs no frames: its scripts come from the analysed audio.
         if wants_video || hero.is_some() || model.is_some() {
             self.decode(&mut collected, hero.as_mut(), model)?;
         } else {
@@ -187,8 +194,8 @@ impl Generation {
         Ok(self.build(&axes, &collected, hero.as_ref()))
     }
 
-
-
+    /// Runs every frame of the file through the tracker, the detector, the Hero watcher and
+    /// the movement model.
     fn decode(
         &self,
         collected: &mut Collected,
@@ -217,7 +224,7 @@ impl Generation {
             track_options,
             cancelled: &cancelled,
         };
-
+        // Shared between the progress and frame callbacks, which the pass holds at once.
         let hits = Cell::new(0u64);
         let model_ms = Cell::new(0.0f64);
         let mut report = |p: PassProgress| {
@@ -292,8 +299,8 @@ impl Generation {
         Ok(())
     }
 
-
-
+    /// AI CH/PMV axes want the music model's scripts: starts its pass if nothing has, then
+    /// waits for it. Without the model or the analysed audio the axes are simply left out.
     fn wait_for_music(&self) -> Result<(), String> {
         self.shared.ensure_music();
         loop {
@@ -311,15 +318,16 @@ impl Generation {
         }
     }
 
-
-
-
+    /// One script per axis on the table. Beat needs the analysed audio and AI CH/PMV the
+    /// music model's pass; without them the axis is left out, which the host can see coming
+    /// from `beat_state`.
     fn build(
         &self,
         axes: &crate::TrackAxes,
         collected: &Collected,
         hero: Option<&HeroState>,
     ) -> Vec<(Axis, Script)> {
+        let flourishes = self.shared.track_options.lock().unwrap().flourishes;
         let beat = self.shared.beat.lock().unwrap();
         let model = self.shared.motion_loaded();
         let pace = self.shared.pace();
@@ -377,12 +385,7 @@ impl Generation {
                     (None, Some(_)) => from_flow(),
                     _ => None,
                 },
-                TrackSource::Beat => beat.script(1.0, a.invert, alternate).map(|mut s| {
-                    for action in &mut s.actions {
-                        action.pos = a.limit(action.pos);
-                    }
-                    s
-                }),
+                TrackSource::Beat => beat.script(axis, a, flourishes, 1.0),
                 TrackSource::AiMusic => beat.music_script(axis).map(|mut s| {
                     for action in &mut s.actions {
                         action.pos = a.map(action.pos);
@@ -396,7 +399,7 @@ impl Generation {
                     }
                     s
                 }),
-
+                // Faptap is live only: a run through the file has no page commanding it.
                 TrackSource::Off | TrackSource::Faptap => None,
             };
             if let Some(s) = script.filter(|s| !s.actions.is_empty()) {

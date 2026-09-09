@@ -1,3 +1,8 @@
+//! Desktop OpenGL 3.3 on EGL, independent of X11 and Wayland. Mesa's surfaceless
+//! display respects DRI_PRIME; EGL devices also support proprietary NVIDIA drivers.
+//! Displays and loader libraries are process-wide: terminating one display would
+//! invalidate the other players' contexts, including background analysis.
+
 use libloading::Library;
 use std::ffi::{CStr, c_char, c_void};
 use std::fs::File;
@@ -88,7 +93,7 @@ impl Egl {
     }
 
     fn address(&self, name: &CStr) -> Handle {
-
+        // Core symbols are not guaranteed to be returned by eglGetProcAddress on EGL 1.4.
         unsafe {
             let address = (self.get_proc_address)(name.as_ptr());
             if !address.is_null() {
@@ -187,8 +192,8 @@ impl Context {
                     if !is_software || std::env::var("LIBGL_ALWAYS_SOFTWARE").is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes")) {
                         return Ok(context);
                     }
-
-
+                    // Mesa can fall back to a CPU context while a proprietary EGL device
+                    // still offers hardware rendering. Keep the CPU context as a last resort.
                     if software.is_none() {
                         software = Some(context);
                     }
@@ -213,14 +218,14 @@ impl Context {
         if unsafe { (egl.bind_api)(OPENGL_API) } == 0 {
             return Err(egl.error("eglBindAPI(OpenGL)"));
         }
-
+        // Desktop GL guarantees BGRA readback, float textures, PBOs and fences at this version.
         let config_attributes = [SURFACE_TYPE, PBUFFER_BIT, RENDERABLE_TYPE, OPENGL_BIT, RED_SIZE, 8, GREEN_SIZE, 8, BLUE_SIZE, 8, ALPHA_SIZE, 8, NONE];
         let mut config = ptr::null_mut();
         let mut count = 0;
         if unsafe { (egl.choose_config)(display, config_attributes.as_ptr(), &mut config, 1, &mut count) } == 0 || count == 0 {
             return Err(egl.error("eglChooseConfig(OpenGL pbuffer)"));
         }
-
+        // EGL_KHR_create_context: major 3, minor 3, core profile.
         let context_attributes = [CONTEXT_MAJOR, 3, CONTEXT_MINOR, 3, CONTEXT_PROFILE_MASK, OPENGL_CORE_PROFILE_BIT, NONE];
         let context = unsafe { (egl.create_context)(display, config, ptr::null_mut(), context_attributes.as_ptr()) };
         if context.is_null() {

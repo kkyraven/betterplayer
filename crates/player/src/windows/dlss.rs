@@ -1,3 +1,8 @@
+//! DLSS reconstruction uses a single bounded helper worker and asynchronous GPU readback.
+//! A frame is published only while it still matches the current decoded picture. Slow or
+//! failed processing falls back to Sharp instead of blocking presentation or lagging audio.
+//! Startup, cancellation and debounce continue to work while playback is paused.
+
 use std::ptr;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -7,10 +12,10 @@ use crate::enhance::{DlssRequest, DlssShared};
 use crate::render::Msg;
 use crate::windows::dlss5::{self, Session, SessionControl, VideoHeader};
 
-
+/// Settings changes are coalesced for this long before the worker is rebuilt.
 const DEBOUNCE: Duration = Duration::from_millis(400);
 
-
+/// The sizes and options a running session was built for.
 #[derive(Clone, Copy, PartialEq)]
 struct Built {
     input: (u32, u32),
@@ -18,8 +23,8 @@ struct Built {
     request: DlssRequest,
 }
 
-
-
+/// GL objects the path owns: the processing-sized framebuffer mpv draws into, and the
+/// output-sized texture the worker's result is uploaded to before it is blitted to the target.
 struct Surfaces {
     in_fbo: u32,
     in_tex: u32,
@@ -34,7 +39,7 @@ impl Surfaces {
         Surfaces { in_fbo: 0, in_tex: 0, in_size: (0, 0), out_fbo: 0, out_tex: 0, out_size: (0, 0) }
     }
 
-
+    /// A colour texture at `size` attached to `fbo`/`tex`, reallocated when the size moves.
     fn ensure(fbo: &mut u32, tex: &mut u32, current: &mut (u32, u32), size: (u32, u32)) {
         if *current == size && *fbo != 0 {
             return;
@@ -83,7 +88,7 @@ impl Drop for Surfaces {
     }
 }
 
-
+/// One GPU readback in flight. Polling never waits for the GPU.
 struct Capture {
     pbo: u32,
     fence: gl::types::GLsync,
@@ -156,8 +161,8 @@ enum WorkerEvent {
     Failed(String),
 }
 
-
-
+/// The worker and all blocking pipe I/O live on a helper thread. There is at most one frame
+/// in flight; no unbounded queue or accumulated video/audio delay is possible.
 struct Worker {
     built: Built,
     input: Option<mpsc::SyncSender<InputFrame>>,
@@ -182,7 +187,7 @@ impl Worker {
                 let motion = vec![0; session.input_bytes().1];
                 while let Ok(frame) = rx.recv() {
                     let mut pixels = vec![0; session.output_bytes()];
-
+                    // Independent frames until dense motion guides are available.
                     session.process(&frame.pixels, &motion, frame.serial as i64, true, &mut pixels)?;
                     events.send(WorkerEvent::Frame { serial: frame.serial, pixels }).map_err(|_| "render thread closed")?;
                     let _ = wake.send(Msg::Redraw);
@@ -209,7 +214,7 @@ impl Drop for Worker {
     fn drop(&mut self) { self.cancel(); }
 }
 
-
+/// Pure lifecycle state, also exercised without a GPU in the regression tests.
 #[derive(Default)]
 struct Flight {
     serial: u64,
@@ -277,8 +282,8 @@ impl DlssRender {
         self.report(0.0, Some(reason));
     }
 
-
-
+    /// A newer decoded picture invalidates every old result, including across seeks. If one
+    /// frame costs more than the source cadence, keep Sharp playback instead of lagging audio.
     pub fn new_frame(&mut self) {
         if self.flight.advance() {
             self.fail("DLSS cannot keep up with this video's frame rate; using Sharp. Turn DLSS off and on to retry".into());
@@ -293,10 +298,10 @@ impl DlssRender {
 
     pub fn poll(&mut self) { self.poll_worker(); }
 
-
+    /// Whether `poll` has anything to read: a worker process is up.
     pub fn has_worker(&self) -> bool { self.worker.is_some() }
 
-
+    /// Called by the render loop's timed receive, including while playback is paused.
     pub fn next_wake(&self) -> Option<Duration> {
         if self.capture.is_some() {
             return Some(Duration::from_millis(2));
@@ -312,8 +317,8 @@ impl DlssRender {
         let (sw, sh) = request.source;
         let (tw, th) = request.output;
         if sw == 0 || sh == 0 || tw == 0 || th == 0 { return Err("waiting for the video and display size".into()); }
-
-
+        // Never pre-enlarge the source or reconstruct more pixels than the display needs.
+        // Auto (0) uses the display; explicit heights are processing budgets, not forced sizes.
         let fit = (tw as f64 / sw as f64).min(th as f64 / sh as f64);
         let scale = (fit / request.options.factor).min(1.0);
         let scale = if request.options.input_height == 0 { scale } else {
@@ -350,7 +355,7 @@ impl DlssRender {
     pub fn prepare(&mut self, target_w: u32, target_h: u32) -> Option<(u32, u32, u32)> {
         self.frame = None;
         let mut request = self.shared.lock().unwrap().request;
-
+        // Resize commits the framebuffer before updating the shared enhancement state.
         request.output = (target_w, target_h);
         if request != self.request {
             self.cancel();
@@ -399,9 +404,9 @@ impl DlssRender {
         self.frame
     }
 
-
-
-
+    /// False holds publication until the current frame finishes. The render loop still
+    /// acknowledges mpv and services resize/stop/update messages. A newer frame cancels the
+    /// work and immediately restores Sharp, so old reconstructions are never displayed.
     pub fn process(&mut self, target: u32, target_w: u32, target_h: u32) -> bool {
         if let Some((fbo, w, h)) = self.frame.take() {
             match Capture::start(fbo, (w, h), self.flight.serial) {
@@ -430,8 +435,8 @@ impl DlssRender {
                 gl::BindTexture(gl::TEXTURE_2D, 0);
                 gl::BindFramebuffer(gl::READ_FRAMEBUFFER, fbo);
                 gl::BindFramebuffer(gl::DRAW_FRAMEBUFFER, target);
-
-
+                // The app uses keepaspect=no: the canvas applies the display aspect and
+                // stereo/VR projection. Map the entire frame, matching the plain render path.
                 gl::BlitFramebuffer(0, 0, w as i32, h as i32, 0, 0, target_w as i32, target_h as i32, gl::COLOR_BUFFER_BIT, gl::LINEAR);
                 gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
             }

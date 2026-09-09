@@ -1,3 +1,5 @@
+//! Prints what the container scanner finds for a media file: `cargo run -p bp-script --example inspect -- video.mp4`.
+
 use bp_script::{find_scripts, heatmap};
 
 fn main() {

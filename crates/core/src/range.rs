@@ -1,3 +1,10 @@
+//! Range analysis for the editor: a silent decode over one stretch of the loaded local file,
+//! run through the flow tracker (with the 3 s warm-up before the range so its normalisation
+//! has settled), the detector on Auto, and the movement model when asked. The decode is kept
+//! open between runs, so scrolling the editor's window seeks rather than reopens. The result
+//! is the six motion components at up to 30 fps, cut times, the detector's boxes, the
+//! model's keyframes per axis and thumbnails, all keyed by media time; the host keeps them.
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -14,13 +21,13 @@ use crate::{
     AutoRegion, RegionSource, Shared, is_local, next_auto_region, smoothing, track_component,
 };
 
-
+/// Footage before the range the tracker runs through so its normalisation has settled.
 const WARMUP_MS: f64 = 3000.0;
-
+/// The model needs its future frames: a run with the model on decodes this far past the range.
 pub const MODEL_TAIL_MS: f64 = 700.0;
 const FRAME_WAIT: Duration = Duration::from_millis(100);
 const LOAD_TIMEOUT: Duration = Duration::from_secs(60);
-
+/// A decode that has gone quiet this long is at the end of the file.
 const QUIET_TIMEOUT: Duration = Duration::from_millis(1500);
 const REPORT_EVERY: Duration = Duration::from_millis(200);
 
@@ -50,11 +57,11 @@ pub struct RangeProgress {
     pub status: RangeStatus,
     pub start_ms: f64,
     pub end_ms: f64,
-
+    /// Media time reached.
     pub time_ms: f64,
 }
 
-
+/// What the host polls and the cancel flag, kept on `Shared` so they outlive a run.
 pub struct State {
     pub progress: Mutex<RangeProgress>,
     pub cancel: AtomicBool,
@@ -82,19 +89,19 @@ impl State {
 pub struct RangeOptions {
     pub start_ms: f64,
     pub end_ms: f64,
-
-
+    /// A box for this range alone, in 0..1 of the frame; `None` follows the tracker's region
+    /// source (the detector on Auto, the centre, or the picked box).
     pub region: Option<Region>,
-
+    /// Run the movement model over the range too, when one is loaded.
     pub model: bool,
-
+    /// Run the Hero note watcher over the range too, with the zone and colour rules as set.
     pub hero: bool,
-
+    /// Keep a thumbnail every this many ms, `thumb_width` pixels wide.
     pub thumbs_every_ms: Option<f64>,
     pub thumb_width: u32,
 }
 
-
+/// One packed RGB thumbnail.
 pub struct Thumb {
     pub time_ms: f64,
     pub width: u32,
@@ -105,20 +112,20 @@ pub struct Thumb {
 #[derive(Default)]
 pub struct RangeResult {
     pub fps: f64,
-
+    /// The six components per selected frame, by media time, inside the range.
     pub motion: Vec<(f64, Motion)>,
     pub cuts: Vec<f64>,
-
+    /// The detector's box each time it changed, by media time.
     pub boxes: Vec<(f64, Region)>,
-
+    /// The movement model's keyframes per axis, 0..1 and unmapped, inside the range.
     pub model: Vec<(Axis, Vec<Action>)>,
-
+    /// The Hero watcher's keyframes per axis, 0..1, inside the range; empty without a zone.
     pub hero: Vec<(Axis, Vec<Action>)>,
     pub thumbs: Vec<Thumb>,
 }
 
-
-
+/// The silent decode kept between runs, with its own detector so the editor's frames never
+/// steer the live tracker's region.
 pub(crate) struct Analyser {
     player: Player,
     path: String,
@@ -147,7 +154,7 @@ impl Analyser {
                 _ => {}
             })
         };
-
+        // Colour always: the thumbnails and the detector want it, and at 384 wide it is cheap.
         let player = silent_player(path, hwdec, true, sink)?;
         player.load(path, None)?;
         Ok(Analyser {
@@ -165,7 +172,7 @@ impl Analyser {
         })
     }
 
-
+    /// Waits for the file, and for a detector still compiling, so the first frames are not missed.
     fn wait_ready(&self, cancelled: &dyn Fn() -> bool) -> Result<(), String> {
         let began = Instant::now();
         loop {
@@ -192,7 +199,7 @@ impl Analyser {
         }
     }
 
-
+    /// The output takes the picture's shape once known, so regions mean the same as on screen.
     fn fit(&mut self) -> Result<(), String> {
         let s = *self.size.lock().unwrap();
         if s != self.fitted && s.0 > 0 && s.1 > 0 {
@@ -207,7 +214,7 @@ impl Analyser {
         Ok(())
     }
 
-
+    /// Follows the host's detector choice: a model loaded or dropped since the last run.
     fn sync_detector(&mut self, shared: &Arc<Shared>) {
         let model = shared.detector_model.lock().unwrap().clone();
         let id = model.as_ref().map(|m| m.0.id);
@@ -233,8 +240,8 @@ impl Analyser {
     }
 }
 
-
-
+/// A run the host drives to completion with `run`, off its UI thread. One at a time:
+/// `Engine::range_analyser` says Running from the moment it is made.
 #[derive(Clone)]
 pub struct RangeAnalyser {
     shared: Arc<Shared>,
@@ -246,7 +253,7 @@ impl RangeAnalyser {
         RangeAnalyser { shared, hwdec }
     }
 
-
+    /// Decodes the range and builds the result. The progress ends in Done, Cancelled or Error.
     pub fn run(self, options: RangeOptions) -> Result<RangeResult, String> {
         {
             let mut p = self.shared.range.progress.lock().unwrap();
@@ -281,7 +288,7 @@ impl RangeAnalyser {
         }
         let a = slot.as_mut().expect("opened above");
         let source = shared.region.lock().unwrap().source;
-
+        // The detector matters only when the range follows Auto; a picked box needs none.
         if o.region.is_none() && source == RegionSource::Auto {
             a.sync_detector(shared);
         }
@@ -301,7 +308,7 @@ impl RangeAnalyser {
         };
         let model = o.model.then(|| shared.motion_loaded()).flatten();
         let mut feed = model.map(|m| MotionFeed::new(m, track_options, Cadence::GENERATE));
-
+        // The watcher's own copy: the live one must not see frames from another time.
         let mut watcher = o
             .hero
             .then(|| shared.hero.lock().unwrap().fresh())
@@ -352,10 +359,10 @@ impl RangeAnalyser {
                 continue;
             };
             last_frame_at = Instant::now();
-
+            // Redraws carry no position; only decoded frames do.
             let Some(pts) = frame.pts else { continue };
             let mut time = pts * 1000.0;
-
+            // Frames from before the seek are still in flight; wait for one near the seek point.
             if let Some(f) = expect_from {
                 if time < f - 100.0 || time > f + 5000.0 {
                     continue;
@@ -543,7 +550,7 @@ impl RangeAnalyser {
     }
 }
 
-
+/// A nearest-neighbour thumbnail of a BGRA frame, packed RGB.
 fn thumb(bgra: &[u8], w: usize, h: usize, width: u32, time_ms: f64) -> Thumb {
     let tw = (width as usize).clamp(8, w.max(8));
     let th = (h * tw / w.max(1)).max(2);

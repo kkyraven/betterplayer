@@ -1,13 +1,21 @@
+//! The movement model's window: the last `WINDOW` rows, handed to the graph exactly as
+//! `ml/data/dataset.py::feature_row` lays a window out. Before the ring is full the oldest row
+//! is repeated at the front with a zero interval, which is what `predict.py`'s clipped source
+//! index does at the start of a title (so the oldest real row's interval is zero too, as the
+//! diff of two equal times is); the first row's interval is always one frame, as the Python
+//! prepends one; and with less than the full future, the rows past the present are blank with
+//! the mask off.
+
 use crate::features::{FIRST_INTERVAL, FUTURE_MASK, INTERVAL, MOVEMENT_WIDTH, SEMANTIC_STALE, SEMANTIC_STALE_MAX};
 use crate::movement::{FUTURE, PAST, WINDOW};
 
 pub struct Ring {
     rows: Vec<Vec<f32>>,
     times: Vec<f64>,
-
+    /// Index of the oldest row; the ring is full once `len == WINDOW`.
     head: usize,
     len: usize,
-
+    /// Rows pushed since the ring was made, for hop counting.
     pushed: u64,
 }
 
@@ -40,7 +48,7 @@ impl Ring {
         self.pushed
     }
 
-
+    /// Adds a row (built by `movement_row`) with its frame's media time.
     pub fn push(&mut self, row: &[f32], time_ms: f64) {
         let at = (self.head + self.len) % WINDOW;
         self.rows[at].copy_from_slice(row);
@@ -53,8 +61,8 @@ impl Ring {
         self.pushed += 1;
     }
 
-
-
+    /// Adds a copy of the newest row with a zero interval and `time_ms`, for flushing the end
+    /// of a file the way `predict.py`'s clipped index repeats the last frame.
     pub fn push_repeat(&mut self, time_ms: f64) {
         if self.len == 0 {
             return;
@@ -65,13 +73,13 @@ impl Ring {
         self.push(&row, time_ms);
     }
 
-
+    /// The `i`th newest row, 0 the newest.
     fn back(&self, i: usize) -> usize {
         (self.head + self.len - 1 - i.min(self.len - 1)) % WINDOW
     }
 
-
-
+    /// Media time of window index `i` for a window built with `future`, or `None` for a
+    /// padded or blank index.
     pub fn time_at(&self, i: usize, future: usize) -> Option<f64> {
         let real = PAST + future.min(FUTURE);
         if i >= real || self.len == 0 {
@@ -81,8 +89,8 @@ impl Ring {
         (from_newest < self.len).then(|| self.times[self.back(from_newest)])
     }
 
-
-
+    /// Fills `out` (`WINDOW * MOVEMENT_WIDTH`) with the window whose present is `future` rows
+    /// behind the newest. Needs at least one row.
     pub fn window(&self, future: usize, out: &mut [f32]) {
         assert!(self.len > 0, "the ring is empty");
         assert_eq!(out.len(), WINDOW * MOVEMENT_WIDTH);
@@ -99,7 +107,7 @@ impl Ring {
             if from_newest < self.len {
                 row.copy_from_slice(&self.rows[self.back(from_newest)]);
             } else {
-
+                // Before the first frame: the oldest row again, with no time passing.
                 row.copy_from_slice(&self.rows[self.head]);
                 row[INTERVAL] = 0.0;
             }
@@ -135,8 +143,8 @@ mod tests {
         let mut out = vec![0.0; WINDOW * MOVEMENT_WIDTH];
         ring.window(0, &mut out);
         let at = |i: usize, c: usize| out[i * MOVEMENT_WIDTH + c];
-
-
+        // The present is the newest row at index 127; the nine before it are real, the rest
+        // repeat the oldest with a zero interval, and the very first row's interval is one frame.
         assert_eq!(at(127, PACE), 10.0);
         assert_eq!(at(118, PACE), 1.0);
         assert_eq!(at(117, PACE), 1.0);

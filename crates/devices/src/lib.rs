@@ -1,3 +1,9 @@
+//! Device output: TCode encoding, serial, UDP, TCP, WebSocket and BLE transports, a Buttplug
+//! v3 client for Intiface Central, an embedded Buttplug server for Bluetooth toys, the DG-Lab
+//! Coyote v3, the Handy over HSSP, OpenShock over its HTTP API, and the `Output` state machine that connects, identifies
+//! and reconnects.
+//! `TickLoop` is the Phase 0 bench (a sine on L0 at a fixed rate) kept for jitter measurements.
+
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::io::{ErrorKind, Read, Write};
@@ -16,6 +22,7 @@ pub mod handy;
 pub mod howl;
 pub mod intiface;
 pub mod openshock;
+pub mod pishock;
 pub mod ossm;
 pub mod output;
 pub mod probe;
@@ -44,7 +51,7 @@ const WINDOW: usize = 10_000;
 #[derive(Clone, Copy, Debug)]
 pub struct TickOptions {
     pub hz: u32,
-
+    /// How long before each deadline to stop sleeping and spin. Trades CPU for precision.
     pub spin_us: u32,
 }
 
@@ -74,11 +81,11 @@ pub struct TickSnapshot {
     pub bytes_written: u64,
     pub bytes_received: u64,
     pub lines_received: u64,
-
+    /// Whether the tick thread got a realtime scheduling class.
     pub realtime: bool,
-
+    /// How late each tick fired past its deadline.
     pub late: PercentilesUs,
-
+    /// Time spent inside the serial write call.
     pub write: PercentilesUs,
 }
 
@@ -102,9 +109,9 @@ pub struct TickLoop {
     reader: Option<JoinHandle<()>>,
 }
 
-
-
-
+/// Every serial port except the Bluetooth virtual COM ports Windows lists for paired devices:
+/// opening one of those blocks for tens of seconds while Windows tries to reach the device, and
+/// TCode over Bluetooth goes through BLE, not a COM port.
 pub fn list_ports() -> Vec<String> {
     serialport::available_ports()
         .map(|ps| ps.into_iter().filter(|p| !matches!(p.port_type, serialport::SerialPortType::BluetoothPort)).map(|p| p.port_name).collect())
@@ -114,12 +121,12 @@ pub fn list_ports() -> Vec<String> {
 impl TickLoop {
     pub fn open(path: &str, baud: u32, opts: TickOptions) -> Result<TickLoop, String> {
         let port = transport::open_serial(path, baud, Duration::from_millis(100)).map_err(|e| format!("open {path}: {e}"))?;
-
+        // Devices talk back (TCode replies, telemetry), so a clone of the handle feeds the reader.
         let reader = port.try_clone().map_err(|e| format!("clone {path}: {e}"))?;
         Ok(Self::start(port, Some(transport::serial_reader(reader, Duration::from_millis(100))), opts))
     }
 
-
+    /// A pty pair: ticks write to one end, a reader thread drains the other and counts lines.
     #[cfg(unix)]
     pub fn loopback(opts: TickOptions) -> Result<TickLoop, String> {
         let (master, mut slave) =
@@ -147,7 +154,7 @@ impl TickLoop {
             let lines = lines_received.clone();
             thread::spawn(move || {
                 let mut buf = [0u8; 4096];
-
+                // Keeps draining after stop until a read times out, so the last ticks are counted.
                 loop {
                     match r.read(&mut buf) {
                         Ok(n) => {
@@ -217,8 +224,8 @@ impl Drop for TickLoop {
     }
 }
 
-
-
+/// Deadline loop: sleep most of the way, spin the last `spin_us`, write, record.
+/// A 0.5 Hz sine on L0 so a connected stroker visibly moves.
 fn tick_loop(
     mut port: Box<dyn SerialPort>,
     opts: TickOptions,
@@ -266,7 +273,7 @@ fn tick_loop(
         push(&mut s.late_us, late_us);
         push(&mut s.write_us, write_us);
 
-
+        // After a stall, skip the missed ticks instead of bursting to catch up.
         let behind = Instant::now().saturating_duration_since(start + period * (n + 1));
         if behind > period {
             let skip = (behind.as_micros() / period.as_micros()) as u32;

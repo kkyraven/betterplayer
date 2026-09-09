@@ -1,3 +1,7 @@
+//! The feature row against `ml/fixtures.py`: the same synthetic title, drawn from the same
+//! generator in the same order, through `movement_row` and the ring, compared with what
+//! `feature_row` built for the same windows.
+
 use std::collections::BTreeMap;
 
 use bp_tracking::FlowPoint;
@@ -98,8 +102,8 @@ fn feature_rows_match_the_python_windows() {
     let mut out = vec![0.0f32; WINDOW * MOVEMENT_WIDTH];
     for w in &f.windows {
         let mut ring = Ring::new();
-
-
+        // The last real row of the Python window: the present plus the future, clipped to the
+        // title's end with the last frame repeated, as `predict.py` clips its source index.
         let newest = w.start + (PAST - 1 + w.future) as i64;
         for (i, row) in rows.iter().enumerate().take((newest + 1).max(0) as usize) {
             ring.push(row, frames[i].time_ms);

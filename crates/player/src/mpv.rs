@@ -1,3 +1,6 @@
+//! Hand-written libmpv 2.x bindings, only what the player needs.
+//! Layouts and constants match client.h and render.h from mpv 0.41.
+
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -149,19 +152,19 @@ fn check(code: c_int, what: &str) -> Result<(), String> {
     if code < 0 { Err(format!("mpv {what}: {}", error_string(code))) } else { Ok(()) }
 }
 
-
+/// Owning wrapper over an mpv core handle. The handle is thread-safe, so this is Send + Sync.
 pub struct Mpv {
     pub handle: *mut mpv_handle,
-
+    /// Last time-pos event, read without calling into the core from the render thread.
     pub observed_time: AtomicU64,
-
-
+    /// A decoded frame has reached the render context since the last file change.
+    /// Knowing the source dimensions alone does not make a forced redraw valid.
     pub picture_ready: AtomicBool,
 }
 unsafe impl Send for Mpv {}
 unsafe impl Sync for Mpv {}
 
-
+/// Decoded event, only the fields the player acts on.
 pub enum Event {
     None,
     Shutdown,
@@ -169,7 +172,7 @@ pub enum Event {
     EndFile { error: Option<String> },
     Seek,
     PlaybackRestart,
-
+    /// An observed property changed; `None` when it became unavailable.
     Property { name: String, value: Option<Property> },
     Log(String),
     Other,
@@ -183,7 +186,7 @@ pub enum Property {
 
 impl Mpv {
     pub fn create() -> Result<Mpv, String> {
-
+        // libmpv refuses to start unless LC_NUMERIC is "C"; hosts like Electron may have changed it.
         unsafe { libc::setlocale(libc::LC_NUMERIC, c"C".as_ptr()) };
         let handle = unsafe { mpv_create() };
         if handle.is_null() {
@@ -213,7 +216,7 @@ impl Mpv {
         check(unsafe { mpv_request_log_messages(self.handle, l.as_ptr()) }, "request_log_messages")
     }
 
-
+    /// Asks for `Event::Property` whenever `name` changes. `format` is a `MPV_FORMAT_*` constant.
     pub fn observe(&self, name: &str, format: c_int) -> Result<(), String> {
         let n = CString::new(name).map_err(|e| e.to_string())?;
         check(unsafe { mpv_observe_property(self.handle, 0, n.as_ptr(), format) }, name)
@@ -258,7 +261,7 @@ impl Mpv {
         Some(s)
     }
 
-
+    /// Blocks up to `timeout` seconds for the next event.
     pub fn wait_event(&self, timeout: f64) -> Event {
         let ev = unsafe { &*mpv_wait_event(self.handle, timeout) };
         match ev.event_id {
@@ -279,7 +282,7 @@ impl Mpv {
             }
             MPV_EVENT_END_FILE => {
                 let d = unsafe { &*(ev.data as *const mpv_event_end_file) };
-
+                // reason 4 is MPV_END_FILE_REASON_ERROR
                 let error = (d.reason == 4).then(|| error_string(d.error));
                 Event::EndFile { error }
             }

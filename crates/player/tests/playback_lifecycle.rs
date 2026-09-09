@@ -1,3 +1,7 @@
+//! Run with `cargo test -p bp-player --test playback_lifecycle -- --ignored --nocapture`.
+//! Needs ffmpeg on PATH and the platform's GL driver. On Windows, also put the engine
+//! directory (ANGLE DLLs) and the mpv-dev directory on PATH.
+
 use bp_player::{External, Player, PlayerOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -121,14 +125,14 @@ fn stop_start_resize_and_overlapping_players_preserve_pixels() {
     for hwdec in [None, Some("no")] {
         for async_readback in [true, false] {
             let mut buffers = Buffers::new(320, 180);
-
+            // Declared after the buffers so teardown also precedes their release on panic.
             let mut player = Player::new(320, 180, options(hwdec, async_readback), None).unwrap();
             player.resize(320, 180, Some(buffers.external())).unwrap();
             let other_path = fixtures.0.join("h264.mov");
             open(&player, &other_path);
             eprintln!("decoder: {}, async readback: {async_readback}", player.hwdec_current());
-
-
+            // Keep consuming the first player's frames while other render contexts start
+            // and stop. This exercises the process-wide GL loader during active calls.
             let other = std::thread::spawn(move || {
                 for _ in 0..32 {
                     let player = Player::new(320, 180, options(hwdec, async_readback), None).unwrap();
@@ -150,7 +154,7 @@ fn stop_start_resize_and_overlapping_players_preserve_pixels() {
                 old.check_guards();
                 drop(old);
                 check_picture(&player);
-
+                // Allocation failure must preserve the old output and borrowed memory.
                 let mut rejected = Buffers::new(65536, 2);
                 assert!(player.resize(65536, 2, Some(rejected.external())).is_err());
                 drop(rejected);

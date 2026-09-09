@@ -1,3 +1,18 @@
+//! Offscreen GL context on Windows through ANGLE's D3D11 backend. libmpv wants ANGLE here:
+//! its zero-copy `d3d11va` interop (`d3d11-egl`) and the `d3d11vpp` filter both need the
+//! EGL display to sit on a D3D11 device. A 1 by 1 pbuffer keeps the context current on the
+//! render thread; mpv draws into our framebuffer, never the surface.
+//!
+//! `libEGL.dll` (and the `libGLESv2.dll` it pulls in) come from next to the addon; Electron 44 no
+//! longer ships ANGLE as separate DLLs, so the build stages its own (vcpkg's `angle` port, see
+//! `scripts/angle-windows.ps1`). A `libEGL.dll` found on the search path instead is checked to be
+//! ANGLE before use, since NVIDIA's driver installs one of its own into System32.
+//!
+//! The EGL display is a process-wide singleton in ANGLE: every context with the same platform
+//! attributes gets the same `EGLDisplay`, so it is initialised once and never terminated. The
+//! engine runs several players at once (the picture, the lookahead tracker, script generation)
+//! and an `eglTerminate` from one would kill the others' contexts.
+
 use std::cell::Cell;
 use std::ffi::{CStr, c_char, c_void};
 use std::ptr;
@@ -25,7 +40,7 @@ const EGL_ALPHA_SIZE: EGLint = 0x3021;
 const EGL_WIDTH: EGLint = 0x3057;
 const EGL_HEIGHT: EGLint = 0x3056;
 const EGL_CONTEXT_CLIENT_VERSION: EGLint = 0x3098;
-
+// EGL_ANGLE_platform_angle and its D3D11 backend.
 const EGL_PLATFORM_ANGLE_ANGLE: u32 = 0x3202;
 const EGL_PLATFORM_ANGLE_TYPE_ANGLE: EGLint = 0x3203;
 const EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE: EGLint = 0x3208;
@@ -99,25 +114,25 @@ impl Egl {
 }
 
 pub struct Context {
-
+    // GL entry points and ANGLE's shared display outlast individual players.
     egl: &'static Egl,
     display: EGLDisplay,
     surface: EGLSurface,
     context: EGLContext,
 }
 
-
-
-
-
+/// One D3D11 device and one ANGLE renderer serve every context in the process, and ANGLE only
+/// locks GL calls within a share group: two render threads (the picture and a lookahead or side
+/// decode) drawing at once race inside ANGLE's shared state, which shows as a frame of noise or
+/// a crash. Every stretch of GL work is a `Section`, and they take turns here.
 static GPU: Mutex<()> = Mutex::new(());
 
 thread_local! {
-
+    /// Sections nest on one thread: only the outermost takes the lock.
     static DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
-
+/// The context's EGL handles, `Copy` so a render target can keep one for its own sections.
 #[derive(Clone, Copy)]
 pub struct Gpu(Option<Handles>);
 
@@ -129,23 +144,23 @@ struct Handles {
     context: EGLContext,
 }
 
-
+/// Holds the GPU for the calling thread. Dropping it lets the next render thread in.
 pub struct Section {
-
+    /// Released after `drop` runs, which is when the depth is back down.
     _guard: Option<MutexGuard<'static, ()>>,
 }
 
 impl Gpu {
-
+    /// A handle with no context: sections still serialise the GPU but re-sync no state.
     pub fn none() -> Gpu {
         Gpu(None)
     }
 
-
-
-
-
-
+    /// Starts a stretch of GL work. Entering re-makes the context current, which makes ANGLE
+    /// mark all of its state dirty and apply it again before the next draw: the D3D11
+    /// pipeline may hold another context's state, or what mpv's decoder and filter threads
+    /// (zero-copy `d3d11va`, `d3d11vpp`) left on the shared immediate context. ANGLE skips a
+    /// `eglMakeCurrent` for the context that is already current, so it is released first.
     pub fn section(&self) -> Section {
         let nested = DEPTH.with(|d| {
             let n = d.get();
@@ -161,7 +176,7 @@ impl Gpu {
                 (h.egl.make_current)(h.display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
                 (h.egl.make_current)(h.display, h.surface, h.surface, h.context)
             };
-
+            // A lost device (TDR, driver update) fails here; said once, since it repeats per frame.
             static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
             if ok != EGL_TRUE && !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!("bp-player: {}", h.egl.err("eglMakeCurrent on section entry"));
@@ -174,17 +189,17 @@ impl Gpu {
 impl Drop for Section {
     fn drop(&mut self) {
         DEPTH.with(|d| d.set(d.get() - 1));
-
+        // The lock itself is released after this, when `guard` drops.
     }
 }
 
 impl Context {
-
+    /// Creates a GLES 3 context on ANGLE's D3D11 backend and makes it current on this thread.
     pub fn new() -> Result<Context, String> {
         static EGL: OnceLock<Result<Egl, String>> = OnceLock::new();
         let egl = EGL.get_or_init(Egl::load).as_ref().map_err(Clone::clone)?;
-
-
+        // The client extension string (no display) says whether this libEGL is ANGLE with the
+        // D3D11 backend at all; NVIDIA's own libEGL.dll in System32 is not.
         let client_exts = egl.query(ptr::null_mut(), EGL_EXTENSIONS);
         if !client_exts.split(' ').any(|e| e == "EGL_ANGLE_platform_angle_d3d") {
             return Err(format!("libEGL.dll is not ANGLE with a D3D11 backend (client extensions: {client_exts:?})"));
@@ -242,8 +257,8 @@ impl Context {
         Ok(c)
     }
 
-
-
+    /// Vendor and version of the display, for the player log ("ANGLE (NVIDIA GeForce RTX 4090
+    /// Direct3D11 vs_5_0 ps_5_0) 1.5").
     pub fn describe(&self) -> String {
         format!("{} {}", self.egl.query(self.display, EGL_VENDOR), self.egl.query(self.display, EGL_VERSION))
     }
@@ -259,7 +274,7 @@ impl Context {
         Ok(())
     }
 
-
+    /// GL and EGL entry points alike; ANGLE's `eglGetProcAddress` resolves both.
     pub fn get_proc_address(&self, name: &CStr) -> *mut c_void {
         unsafe { (self.egl.get_proc_address)(name.as_ptr()) }
     }
@@ -271,7 +286,7 @@ impl Drop for Context {
             (self.egl.make_current)(self.display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
             (self.egl.destroy_context)(self.display, self.context);
             (self.egl.destroy_surface)(self.display, self.surface);
-
+            // No eglTerminate: the display is shared with the other players (see the top).
         }
     }
 }

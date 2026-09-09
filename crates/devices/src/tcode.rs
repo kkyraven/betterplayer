@@ -1,8 +1,15 @@
+//! TCode v0.3 line encoding: four-digit magnitudes with an `I` interval, dirty axes only.
+//! A profile says which axes an output speaks and under what wire id: strokers take the
+//! TCode namespace, restim takes the estim namespace with alpha, beta and volume written
+//! as `L0`, `L1` and `V0` (research 05). Electrodes go out as `E1`..`E4` beside alpha and
+//! beta on every restim output; restim's three-phase modes ignore them and four-phase
+//! FOC-Stim reads only them.
+
 use std::fmt::Write as _;
 
 use bp_script::{Axis, Namespace};
 
-
+/// Per-output clamp: the device's usable travel for this axis, in device units.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AxisClamp {
     pub enabled: bool,
@@ -20,7 +27,7 @@ impl Default for AxisClamp {
     }
 }
 
-
+/// What family of device sits behind an output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Profile {
     #[default]
@@ -44,7 +51,7 @@ impl Profile {
         }
     }
 
-
+    /// Wire id for an axis, or None when this profile never sends it.
     pub fn wire_id(self, axis: Axis) -> Option<&'static str> {
         match (self, axis.namespace()) {
             (Profile::Stroker, Namespace::Tcode) => Some(axis.id()),
@@ -58,19 +65,19 @@ impl Profile {
         }
     }
 
-
-
+    /// Axes sent only while a script, provider or live value drives them, so restim keeps
+    /// its own volume and pulse settings until a script says otherwise.
     pub fn when_driven(self, axis: Axis) -> bool {
         self == Profile::Restim && !matches!(axis, Axis::EA | Axis::EB)
     }
 
-
-
+    /// Sent once when a when-driven axis stops being driven. Volume goes back to full so
+    /// restim's master is the only volume again.
     pub fn release_value(self, axis: Axis) -> Option<f64> {
         (self == Profile::Restim && axis == Axis::EV).then_some(1.0)
     }
 
-
+    /// Axes this profile can send, in table order.
     pub fn axes(self) -> impl Iterator<Item = Axis> {
         Axis::ALL
             .into_iter()
@@ -78,11 +85,11 @@ impl Profile {
     }
 }
 
-
+/// Last magnitude sent per axis, so unchanged axes are left out of the line.
 pub type Units = [Option<u16>; Axis::COUNT];
 
-
-
+/// Writes the dirty axes of `values` (0..1) into `line` as `L0xxxxIyy` commands separated
+/// by spaces, newline terminated. Returns how many axes were written.
 pub fn encode(
     profile: Profile,
     values: &[f64; Axis::COUNT],
@@ -212,7 +219,7 @@ mod tests {
         let clamps = [AxisClamp::default(); Axis::COUNT];
         let mut last = [None; Axis::COUNT];
         let mut line = String::new();
-
+        // Nothing drives volume or pulse rate: only alpha and beta go out.
         assert_eq!(
             encode(
                 Profile::Restim,
@@ -226,7 +233,7 @@ mod tests {
             2
         );
         assert_eq!(line, "L05000I10 L15000I10\n");
-
+        // A volume script starts.
         driven[Axis::EV.index()] = true;
         assert_eq!(
             encode(
@@ -241,7 +248,7 @@ mod tests {
             1
         );
         assert_eq!(line, "V03000I10\n");
-
+        // It ends: volume is handed back to restim at full, once.
         driven[Axis::EV.index()] = false;
         assert_eq!(
             encode(
@@ -268,7 +275,7 @@ mod tests {
             ),
             0
         );
-
+        // Pulse rate is only ever sent while driven, and never released.
         driven[Axis::P0.index()] = true;
         assert_eq!(
             encode(
@@ -352,7 +359,7 @@ mod tests {
             line,
             "L09999I10 L15000I10 E19999I10 E20000I10 E30000I10 E40000I10\n"
         );
-
+        // Derivation stops: the electrodes hold on the device, nothing is released.
         for a in [Axis::E1, Axis::E2, Axis::E3, Axis::E4] {
             driven[a.index()] = false;
         }

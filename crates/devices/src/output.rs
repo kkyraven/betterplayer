@@ -1,3 +1,14 @@
+//! One connected device: connects off the tick thread, identifies the firmware with
+//! `D0`/`D1` (TCode) or the device list (Buttplug), sends dirty axes every tick,
+//! reconnects after errors. Lines the device sends that start with `#` (`#ok`, `#left`,
+//! `#right`, `#edge`) are queued as inputs for the host to bind to actions.
+//! Links that host the script themselves (the Handy, the Howl app) get the loaded scripts and
+//! the media clock instead of per-tick axis values. A toy (embedded Buttplug) has features that each
+//! follow an axis; the user's choices are kept here and reapplied on every connect. A restim
+//! output can scale its volume by a session ramp that counts playing time and restarts on
+//! every connect. A stroker can shake a second axis into its stroke as a vibration, for a
+//! machine with no vibrator of its own (the OSSM). An OpenShock output reads one axis and fires while it is past a line.
+
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::PathBuf;
@@ -19,9 +30,9 @@ use crate::{PercentilesUs, percentiles};
 
 const RETRY: Duration = Duration::from_secs(2);
 const IDENTIFY_WINDOW: Duration = Duration::from_secs(2);
-
-
-
+/// A freshly connected stroker is somewhere unknown; TCode has no position readback. The
+/// first line after a connect (or a profile switch) carries this interval so the firmware
+/// eases from wherever it is, and nothing else is written until it has had the time to.
 pub const CONNECT_GLIDE_MS: u32 = 1500;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -31,52 +42,52 @@ pub enum Status {
     Error(String),
 }
 
-
+/// What a link that hosts the script itself learns about the media beside the scripts.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Media {
-
+    /// The file name without its extension, or the URL; shown on the Howl phone.
     pub title: String,
-
+    /// A `.hwl` beside a local file, Howl's own format, which it plays instead of a funscript.
     pub hwl: Option<PathBuf>,
 }
 
-
+/// A stroke keyframe a device that takes timed moves is sent as one move, instead of samples.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Keyframe {
-
+    /// Video time of the keyframe after the axis offsets, so each is sent once.
     pub at_ms: f64,
-
+    /// Position in axis units, 0..1, before the device's range.
     pub pos: f64,
-
+    /// Wall ms the device has to get there.
     pub in_ms: f64,
 }
 
-
+/// What every output learns about the media on each tick.
 #[derive(Clone, Copy, Debug)]
 pub struct TickContext {
     pub media_ms: f64,
-
-
+    /// The stroke script's next keyframe for this output at its own delay, while playing and
+    /// while L0 plays the script as written; `None` sends sampled positions.
     pub stroke_next: Option<Keyframe>,
     pub playing: bool,
-
+    /// Overrides and external sources may drive toys independently of the media clock.
     pub manual_axes: [bool; Axis::COUNT],
-
+    /// A manual estim axis override, including the device test while playback is paused.
     pub estim_manual: bool,
-
-
-
+    /// Levels (vibration, suction, a pump) go to zero while playback is paused, unless a manual
+    /// source drives their axis. Off, they hold their last value the way a stroker holds its
+    /// position. Estim mutes on pause either way.
     pub stop_on_pause: bool,
-
+    /// Normal volume limits and optional axis boost, applied before fading.
     pub estim_volume: VolumeSettings,
     pub rate: f64,
-
+    /// Measured time since the previous tick, whole ms.
     pub interval_ms: u32,
 }
 
-
-
-
+/// A second axis shaken into the stroke: a sine at `hz` whose swing is `depth` (in full-range
+/// units) scaled by the source axis's value. Applies to stroker outputs while the source is
+/// driven, so an axis at rest adds nothing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Vibration {
     pub source: Axis,
@@ -85,14 +96,14 @@ pub struct Vibration {
 }
 
 impl Vibration {
-
+    /// The offset to add to the stroke this tick, advancing `phase` (radians) by `dt_ms`.
     pub fn offset(&self, source_value: f64, phase: &mut f64, dt_ms: f64) -> f64 {
         *phase = (*phase + std::f64::consts::TAU * self.hz.max(0.0) * dt_ms / 1000.0).rem_euclid(std::f64::consts::TAU);
         self.depth.max(0.0) * source_value.clamp(0.0, 1.0) * phase.sin()
     }
 }
 
-
+/// Position ranges contract about their centre; levels attenuate after their minimum.
 fn session_clamps(mut clamps: [AxisClamp; Axis::COUNT], scale: f64, profile: Profile) -> [AxisClamp; Axis::COUNT] {
     if profile == Profile::Stroker {
         for axis in Axis::ALL {
@@ -122,65 +133,65 @@ pub struct Output {
     pub transport: Transport,
     pub profile: Profile,
     pub clamps: [AxisClamp; Axis::COUNT],
-
+    /// Session volume ramp, applied to restim outputs only.
     pub ramp: Ramp,
-
+    /// Temporary session attenuation, independent of the saved device limits.
     pub session_scale: f64,
     volume: Volume,
     state: State,
     last: Units,
-
+    /// Last successfully submitted Restim magnitudes, retained when an axis stops being driven.
     sent: Units,
     line: String,
     retry_at: Instant,
     connected_at: Option<Instant>,
-
+    /// Pending connect glide: when it ends, and whether its line has gone out yet.
     glide: Option<(Instant, bool)>,
-
+    /// First reply after connect that is not telemetry, the `D0` answer on TCode boards.
     pub device: Option<String>,
-
+    /// The `D1` answer, `TCode v0.3`.
     pub tcode: Option<String>,
     received: VecDeque<String>,
     inputs: VecDeque<String>,
-
-
-
+    /// A position the device reports for its own slider or knob, 0..1: from a `#pos <v>` or
+    /// `#slider <v>` line (0..1 with a point, else 0..100, else 0..999) or an echoed `L0<value>`
+    /// line, so a board with a manual input can script hands-on.
     slider: Option<f64>,
-
-
+    /// The scripts and media, kept for a link that hosts them itself (the Handy, Howl) so one
+    /// that connects mid-video still gets them.
     hosted: Option<(Vec<(Axis, Arc<Script>)>, Media)>,
     lines_sent: u64,
     write_us: VecDeque<u32>,
-
+    /// When the last line went to a line transport, for links with a minimum spacing.
     last_line_at: Option<Instant>,
-
+    /// A toy's features the user pointed at another axis (or off), by feature index.
     feature_axes: HashMap<u32, Option<Axis>>,
-
+    /// A toy's level features the user gave their own map, by feature index.
     feature_levels: HashMap<u32, LevelMap>,
     vibration: Option<Vibration>,
     vibration_phase: f64,
-
-
+    /// When this device gets each position against the video, in ms: negative is early
+    /// (a slow device), positive is late.
     pub delay_ms: f64,
 }
 
-
+/// One feature of a toy and the axis it follows, for the UI.
 #[derive(Clone, Debug)]
 pub struct FeatureSnapshot {
     pub index: u32,
-
+    /// `vibrate`, `rotate`, `oscillate`, `constrict`, `position`, `spray`, `temperature` or `led`.
     pub kind: &'static str,
     pub description: String,
     pub axis: Option<Axis>,
-
+    /// Whether it takes the axis's speed rather than its value.
     pub speed: bool,
-
+    /// Whether it is a level with its own `LevelMap` (else a place within the axis's range).
     pub level: bool,
-
+    /// A level's input right now, 0 to 1 before its map, while its axis drives it.
     pub input: Option<f64>,
 }
 
-
+/// What the UI shows about an output every frame.
 #[derive(Clone, Debug)]
 pub struct OutputSnapshot {
     pub sent: Units,
@@ -191,24 +202,24 @@ pub struct OutputSnapshot {
     pub status: Status,
     pub device: Option<String>,
     pub tcode: Option<String>,
-
+    /// The session ramp's progress, while it is on and the profile is restim.
     pub ramp: Option<RampProgress>,
-
+    /// What a connected Howl phone last reported.
     pub howl: Option<HowlStatus>,
-
+    /// What a connected OSSM last reported.
     pub ossm: Option<OssmStatus>,
-
+    /// A connected toy's features; empty for everything else.
     pub features: Vec<FeatureSnapshot>,
     pub battery: Option<u8>,
 }
 
-
-
+/// Counters and timings for a diagnostics view, on request: sorting the write samples is
+/// not something to do sixty times a second.
 #[derive(Clone, Debug)]
 pub struct OutputStats {
     pub lines_sent: u64,
     pub write: PercentilesUs,
-
+    /// Newest first.
     pub received: Vec<String>,
 }
 
@@ -253,13 +264,13 @@ impl Output {
         let t = self.transport.clone();
         let previous = std::mem::replace(&mut self.state, State::Connecting(rx));
         thread::spawn(move || {
-
+            // A queued restim mute must drain before a replacement connection can send.
             drop(previous);
             let _ = tx.send(transport::open(&t));
         });
     }
 
-
+    /// Switches the axis family this output speaks; the next tick resends everything.
     pub fn set_profile(&mut self, profile: Profile) {
         if self.profile != profile {
             self.mute_restim();
@@ -285,8 +296,8 @@ impl Output {
         ));
     }
 
-
-
+    /// Interval for the next TCode line while a glide is pending: the glide length for its
+    /// first line, `None` (write nothing) until that has played out, then the tick's own.
     fn line_interval(&mut self, now: Instant, interval_ms: u32) -> Option<u32> {
         match self.glide {
             Some((until, false)) => {
@@ -302,7 +313,7 @@ impl Output {
         }
     }
 
-
+    /// Progresses the connection and reads replies. Call once per tick before `send`.
     pub fn poll(&mut self) {
         match &mut self.state {
             State::Connecting(rx) => match rx.try_recv() {
@@ -334,7 +345,14 @@ impl Output {
                             toy.set_axes(&self.feature_axes);
                             toy.set_levels(&self.feature_levels);
                         }
-                        Link::OpenShock(o) => self.device = Some(o.device.clone()),
+                        Link::OpenShock(o) => {
+                            if let Transport::OpenShock { trigger, .. } = &self.transport { o.set_trigger(*trigger); }
+                            self.device = Some(o.device.clone());
+                        },
+                        Link::PiShock(o) => {
+                            if let Transport::PiShock { trigger, .. } = &self.transport { o.set_trigger(*trigger); }
+                            self.device = Some(o.device.clone());
+                        },
                     }
                     self.state = State::Connected(link);
                 }
@@ -389,6 +407,9 @@ impl Output {
                     self.fail(error);
                 }
             }
+            State::Connected(Link::PiShock(o)) => {
+                if let Err(e) = o.poll() { self.fail(e); }
+            }
             State::Connected(Link::OpenShock(o)) => {
                 if let Err(e) = o.poll() {
                     self.fail(format!("openshock: {e}"));
@@ -434,7 +455,7 @@ impl Output {
         self.received.push_back(l.to_string());
     }
 
-
+    /// Sends the axes that changed since the last line. Returns whether a line went out.
     pub fn send(
         &mut self,
         values: &[f64; Axis::COUNT],
@@ -446,7 +467,7 @@ impl Output {
         let muted = scale == 0.0;
         let muted_ctx = TickContext { playing: false, manual_axes: [false; Axis::COUNT], estim_manual: false, stop_on_pause: true, stroke_next: None, ..*ctx };
         let ctx = if muted { &muted_ctx } else { ctx };
-
+        // Volume owns onset and silence. Electrode magnitudes only steer relative balance.
         let mut ramped = (*values, *driven);
         let mut clamps = session_clamps(self.clamps, scale, self.profile);
         let (values, driven) =
@@ -459,21 +480,21 @@ impl Output {
                 let boost_axis = ctx.estim_volume.boost.axis.index();
                 let boost_source = driven[boost_axis].then_some(values[boost_axis]);
                 let target = ctx.estim_volume.target(volume, c.min, c.max, boost_source) * scale;
-
+                // Only input sources count toward intent; the session ramp cannot start it.
                 let source_active = [Axis::EA, Axis::EB, Axis::EV, Axis::E1, Axis::E2, Axis::E3, Axis::E4]
                     .into_iter().any(|a| driven[a.index()] && self.clamps[a.index()].enabled);
                 let active = c.enabled && source_active && (ctx.playing || ctx.estim_manual);
                 ramped.0[i] = self.volume.apply(target, active, ctx.interval_ms as f64);
                 ramped.1[i] = true;
-
+                // The range has already been applied. Its minimum must not lift silence or the fade.
                 clamps[i] = AxisClamp::default();
                 (&ramped.0, &ramped.1)
             } else {
                 (values, driven)
             };
-
-
-
+        // The vibration rides on the stroke after the range, so its swing is in device units.
+        // Only links that take a position every tick (TCode lines, the OSSM) shake; on a
+        // Coyote the stroke picks channels and a toy's position feature is slow.
         let shaken: [f64; Axis::COUNT];
         let mut shaking = false;
         let values = match self.vibration {
@@ -488,16 +509,16 @@ impl Output {
             }
             _ => values,
         };
-
-
-
-
+        // Which axes may stimulate right now: a paused video stops every level unless a manual
+        // source has the axis or the user chose to hold. Positions are unaffected (they sit
+        // where the script left them); the toy and Intiface links rest their levels once, a
+        // TCode board's intensity and aux axes go out as zero past their range.
         let level_active: [bool; Axis::COUNT] =
             std::array::from_fn(|i| ctx.playing || ctx.manual_axes[i] || !ctx.stop_on_pause);
-
-
-
-
+        // The stroke's next keyframe, for links that move a device over a duration (Intiface,
+        // a toy's timed position, the OSSM): one move per keyframe instead of a stop-start
+        // sample every 100 ms. Only while the script drives L0; a live source, or a vibration
+        // shaken into the stroke, is sampled as it comes.
         let stroke_next = ctx
             .stroke_next
             .filter(|_| ctx.playing && driven[Axis::L0.index()] && !ctx.manual_axes[Axis::L0.index()] && !shaking);
@@ -519,8 +540,8 @@ impl Output {
         } else {
             (values, clamps)
         };
-
-
+        // A link slower than the tick (BLE) gets lines at its own spacing, each carrying that
+        // interval; the axes that moved meanwhile go out together on the next one.
         let interval_ms = match &self.state {
             State::Connected(Link::Lines(conn)) => {
                 let min = conn.min_interval_ms();
@@ -621,6 +642,10 @@ impl Output {
                     Err(e) => Err(e),
                 }
             }
+            State::Connected(Link::PiShock(o)) => {
+                if !o.tick_scaled(values, driven, ctx.playing, scale) { return false; }
+                Ok(())
+            }
             State::Connected(Link::OpenShock(o)) => {
                 if !o.tick_scaled(values, driven, ctx.playing, scale) {
                     return false;
@@ -640,7 +665,7 @@ impl Output {
                 if self.write_us.len() == 1000 {
                     self.write_us.pop_front();
                 }
-
+                // Transports with their own writer thread report the write itself, once it is done.
                 self.write_us
                     .push_back(write_us.unwrap_or(t0.elapsed().as_micros() as u32));
                 true
@@ -652,17 +677,17 @@ impl Output {
         }
     }
 
-
+    /// Device button lines received since the last call, without their `#`.
     pub fn take_inputs(&mut self) -> Vec<String> {
         self.inputs.drain(..).collect()
     }
 
-
+    /// The newest position the device reported for its own slider, 0..1, if it has one.
     pub fn slider(&self) -> Option<f64> {
         self.slider
     }
 
-
+    /// Live strength change on a Coyote link. Returns whether this output took it.
     pub fn set_strength(&mut self, a: u8, b: u8) -> bool {
         if let Transport::Coyote {
             strength_a,
@@ -670,7 +695,7 @@ impl Output {
             ..
         } = &mut self.transport
         {
-
+            // Kept on the transport so a reconnect comes back at the same cap.
             (*strength_a, *strength_b) = (a, b);
         } else {
             return false;
@@ -681,22 +706,24 @@ impl Output {
         true
     }
 
-
+    /// Live trigger change on an OpenShock output. Returns whether this output took it.
     pub fn set_openshock_trigger(&mut self, trigger: OpenShockTrigger) -> bool {
-        if let Transport::OpenShock { trigger: kept, .. } = &mut self.transport {
-
+        if let Transport::OpenShock { trigger: kept, .. } | Transport::PiShock { trigger: kept, .. } = &mut self.transport {
+            // Kept on the transport so a reconnect comes back with the same trigger.
             *kept = trigger;
         } else {
             return false;
         }
-        if let State::Connected(Link::OpenShock(o)) = &mut self.state {
-            o.set_trigger(trigger);
+        match &mut self.state {
+            State::Connected(Link::OpenShock(o)) => o.set_trigger(trigger),
+            State::Connected(Link::PiShock(o)) => o.set_trigger(trigger),
+            _ => {},
         }
         true
     }
 
-
-
+    /// Shakes another axis into the stroke, or stops with `None`. Applies from the next tick.
+    /// False for an output that takes no per-tick position (a toy, the Handy, Howl, a Coyote).
     pub fn set_vibration(&mut self, vibration: Option<Vibration>) -> bool {
         if !matches!(
             self.transport,
@@ -709,8 +736,8 @@ impl Output {
         true
     }
 
-
-
+    /// When this device gets each position against the video, in ms: negative early, positive
+    /// late. False for a link that plays the script itself (the Handy, Howl).
     pub fn set_delay(&mut self, ms: f64) -> bool {
         if matches!(self.transport, Transport::Handy { .. } | Transport::Howl { .. }) {
             return false;
@@ -719,8 +746,8 @@ impl Output {
         true
     }
 
-
-
+    /// Points a toy's feature at an axis, or off with `None`. Kept for reconnects and applied
+    /// at once while connected. False for any other output.
     pub fn set_feature_axis(&mut self, index: u32, axis: Option<Axis>) -> bool {
         if !matches!(self.transport, Transport::Toy { .. }) {
             return false;
@@ -732,8 +759,8 @@ impl Output {
         true
     }
 
-
-
+    /// Gives a toy's level feature its own map, or the default with `None`. Kept for
+    /// reconnects and applied at once while connected. False for any other output.
     pub fn set_feature_level(&mut self, index: u32, level: Option<LevelMap>) -> bool {
         if !matches!(self.transport, Transport::Toy { .. }) {
             return false;
@@ -748,8 +775,8 @@ impl Output {
         true
     }
 
-
-
+    /// Hands the scripts and media to a link that hosts them itself. Other links read the
+    /// mixer output every tick and ignore this.
     pub fn set_scripts(&mut self, scripts: &[(Axis, Arc<Script>)], media: &Media) {
         if !matches!(
             self.transport,
@@ -765,8 +792,8 @@ impl Output {
         }
     }
 
-
-
+    /// Plays the wizard's test on a link that has its own: Howl's test script, one pulse on an
+    /// OpenShock shocker, or a toy feature sweep. False for the rest, which the host sweeps through the live axis instead.
     pub fn test(&mut self) -> bool {
         match &mut self.state {
             State::Connected(Link::Howl(h)) => {
@@ -777,7 +804,8 @@ impl Output {
                 toy.test();
                 true
             }
-            State::Connected(Link::OpenShock(o)) => o.pulse(),
+            State::Connected(Link::OpenShock(o)) => o.pulse(self.session_scale),
+            State::Connected(Link::PiShock(o)) => o.pulse(self.session_scale),
             _ => false,
         }
     }
@@ -855,14 +883,14 @@ impl Output {
         }
     }
 
-
+    /// Mutes restim, then drops the connection elsewhere so the tick never waits on a reader join.
     pub fn disconnect(mut self) {
         self.mute_restim();
         thread::spawn(move || drop(self));
     }
 }
 
-
+/// The stroke the Handy hosts, from the kept scripts.
 fn stroke(hosted: Option<&(Vec<(Axis, Arc<Script>)>, Media)>) -> Option<&Script> {
     hosted?
         .0
@@ -969,7 +997,7 @@ mod tests {
         assert_eq!(volume_units(&o), 0);
         for _ in 0..100 { o.send(&values, &driven, &ctx); }
         assert_eq!(volume_units(&o), 5000);
-
+        // Reconnects and profile changes both reset through begin_glide.
         o.begin_glide();
         o.send(&values, &driven, &ctx);
         assert_eq!(volume_units(&o), 0);
@@ -1165,8 +1193,8 @@ mod tests {
     }
 }
 
-
-
+/// The slider position in a device line, 0..1: `#pos 0.42`, `#slider 42`, or an echoed
+/// `L0420` (three or four digits, as TCode writes it). None for any other line.
 fn slider_value(line: &str) -> Option<f64> {
     if let Some(rest) = line.strip_prefix("#pos").or_else(|| line.strip_prefix("#slider")) {
         let text = rest.trim();
@@ -1193,12 +1221,12 @@ mod vibration_tests {
     fn a_driven_source_shakes_the_stroke_and_a_resting_one_leaves_it() {
         let mut o = Output::new(1, Transport::Udp { host: "127.0.0.1".into(), port: 1 }, Profile::Stroker);
         o.set_vibration(Some(Vibration { source: Axis::V0, depth: 0.1, hz: 10.0 }));
-
+        // 10 Hz at 25 ms ticks: phase quarter turns, so the offsets go +depth, 0, -depth, 0.
         let mut phase = 0.0;
         let v = o.vibration.unwrap();
         let steps: Vec<i32> = (0..4).map(|_| (v.offset(1.0, &mut phase, 25.0) * 1000.0).round() as i32).collect();
         assert_eq!(steps, vec![100, 0, -100, 0]);
-
+        // Half strength halves the swing; a source at zero adds nothing.
         assert!((v.offset(0.5, &mut phase, 25.0) - 0.05).abs() < 1e-9);
         assert_eq!(v.offset(0.0, &mut phase, 25.0), 0.0);
     }
@@ -1293,13 +1321,13 @@ mod toy_tests {
         let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let (mut link, mut rx) = fixture(&[FeatureKind::Vibrate]);
         link.set_axes(&HashMap::from([(0, Some(Axis::V0))]));
-
-
+        // Built on a socket so no connect thread asks the real hub for a toy; the transport is
+        // swapped afterwards, which is what `set_feature_level` checks.
         let mut output = Output::new(1, Transport::Udp { host: "127.0.0.1".into(), port: receiver.local_addr().unwrap().port() }, Profile::Stroker);
         assert!(!output.set_feature_level(0, None), "not a toy yet");
         output.transport = Transport::Toy { name: "Nora".into(), address: "A".into() };
         assert!(output.set_feature_level(0, Some(LevelMap { cap: 0.5, ..LevelMap::default() })));
-
+        // Kept on the output, applied when the link connects, as after any reconnect.
         link.set_levels(&output.feature_levels);
         output.state = State::Connected(Link::Toy(link));
         let mut ctx = TickContext { media_ms: 0.0, stroke_next: None, playing: true, manual_axes: [false; Axis::COUNT], estim_manual: false, stop_on_pause: false, estim_volume: crate::ramp::VolumeSettings::default(), rate: 1.0, interval_ms: 100 };

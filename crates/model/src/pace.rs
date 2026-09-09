@@ -1,12 +1,18 @@
+//! Pace: the user's 0..1 is a quantile of the training corpus's extrema rate per axis, which is
+//! what the model was conditioned on (`ml/data/targets.py`). The CDF comes from
+//! `metadata.json`; these map between the quantile and strokes per second for the UI, and give
+//! the decoder's output smoothing for a pace (`ml/decoder.py::tau_for_pace`).
+
+/// Output smoothing at pace 0, in ms; it falls linearly to nothing at pace 1.
 pub const TAU_MAX_MS: f64 = 120.0;
 
-
-
+/// Smoothing time constant for a pace in 0..1: long at low pace so a slow setting glides, none
+/// at high so a fast one keeps its edges. Linear, as `ml/decoder.py` has it.
 pub fn tau_for_pace(pace: f64) -> f64 {
     TAU_MAX_MS * (1.0 - pace).max(0.0)
 }
 
-
+/// Extrema per second the quantile stands for, by linear interpolation over the CDF's points.
 pub fn quantile_to_rate(quantile: f64, cdf: &[f64]) -> f64 {
     match cdf {
         [] => 0.0,
@@ -20,8 +26,8 @@ pub fn quantile_to_rate(quantile: f64, cdf: &[f64]) -> f64 {
     }
 }
 
-
-
+/// The inverse: where a rate sits in the corpus, 0..1. Linear between the points, clamped at
+/// the ends, as numpy's `interp` does.
 pub fn rate_to_quantile(rate: f64, cdf: &[f64]) -> f64 {
     if cdf.len() < 2 {
         return 0.5;

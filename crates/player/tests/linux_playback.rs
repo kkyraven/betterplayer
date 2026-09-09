@@ -41,8 +41,8 @@ fn wait_for_frame(player: &Player, upscaler: Upscaler, width: u32, height: u32) 
             if player.enhance_state().upscaler == upscaler && player.size() == (width, height) {
                 let slot = player.slot(frame.index);
                 let mut pixels = unsafe { slot.as_slice() }.to_vec();
-
-
+                // A seek or shader change can have an older readback in flight. These tests
+                // pause before changing settings, so take the final redraw once the queue clears.
                 while let Some(newer) = player.acquire_wait(Duration::from_millis(100)) {
                     let slot = player.slot(newer.index);
                     pixels = unsafe { slot.as_slice() }.to_vec();
@@ -78,7 +78,7 @@ fn check_colors(pixels: &[u8], width: usize, height: usize, bgra: bool, toleranc
     }
 }
 
-
+/// Runs with Mesa llvmpipe in CI, and with the installed GPU driver on a Linux desktop.
 #[test]
 fn linux_playback_upscaling_and_multiple_players() {
     let picture = Picture::new(320, 180);
@@ -136,7 +136,7 @@ fn linux_playback_upscaling_and_multiple_players() {
         player.resize(480, 270, None).unwrap();
         let resized = wait_for_frame(&player, Upscaler::Fsr, 480, 270);
         check_colors(&resized, 480, 270, bgra, 12);
-
+        // Analysis players must neither overwrite the active context nor terminate its display.
         let other = Player::new(320, 180, PlayerOptions::default(), None).unwrap();
         other.load(video.0.to_str().unwrap(), None).unwrap();
         wait_for_frame(&other, Upscaler::Off, 320, 180);

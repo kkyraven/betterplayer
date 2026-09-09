@@ -67,13 +67,13 @@ fn check_colors(pixels: &[u8], width: usize, height: usize, bgra: bool, toleranc
     }
 }
 
-
+/// Opt-in because this loads Apple's ML model and requires a supported Mac and libmpv.
 #[test]
 #[ignore = "requires macOS 26, supported Apple silicon, and GPU access"]
 fn apple_upscales_paused_frames_resizes_and_falls_back() {
     let source = Picture::new(640, 360);
     let unsupported = Picture::new(3840, 2160);
-
+    // Exercise both readback paths and channel orders through the native GPU conversion.
     for bgra in [true, false] {
         let opts = PlayerOptions { bgra, async_readback: bgra, mpv_options: vec![("keepaspect".into(), "no".into())], ..Default::default() };
         let player = Player::new(1280, 720, opts, None).unwrap();
@@ -83,7 +83,7 @@ fn apple_upscales_paused_frames_resizes_and_falls_back() {
         check_colors(&original, 1280, 720, bgra, 5);
         player.set_enhance(EnhanceOptions { upscaler: Upscaler::Apple, ..Default::default() }).unwrap();
         let enhanced = wait_for_frame(&player, Upscaler::Apple, 1280, 720);
-
+        // Apple's model can change saturation. Check channel order and orientation, not pixel identity.
         check_colors(&enhanced, 1280, 720, bgra, 50);
         assert_eq!(player.enhance_state().factor, 2.0);
         assert!(player.enhance_state().reason.is_none());

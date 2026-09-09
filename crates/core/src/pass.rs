@@ -1,3 +1,7 @@
+//! A silent whole-file decode shared by generation and the music model's video pass.
+//! Tracking and detection sample at most 30 fps, matching the training dumper. The caller
+//! receives each selected frame after tracking and reports its own progress.
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -11,16 +15,16 @@ use crate::lookahead::{bgra_to_gray, bgra_to_rgb, silent_player};
 use crate::motion::box_run;
 use crate::{AutoRegion, RegionSource, Shared, next_auto_region};
 
-
+/// How long a frame is waited for before the loop looks at the flags again.
 const FRAME_WAIT: Duration = Duration::from_millis(100);
-
+/// Opening the file, and the detector's compile, are given this long.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(60);
-
+/// A decode that has gone quiet this long without the end being reported is over.
 const QUIET_TIMEOUT: Duration = Duration::from_secs(5);
-
+/// How often progress is reported.
 const REPORT_EVERY: Duration = Duration::from_millis(200);
 
-
+/// One decoded frame after the region tracker has seen it.
 pub(crate) struct PassFrame<'a> {
     pub bgra: &'a [u8],
     pub gray: &'a [u8],
@@ -29,7 +33,7 @@ pub(crate) struct PassFrame<'a> {
     pub time_ms: f64,
     pub tracker: &'a Tracker,
     pub sample: Option<Sample>,
-
+    /// The detector's latest run on this pass, on media time.
     pub detection: Option<BoxRun>,
 }
 
@@ -38,7 +42,7 @@ pub(crate) struct PassProgress {
     pub time_ms: f64,
     pub duration_ms: f64,
     pub frames: u64,
-
+    /// Frames got through per wall second.
     pub fps: f64,
 }
 
@@ -46,16 +50,16 @@ pub(crate) struct Pass<'a> {
     pub shared: &'a Arc<Shared>,
     pub path: &'a str,
     pub hwdec: Option<String>,
-
+    /// The Hero watcher needs color even without a detector.
     pub color: bool,
     pub track_options: TrackOptions,
     pub cancelled: &'a dyn Fn() -> bool,
 }
 
 impl Pass<'_> {
-
-
-
+    /// Runs the file through. `on_loaded` fires once the file (and a detector on Auto) is in;
+    /// `on_progress` every `REPORT_EVERY`; `on_frame` for every selected training frame. Errors and a
+    /// cancel come back as `Err`; the caller tells them apart by its own flag.
     pub fn run(
         &self,
         on_loaded: &mut dyn FnMut(f64),
@@ -86,8 +90,8 @@ impl Pass<'_> {
         )?;
         player.load(self.path, None)?;
 
-
-
+        // The detector runs its own copy of the model when the region is Auto, and keeps its
+        // latest run for the model rows.
         let auto_box: Arc<Mutex<AutoRegion>> = Arc::new(Mutex::new(AutoRegion::default()));
         let latest: Arc<Mutex<Option<BoxRun>>> = Arc::new(Mutex::new(None));
         let detect = detector_model.map(|model| {
@@ -104,8 +108,8 @@ impl Pass<'_> {
             d
         });
 
-
-
+        // Nothing can be asked of mpv before the file is in, and a model still compiling would
+        // miss the opening scenes.
         let began = Instant::now();
         loop {
             if (self.cancelled)() {
@@ -160,12 +164,12 @@ impl Pass<'_> {
                 continue;
             };
             last_frame_at = Instant::now();
-
+            // Redraws (a resize) carry no position; only decoded frames do.
             if frame.pts.is_none() {
                 continue;
             }
-
-
+            // Match the training dumper's nominal frame clock and decimation. Playback's
+            // observed position can be a frame ahead or repeated during an untimed decode.
             let index = decoded;
             decoded += 1;
             if index % step != 0 {

@@ -1,3 +1,8 @@
+//! One ONNX session with its provider and its cost. The ladder is CoreML as an ML program on
+//! the CPU and Neural Engine, then the CPU; the name and the fallback reason are kept for the
+//! bar. Warmup runs the graph on zeros, once untimed for the provider's compile and then three
+//! times for the median, so a slow machine is known before the first frame.
+
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -7,10 +12,10 @@ use ort::value::TensorRef;
 
 use crate::meta::Meta;
 
-
+/// A warmup median past this, in ms, and the model is too slow to run live.
 pub const TOO_SLOW_MS: f64 = 20.0;
 
-
+/// One head's values, `[frames, axes]` row-major.
 pub struct Head {
     pub name: String,
     pub frames: usize,
@@ -27,19 +32,19 @@ impl Head {
 pub struct Session {
     session: OrtSession,
     input_name: String,
-
+    /// `coreml` or `cpu`.
     pub provider: &'static str,
-
+    /// Why the first choice was not taken.
     pub fallback: Option<String>,
     pub warmup_ms: f64,
-
+    /// The last run's cost.
     pub run_ms: f64,
     shape: [usize; 3],
 }
 
 impl Session {
-
-
+    /// Loads `path` (a file the host has verified), warms it up on a zero window of the
+    /// metadata's shape. `cache_dir` keeps the compiled CoreML graph between runs.
     pub fn load(path: &Path, meta: &Meta, cache_dir: Option<&Path>) -> Result<Session, String> {
         let mut builder = OrtSession::builder()
             .and_then(|b| b.with_optimization_level(GraphOptimizationLevel::Level3))
@@ -54,8 +59,8 @@ impl Session {
         }
         let mut s = Session { session, input_name, provider, fallback, warmup_ms: 0.0, run_ms: 0.0, shape: meta.input_shape };
         let zeros = vec![0.0f32; s.shape[1] * s.shape[2]];
-
-
+        // The first run carries the provider's lazy compile (CoreML on a cold cache took a
+        // five-way graph to 20 ms once and 8 ms after), so it is run and not timed.
         s.run(&zeros)?;
         let mut times = Vec::new();
         for _ in 0..3 {
@@ -72,7 +77,7 @@ impl Session {
         self.warmup_ms > TOO_SLOW_MS
     }
 
-
+    /// Runs one window (`frames * width` floats) and returns every head.
     pub fn run(&mut self, window: &[f32]) -> Result<Vec<Head>, String> {
         let [_, frames, width] = self.shape;
         if window.len() != frames * width {
@@ -115,8 +120,8 @@ fn register_provider(_builder: &mut ort::session::builder::SessionBuilder, _cach
     ("cpu", None)
 }
 
-
-
+/// A model the engine has loaded: its metadata and one session shared by whoever runs it (the
+/// live worker, the lookahead, a generation). Runs are short and take the lock one at a time.
 pub struct Loaded {
     pub meta: Arc<Meta>,
     pub session: Arc<Mutex<Session>>,
@@ -134,9 +139,9 @@ impl Loaded {
 mod tests {
     use super::*;
 
-
-
-
+    /// Loads the shipped weights from `app/models/` and runs a zero window through each: the
+    /// acid test that ONNX Runtime and CoreML take these graphs, and that the metadata beside
+    /// them matches this engine's feature layout.
     #[test]
     fn shipped_models_load_and_run() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../app/models");

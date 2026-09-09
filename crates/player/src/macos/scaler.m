@@ -8,8 +8,8 @@
 #error "Apple AI requires the macOS 26 SDK. Select Xcode 26 or newer with xcode-select."
 #endif
 
-
-
+// The GL renderer and Core Image share BGRA IOSurfaces. VideoToolbox requires NV12;
+// Core Image performs both colour conversions on the GPU before the existing readback.
 API_AVAILABLE(macos(26.0))
 @interface BPAppleScaler : NSObject {
 @public
@@ -101,7 +101,7 @@ static bool processFrame(BPAppleScaler *scaler, NSError **error) {
     return true;
 }
 
-
+// Session creation can load an ML model, so Rust calls this on a preparation thread.
 void *bp_apple_scaler_create(uint32_t width, uint32_t height, float factor, char *error, size_t capacity) {
     @autoreleasepool {
         @try {
@@ -141,7 +141,7 @@ void *bp_apple_scaler_create(uint32_t width, uint32_t height, float factor, char
                     kCIContextWorkingColorSpace: (__bridge id)scaler->colorSpace,
                     kCIContextCacheIntermediates: @NO,
                 }];
-
+                // Compile conversion kernels and warm the model before the render thread uses it.
                 CIImage *black = [CIImage imageWithColor:[CIColor colorWithRed:0 green:0 blue:0 alpha:1]];
                 [scaler->imageContext render:black toCVPixelBuffer:scaler->rgbSource
                     bounds:CGRectMake(0, 0, width, height) colorSpace:scaler->colorSpace];
@@ -160,7 +160,7 @@ void *bp_apple_scaler_create(uint32_t width, uint32_t height, float factor, char
     }
 }
 
-
+// Attaches one IOSurface to the rectangle texture bound by the render thread.
 bool bp_apple_scaler_bind(void *handle, bool destination, char *error, size_t capacity) {
     @autoreleasepool {
         if (@available(macOS 26.0, *)) {

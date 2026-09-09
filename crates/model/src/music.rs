@@ -1,3 +1,9 @@
+//! The music runner: the whole track at once, in 30 s chunks hopping by 25 s with the heads
+//! averaged where chunks overlap, as `ml/predict_music.py` does. Rows follow
+//! `ml/models/music.py::MusicLayout` and `ml/data/music_dataset.py::feature_row`: the log-mel,
+//! the beat grid, the tempo, then the region tracker's chain, signals and cuts resampled onto
+//! the 20 ms hop by holding the last frame, and the pace.
+
 use std::sync::{Arc, Mutex};
 
 use bp_beat::Grid50;
@@ -11,12 +17,12 @@ use crate::session::{Head, Session};
 
 pub const RATE_HZ: f64 = 50.0;
 pub const HOP_MS: f64 = 1000.0 / RATE_HZ;
-
+/// A bpm divided by this sits near 1.
 const BPM_SCALE: f32 = 200.0;
-
+/// Chunk and overlap, in frames.
 pub const CHUNK: usize = 1500;
 pub const OVERLAP: usize = 250;
-
+/// The style head classifies 2 s sections.
 pub const SECTION: usize = 100;
 pub const STYLES: [&str; 4] = ["half", "full", "double", "smash"];
 
@@ -57,18 +63,18 @@ pub const VIDEO_PRESENT: usize = offset(9);
 pub const PACE: usize = offset(10);
 pub const MUSIC_WIDTH: usize = offset(11);
 
-
+/// One video frame of the region tracker's output, at its media time.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VideoRow {
     pub time_ms: f64,
-
+    /// The last `Sample.motion`, held across frames that produced none.
     pub chain: [f64; 6],
     pub signals: [f64; 6],
     pub cut: bool,
 }
 
-
-
+/// The video block on the 50 Hz grid: each hop takes the flow the tracker had emitted by then,
+/// and a cut lands on the hop at or before it, so none is lost between two hops.
 fn resample(video: &[VideoRow], frames: usize) -> Vec<([f32; 6], [f32; 6], f32)> {
     let mut out = vec![([0.0; 6], [0.0; 6], 0.0); frames];
     if video.is_empty() {
@@ -96,12 +102,12 @@ fn resample(video: &[VideoRow], frames: usize) -> Vec<([f32; 6], [f32; 6], f32)>
     out
 }
 
-
+/// What the model produced for a track.
 #[derive(Clone, Debug, Default)]
 pub struct MusicResult {
-
+    /// One script per axis in the metadata's order; empty where the axis stayed inactive.
     pub scripts: Vec<Script>,
-
+    /// The style class per 2 s section, an index into `STYLES`.
     pub style: Vec<u8>,
     pub frames: usize,
     pub run_ms: f64,
@@ -117,8 +123,8 @@ impl Music {
         Music { session, meta }
     }
 
-
-
+    /// Runs the whole track. `mel` and `grid` are at 50 Hz from time 0; `video` is the region
+    /// tracker's rows in time order, or `None` for the audio-only path the model also trained on.
     pub fn run(&self, mel: &[[f32; BANDS]], grid: &Grid50, bpm: f64, video: Option<&[VideoRow]>, pace: f64) -> Result<MusicResult, String> {
         let frames = mel.len().min(grid.onset.len());
         if frames == 0 {
@@ -177,7 +183,7 @@ impl Music {
                     style_sum[lo_sec + s][c] += style.at(s, c) as f64;
                 }
             }
-
+            // `range(0, max(1, frames - chunk + hop), hop)`.
             start += hop;
             if start >= (frames + hop).saturating_sub(CHUNK).max(1) {
                 break;

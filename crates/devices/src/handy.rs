@@ -1,3 +1,11 @@
+//! The Handy over HSSP: the script is hosted (uploaded to the cloud or served from a LAN
+//! thread), the device fetches it once, and we only send play, stop and time sync. Driving
+//! it per action over the cloud is what makes other players stutter, so we never do it.
+//!
+//! Without an app key this speaks API v2, with one API v3, which adds `synctime` drift
+//! correction and a playback rate. Every request runs on a worker thread; the tick thread
+//! only queues commands.
+
 use std::fmt::Write as _;
 use std::io::{self, ErrorKind, Read, Write as _};
 use std::net::{Ipv4Addr, TcpListener, TcpStream, UdpSocket};
@@ -16,22 +24,22 @@ use crate::output::TickContext;
 use crate::tcode::AxisClamp;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
-
+/// Clock offset samples and how many to drop from each end of the sorted list.
 const OFFSET_SAMPLES: usize = 30;
 const OFFSET_TRIM: usize = 3;
-
+/// A position error this large is a seek, not drift, so the Handy is told to play again.
 const SEEK_MS: f64 = 1000.0;
 const SYNC_EVERY: Duration = Duration::from_secs(10);
 
-
-
+/// Where the Handy fetches the script from: the Handy's own script host, or an HTTP thread
+/// on this machine.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum HandyHosting {
     Cloud,
     Lan,
 }
 
-
+/// API and upload hosts. The real Handy services in the app, a mock server in tests.
 #[derive(Clone, Debug)]
 struct Endpoints {
     v2: String,
@@ -49,9 +57,9 @@ impl Default for Endpoints {
     }
 }
 
-
+/// Work the HTTP thread does for the tick thread.
 enum Cmd {
-
+    /// Host these CSV bytes and point the Handy at them.
     Setup {
         generation: u64,
         bytes: Vec<u8>,
@@ -64,34 +72,34 @@ enum Cmd {
     Sync {
         media_ms: f64,
     },
-
+    /// Device travel limits, 0..1.
     Slide {
         min: f64,
         max: f64,
     },
 }
 
-
+/// What the HTTP thread sends back, drained in `poll`.
 enum Reply {
-
+    /// The Handy has the script and can be played.
     Ready(u64),
     Log(String),
     Error(String),
 }
 
-
-
+/// A connected Handy. Holds the command channel to the HTTP worker plus the playback state
+/// the tick compares against.
 pub struct HandyLink {
     cmd: Sender<Cmd>,
     reply: Receiver<Reply>,
-
+    /// Model and firmware from `info`, shown as the output's device.
     pub device: String,
     v3: bool,
-
+    /// Only the current script's setup may make playback ready.
     generation: u64,
     ready: bool,
     playing: bool,
-
+    /// Media time and wall clock at the last play, so drift and seeks are visible.
     play_ms: f64,
     play_at: Instant,
     rate: f64,
@@ -101,8 +109,8 @@ pub struct HandyLink {
 }
 
 impl HandyLink {
-
-
+    /// Checks the firmware, switches to HSSP and measures the clock offset before returning.
+    /// Blocks for the whole handshake; call it off the tick thread.
     pub fn connect(
         key: &str,
         app_key: Option<&str>,
@@ -164,8 +172,8 @@ impl HandyLink {
         })
     }
 
-
-
+    /// Drains the worker's replies. Log lines go to the output's received list, errors put
+    /// the output into its usual retry cycle.
     pub fn poll(&mut self) -> Result<Vec<String>, String> {
         let mut logs = Vec::new();
         loop {
@@ -184,7 +192,7 @@ impl HandyLink {
         }
     }
 
-
+    /// Hosts the stroke script for the Handy to fetch; `None` when the media has none.
     pub fn set_stroke(&mut self, script: Option<&Script>) {
         self.generation = self.generation.wrapping_add(1);
         self.ready = false;
@@ -200,8 +208,8 @@ impl HandyLink {
         }
     }
 
-
-
+    /// One tick of the playback state machine: start, stop, play again after a seek or a rate
+    /// change, and the v3 drift correction. Never blocks.
     pub fn tick(&mut self, ctx: &TickContext, clamps: &[AxisClamp; Axis::COUNT]) {
         let c = clamps[Axis::L0.index()];
         if !c.enabled {
@@ -230,7 +238,7 @@ impl HandyLink {
             return;
         }
         let seeked = self.playing && (ctx.media_ms - self.expected_ms()).abs() > SEEK_MS;
-
+        // v2 has no playback rate, so a rate change there shows up as drift instead.
         let rate_changed = self.playing && self.v3 && (ctx.rate - self.rate).abs() > 0.01;
         if !self.playing || seeked || rate_changed {
             self.playing = true;
@@ -250,7 +258,7 @@ impl HandyLink {
         }
     }
 
-
+    /// Where the Handy should be now, from the last play command. v2 always advances at 1x.
     fn expected_ms(&self) -> f64 {
         let rate = if self.v3 { self.rate } else { 1.0 };
         self.play_ms + self.play_at.elapsed().as_secs_f64() * 1000.0 * rate
@@ -262,14 +270,14 @@ impl HandyLink {
 }
 
 impl Drop for HandyLink {
-
+    /// Asks the Handy to stop and lets the worker finish on its own, so no thread waits.
     fn drop(&mut self) {
         self.send(Cmd::Stop);
     }
 }
 
-
-
+/// The HTTP thread: one request at a time, in the order the tick queued them. It ends when
+/// the link is dropped and the command channel closes.
 fn worker(
     api: Api,
     hosting: HandyHosting,
@@ -302,7 +310,7 @@ fn worker(
     }
 }
 
-
+/// Puts the script somewhere the Handy can fetch it and returns that URL.
 fn host(
     api: &Api,
     hosting: HandyHosting,
@@ -324,8 +332,8 @@ fn host(
     }
 }
 
-
-
+/// One HTTP conversation with the Handy: base URL, auth headers and the measured offset
+/// between the Handy service's clock and ours.
 struct Api {
     agent: Agent,
     base: String,
@@ -336,8 +344,8 @@ struct Api {
 }
 
 impl Api {
-
-
+    /// Identifies the device, puts it in HSSP mode and learns the clock offset. Returns the
+    /// device name for the UI.
     fn handshake(&mut self, app_key: Option<&str>) -> Result<String, String> {
         match app_key {
             Some(app_key) => {
@@ -375,7 +383,7 @@ impl Api {
         }
     }
 
-
+    /// v3 trades the app key for a device token that every later request carries.
     fn issue_token(&self, app_key: &str) -> Result<String, String> {
         let path = "auth/token/issue";
         let url = format!("{}{path}", self.base);
@@ -395,8 +403,8 @@ impl Api {
             .ok_or_else(|| format!("{path}: no token in the reply"))
     }
 
-
-
+    /// 30 round trips to the server clock. Each sample assumes the reply is half a round trip
+    /// old; the trimmed mean drops the three fastest and three slowest.
     fn measure_offset(&self) -> Result<f64, String> {
         let mut samples = Vec::with_capacity(OFFSET_SAMPLES);
         for _ in 0..OFFSET_SAMPLES {
@@ -412,7 +420,7 @@ impl Api {
         Ok(trimmed_mean(samples, OFFSET_TRIM))
     }
 
-
+    /// v2 checks the script it fetched against a hash, v3 only takes the URL.
     fn setup(&self, url: &str, bytes: &[u8]) -> Result<(), String> {
         let body = if self.v3 {
             json!({ "url": url })
@@ -426,7 +434,7 @@ impl Api {
         let body = if self.v3 {
             json!({ "start_time": media_ms.round() as u64, "server_time": self.server_ms(), "playback_rate": rate, "loop": false })
         } else {
-            json!({ "estimatedServerTime": self.server_ms(), "startTime": media_ms.round() })
+            json!({ "estimatedServerTime": self.server_ms(), "startTime": media_ms.round() as u64 })
         };
         self.put("hssp/play", body).map(drop)
     }
@@ -435,23 +443,23 @@ impl Api {
         self.put("hssp/stop", json!({})).map(drop)
     }
 
-
+    /// v3 drift correction: the Handy nudges its own position instead of restarting.
     fn sync(&self, media_ms: f64) -> Result<(), String> {
         self.put("hssp/synctime", json!({ "current_time": media_ms.round() as u64, "server_time": self.server_ms(), "filter": 0.5 })).map(drop)
     }
 
-
+    /// Travel limits, sent as integer percentages on v2 and fractions on v3.
     fn slide(&self, min: f64, max: f64) -> Result<(), String> {
         let body = if self.v3 {
             json!({ "min": min, "max": max })
         } else {
-            json!({ "min": (min * 100.0).round(), "max": (max * 100.0).round() })
+            json!({ "min": (min * 100.0).round() as u64, "max": (max * 100.0).round() as u64 })
         };
         self.put(if self.v3 { "slider/stroke" } else { "slide" }, body)
             .map(drop)
     }
 
-
+    /// Our clock in the service's terms, what `hssp/play` and `hssp/synctime` want.
     fn server_ms(&self) -> u64 {
         (now_ms() + self.offset).round() as u64
     }
@@ -517,8 +525,8 @@ fn read_json(path: &str, mut res: ureq::http::Response<ureq::Body>) -> Result<Va
     parse_body(path, &body)
 }
 
-
-
+/// The Handy answers 200 with an `error` object when the device refuses, so the body counts
+/// as much as the status.
 fn parse_body(path: &str, body: &str) -> Result<Value, String> {
     let v: Value = serde_json::from_str(body).map_err(|e| format!("{path}: {e}"))?;
     match v.get("error") {
@@ -532,7 +540,7 @@ fn parse_body(path: &str, body: &str) -> Result<Value, String> {
     }
 }
 
-
+/// `Handy FW3 3.2.4` from the `info` reply: model, firmware generation and version.
 fn device_name(info: &Value) -> String {
     let model = info
         .get("model")
@@ -550,7 +558,7 @@ fn device_name(info: &Value) -> String {
     }
 }
 
-
+/// Mean after dropping `trim` values from each end of the sorted samples.
 fn trimmed_mean(mut samples: Vec<f64>, trim: usize) -> f64 {
     if samples.is_empty() {
         return 0.0;
@@ -578,8 +586,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
-
-
+/// CSV with a blank metadata line, integer milliseconds and 0..100 positions.
+/// Both hosts receive these same bytes so the setup hash matches the downloaded script.
 fn script_csv(script: &Script) -> String {
     let mut csv = String::from("\n");
     for a in &script.actions {
@@ -589,8 +597,8 @@ fn script_csv(script: &Script) -> String {
     csv
 }
 
-
-
+/// A one-file HTTP server the Handy fetches the script from, for users who would rather not
+/// upload. Stops when dropped.
 struct LanScript {
     url: String,
     stop: Arc<AtomicBool>,
@@ -636,8 +644,8 @@ impl Drop for LanScript {
     }
 }
 
-
-
+/// Answers any request with the script. The Handy asks once and closes. The whole request is
+/// read first: closing with bytes still unread resets the connection and the reply is lost.
 fn serve(mut stream: TcpStream, bytes: &[u8]) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let mut request = Vec::new();
@@ -658,8 +666,8 @@ fn serve(mut stream: TcpStream, bytes: &[u8]) {
     let _ = stream.flush();
 }
 
-
-
+/// The address the Handy can reach us on: the interface the routing table would use to reach
+/// the internet. Nothing is sent.
 fn lan_ip() -> String {
     UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
         .and_then(|s| {
@@ -669,7 +677,7 @@ fn lan_ip() -> String {
         .map_or_else(|_| "127.0.0.1".into(), |a| a.ip().to_string())
 }
 
-
+/// Multipart upload to the Handy's script host. The reply carries the URL to hand to `setup`.
 fn upload_script(agent: &Agent, url: &str, bytes: &[u8]) -> Result<String, String> {
     let boundary = format!("----betterplayer{:x}", now_ms() as u64);
     let mut body = format!(
@@ -701,7 +709,7 @@ mod tests {
     use std::io::BufReader;
     use std::sync::Mutex;
 
-
+    /// One request the mock server saw.
     #[derive(Clone, Debug)]
     struct Req {
         method: String,
@@ -710,8 +718,8 @@ mod tests {
         body: String,
     }
 
-
-
+    /// A stand-in for handyfeeling.com: records every request and answers canned JSON keyed
+    /// by the end of the path.
     struct Mock {
         base: String,
         seen: Arc<Mutex<Vec<Req>>>,
@@ -782,8 +790,8 @@ mod tests {
         }
     }
 
-
-
+    /// One keep-alive connection: requests in, canned JSON out, until the mock stops. Read
+    /// timeouts mean idle or a split packet, never the end of the connection.
     fn handle(stream: TcpStream, seen: Arc<Mutex<Vec<Req>>>, stop: Arc<AtomicBool>) {
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let mut stream = stream;
@@ -890,7 +898,7 @@ mod tests {
         matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
     }
 
-
+    /// Canned replies. The key `OLDFW` stands in for a Handy that needs a firmware update.
     fn canned(path: &str, query: &str, v3: bool, body: &[u8], key: &str) -> (&'static str, String) {
         let payload = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
         let bad = |message: &str| ("400 Bad Request", json!({ "message": message }).to_string());
@@ -951,7 +959,15 @@ mod tests {
                 }
                 json!({ "state": 1 })
             }
-            "mode" | "hssp/setup" | "hssp/play" | "hssp/stop" => json!({ "result": 1 }),
+            "hssp/play" => {
+                if payload["startTime"].as_u64().is_none()
+                    || payload["estimatedServerTime"].as_u64().is_none()
+                {
+                    return bad("Times must be nonnegative integers");
+                }
+                json!({ "result": 0 })
+            }
+            "mode" | "hssp/setup" | "hssp/stop" => json!({ "result": 1 }),
             _ => {
                 return (
                     "404 Not Found",
@@ -1154,8 +1170,8 @@ mod tests {
         assert!(commands.try_recv().is_err());
     }
 
-
-
+    /// Ticks and polls as the engine does until the mock has seen `n` requests to `path`.
+    /// A `media_ms` of `None` follows the Handy's own position, so waiting is never a seek.
     fn run(
         link: &mut HandyLink,
         mock: &Mock,
@@ -1248,7 +1264,7 @@ mod tests {
         );
         let expected = sha256_hex(script_csv(&script()).as_bytes());
         assert_eq!(body["sha256"].as_str().unwrap(), expected);
-
+        // The clamp goes out as a percentage on v2, queued behind the setup.
         run(&mut link, &mock, "slide", 1, Some(0.0), true);
         let slide: Value = serde_json::from_str(&mock.last("slide").body).unwrap();
         assert_eq!(
@@ -1263,11 +1279,11 @@ mod tests {
         let mut link =
             HandyLink::connect_to("KEY", None, HandyHosting::Cloud, mock.endpoints()).unwrap();
         link.set_stroke(Some(&script()));
-        run(&mut link, &mock, "hssp/play", 1, Some(4_000.0), false);
+        run(&mut link, &mock, "hssp/play", 1, Some(4_000.4), false);
         let body: Value = serde_json::from_str(&mock.last("hssp/play").body).unwrap();
-        assert_eq!(body["startTime"].as_f64(), Some(4_000.0));
-
-        let ahead = body["estimatedServerTime"].as_f64().unwrap() - now_ms();
+        assert_eq!(body["startTime"].as_u64(), Some(4_000));
+        // The clock offset puts the estimated server time about five seconds ahead of ours.
+        let ahead = body["estimatedServerTime"].as_u64().unwrap() as f64 - now_ms();
         assert!(
             (ahead - 5_000.0).abs() < 500.0,
             "estimated server time {ahead} ms ahead"
@@ -1292,7 +1308,7 @@ mod tests {
                 .as_f64(),
             Some(60_000.0)
         );
-
+        // Playing on from where the Handy already is, is not a seek, so nothing else goes out.
         link.tick(&ctx(link.expected_ms() + 50.0, false), &clamps());
         thread::sleep(Duration::from_millis(50));
         assert_eq!(mock.count("hssp/play"), 2);
@@ -1345,7 +1361,7 @@ mod tests {
         let sync: Value = serde_json::from_str(&mock.last("hssp/synctime").body).unwrap();
         assert!(sync["current_time"].as_f64().unwrap() >= 1_000.0, "{sync}");
         assert_eq!(sync["filter"].as_f64(), Some(0.5));
-
+        // Drift correction instead of another play.
         assert_eq!(mock.count("hssp/play"), 1);
     }
 
@@ -1365,11 +1381,11 @@ mod tests {
             let mut limits = clamps();
             limits[Axis::L0.index()] = AxisClamp {
                 enabled: true,
-                min: 0.2,
-                max: 0.8,
+                min: 0.204,
+                max: 0.806,
             };
             link.tick(&ctx(0.0, true), &limits);
-
+            // A stop queued after the range provides a barrier for the HTTP worker.
             link.send(Cmd::Stop);
             let deadline = Instant::now() + Duration::from_secs(2);
             while mock.count("hssp/stop") == 0 {
@@ -1378,8 +1394,12 @@ mod tests {
                 thread::sleep(Duration::from_millis(5));
             }
             let body: Value = serde_json::from_str(&mock.last(path).body).unwrap();
-            let scale = if app_key.is_some() { 1.0 } else { 100.0 };
-            assert_eq!(body, json!({ "min": 0.2 * scale, "max": 0.8 * scale }));
+            if app_key.is_some() {
+                assert_eq!(body, json!({ "min": 0.204, "max": 0.806 }));
+            } else {
+                assert_eq!(body["min"].as_u64(), Some(20));
+                assert_eq!(body["max"].as_u64(), Some(81));
+            }
             link.tick(&ctx(0.0, true), &limits);
             link.send(Cmd::Stop);
             while mock.count("hssp/stop") < 2 {

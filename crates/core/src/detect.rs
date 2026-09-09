@@ -1,3 +1,7 @@
+//! The region detector's home in the engine: a thread that owns the loaded model, takes the
+//! newest RGB frame the tracker hands it, and reports the box the tracker should follow.
+//! Loading happens on the thread too, so a slow first CoreML compile never blocks the host.
+
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -5,21 +9,21 @@ use std::time::Instant;
 
 use bp_detect::{Detector, Kind, ModelSpec, Target};
 
-
-
+/// How much of each run's coverage replaces the last: half, so a flicker in one run does
+/// not swing a parameter.
 const COVERAGE_EMA: f64 = 0.5;
 
-
+/// What the detector is doing, for the bar and Settings.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DetectStatus {
-
+    /// No model chosen.
     None,
     Loading,
     Ready,
     Error(String),
 }
 
-
+/// The box chosen from the last run, in 0..1 of the frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Found {
     pub rect: bp_detect::Rect,
@@ -27,9 +31,9 @@ pub struct Found {
     pub confidence: f32,
 }
 
-
-
-
+/// One run's verdict: the box chosen (or none), whether the frame followed a cut, when the
+/// frame was on the caller's clock, and how much of the picture each `Kind` covered on this run
+/// alone (the snapshot's coverage is smoothed; the model rows want the raw one).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Verdict {
     pub found: Option<Found>,
@@ -42,16 +46,16 @@ pub struct Verdict {
 pub struct DetectSnapshot {
     pub status: DetectStatus,
     pub model: Option<&'static str>,
-
+    /// `coreml` or `cpu` once loaded.
     pub provider: Option<&'static str>,
-
+    /// The last run's chosen box, `None` when it found nothing worth following.
     pub found: Option<Found>,
-
+    /// How long the last run took.
     pub run_ms: f64,
     pub runs: u64,
-
+    /// Share of the frame each `Kind` covers, smoothed across runs.
     pub coverage: [f64; Kind::COUNT],
-
+    /// Every box of the last run, for a host that hides what was found.
     pub boxes: Vec<Found>,
 }
 
@@ -69,7 +73,7 @@ impl DetectSnapshot {
         }
     }
 
-
+    /// The last run's boxes whose class is one of `kinds`.
     pub fn boxes_of(&self, kinds: &[Kind]) -> Vec<Found> {
         self.boxes
             .iter()
@@ -90,14 +94,14 @@ struct Frame {
     rgb: Vec<u8>,
     width: usize,
     height: usize,
-
+    /// The frame followed a scene cut, so a miss means "nothing here", not "still there".
     after_cut: bool,
-
+    /// The kind to follow, or `None` for the rule (genitals, else a face).
     target: Option<Kind>,
-
-
+    /// Under the rule, the worst target worth taking: the one last followed while it is
+    /// assumed still there.
     floor: Option<Target>,
-
+    /// When the frame was, on the caller's clock; handed back with the verdict.
     time_ms: f64,
 }
 
@@ -107,7 +111,7 @@ struct Inner {
     state: Mutex<DetectSnapshot>,
 }
 
-
+/// A running detector thread. `on_result` gets every run's verdict.
 pub struct Detect {
     inner: Arc<Inner>,
     thread: Option<JoinHandle<()>>,
@@ -207,7 +211,7 @@ impl Detect {
         Detect { inner, thread }
     }
 
-
+    /// Loads a model (or unloads with `None`) on the thread. Status goes to Loading at once.
     pub fn load(&self, model: Option<(&'static ModelSpec, PathBuf, Option<PathBuf>)>) {
         {
             let mut s = self.inner.state.lock().unwrap();
@@ -233,9 +237,9 @@ impl Detect {
         self.inner.state.lock().unwrap().status == DetectStatus::Ready
     }
 
-
-
-
+    /// Hands over a packed RGB frame; one that arrives before the last was taken replaces it.
+    /// `target` is the kind to follow in it, or `None` for the rule with `floor` as the worst
+    /// target the rule may take.
     pub fn put(
         &self,
         rgb: &[u8],
@@ -250,7 +254,7 @@ impl Detect {
         if slot.stop {
             return;
         }
-
+        // A cut's frame must not be overwritten by an ordinary one before it runs.
         let after_cut = after_cut || slot.frame.as_ref().is_some_and(|f| f.after_cut);
         slot.frame = Some(Frame {
             rgb: rgb.to_vec(),
@@ -269,7 +273,7 @@ impl Detect {
         self.inner.state.lock().unwrap().clone()
     }
 
-
+    /// The smoothed coverage per kind, `None` until a model is ready.
     pub fn coverage(&self) -> Option<[f64; Kind::COUNT]> {
         let s = self.inner.state.lock().unwrap();
         (s.status == DetectStatus::Ready).then_some(s.coverage)

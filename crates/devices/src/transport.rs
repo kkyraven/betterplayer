@@ -1,3 +1,7 @@
+//! Transports behind an output. Line transports send newline-terminated TCode and hand
+//! back whatever lines the device sent, line-buffered, without blocking the tick. Buttplug
+//! is a message protocol and gets its own link.
+
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,45 +38,46 @@ pub enum Transport {
     WebSocket {
         url: String,
     },
-
+    /// Intiface Central or any Buttplug v3 server.
     Buttplug {
         url: String,
     },
-
+    /// A TCodeESP32 board over BLE, matched by advertised name or address prefix.
     Ble {
         name: String,
     },
-
-
+    /// An OSSM running the KinkyMakers firmware, over its BLE streaming service, matched
+    /// by advertised name or address prefix; empty takes the first one found.
     Ossm {
         name: String,
     },
-
-
+    /// A DG-Lab Coyote v3 over BLE. Strengths are the user's per-channel cap, 0..200,
+    /// and 0 means silence until the user raises it.
     Coyote {
         name: String,
         strength_a: u8,
         strength_b: u8,
     },
-
+    /// The Handy over its cloud API. An app key picks API v3, without one it is v2.
     Handy {
         key: String,
         app_key: Option<String>,
         hosting: HandyHosting,
     },
-
+    /// The Howl app on a phone, over its remote API. `key` is the one Howl's settings show.
     Howl {
         host: String,
         key: String,
     },
-
-
+    /// A Bluetooth toy through the embedded Buttplug server, matched by the server's address
+    /// for it, or a unique name only when no address was saved.
     Toy {
         name: String,
         address: String,
     },
-
-
+    /// One OpenShock shocker over the HTTP API at `url`, fired by an axis crossing a line.
+    /// The trigger is kept here so a reconnect comes back with the same one.
+    PiShock { username: String, key: String, user: u32, client: u32, shocker: u32, trigger: OpenShockTrigger },
     OpenShock {
         url: String,
         token: String,
@@ -96,11 +101,12 @@ impl Transport {
             Transport::Howl { .. } => "howl",
             Transport::Toy { .. } => "toy",
             Transport::OpenShock { .. } => "openshock",
+            Transport::PiShock { .. } => "pishock",
         }
     }
 
-
-
+    /// The address a user would recognise: port path, host and port, URL, or the connection
+    /// key with its middle masked.
     pub fn address(&self) -> String {
         match self {
             Transport::Serial { path, .. } => path.clone(),
@@ -126,18 +132,19 @@ impl Transport {
                 }
             }
             Transport::OpenShock { url, .. } => host_of(url),
+            Transport::PiShock { .. } => "broker.pishock.com".into(),
         }
     }
 }
 
-
+/// `api.openshock.app` from `https://api.openshock.app/`: the URL without scheme or path.
 fn host_of(url: &str) -> String {
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
     rest.split('/').next().unwrap_or_default().to_string()
 }
 
-
-
+/// Keeps the first and last two characters of a connection key, enough to recognise it
+/// without putting the whole key on screen or in a log.
 fn mask(key: &str) -> String {
     let n = key.chars().count();
     if n <= 4 {
@@ -148,7 +155,7 @@ fn mask(key: &str) -> String {
     format!("{head}{}{tail}", "*".repeat(n - 4))
 }
 
-
+/// What an output talks through once connected.
 pub enum Link {
     Lines(Box<dyn Conn>),
     Buttplug(Buttplug),
@@ -158,33 +165,34 @@ pub enum Link {
     Howl(HowlLink),
     Toy(ToyLink),
     OpenShock(OpenShockLink),
+    PiShock(crate::pishock::PiShockLink),
 }
 
-
+/// A blocking write (serial, TCP) gives up after this rather than holding the tick.
 const WRITE_TIMEOUT: Duration = Duration::from_millis(100);
-
-
+/// Unsent WebSocket bytes past this fail the send, so a stalled peer errors into the reconnect
+/// instead of buffering at 100 Hz.
 const WS_WRITE_CAP: usize = 16 * 1024;
 
 pub trait Conn: Send {
-
+    /// Hands a line to the transport. Must not block the tick: line transports queue it.
     fn send(&mut self, line: &str) -> io::Result<()>;
-
+    /// Complete lines received since the last call.
     fn recv_lines(&mut self) -> Vec<String>;
-
+    /// How long the last completed write took, once, when the transport writes on its own thread.
     fn last_write_us(&mut self) -> Option<u32> {
         None
     }
-
+    /// The shortest spacing between lines the link carries; 0 for whatever the tick sends.
     fn min_interval_ms(&self) -> u32 {
         0
     }
 }
 
-
-
-
-
+/// Opens a serial port for TCode. The modem lines are pinned so every platform opens the port
+/// the same way: on Windows the driver asserts DTR by default while no flow control leaves RTS
+/// off, and that pair is the state an ESP32 board's auto-reset circuit reads as "enter the
+/// bootloader" on its next reset; macOS asserts both. Both off means the board just runs.
 pub fn open_serial(path: &str, baud: u32, timeout: Duration) -> serialport::Result<Box<dyn serialport::SerialPort>> {
     #[cfg_attr(not(windows), allow(unused_mut))]
     let mut port = serialport::new(path, baud).timeout(timeout).flow_control(serialport::FlowControl::None).open()?;
@@ -196,10 +204,10 @@ pub fn open_serial(path: &str, baud: u32, timeout: Duration) -> serialport::Resu
     Ok(port)
 }
 
-
-
-
-
+/// The read half of a serial port. On Windows the port is opened without overlapped I/O, so a
+/// `ReadFile` waiting out its timeout holds the file object and every write on the cloned handle
+/// queues behind it, up to the whole timeout per TCode line. This half polls the input count
+/// first and only reads when bytes are there, so the tick thread's writes never wait.
 pub fn serial_reader(port: Box<dyn serialport::SerialPort>, wait: Duration) -> Box<dyn Read + Send> {
     #[cfg(windows)]
     {
@@ -237,7 +245,7 @@ impl Read for PolledSerial {
     }
 }
 
-
+/// Blocks while connecting; call it off the tick thread.
 pub fn open(t: &Transport) -> io::Result<Link> {
     match t {
         Transport::Buttplug { url } => return Buttplug::connect(url).map(Link::Buttplug),
@@ -258,6 +266,7 @@ pub fn open(t: &Transport) -> io::Result<Link> {
                 .bind(address, name, BIND_TIMEOUT)
                 .map(Link::Toy);
         }
+        Transport::PiShock { username, key, user, client, shocker, trigger } => return crate::pishock::PiShockLink::connect(username, key, *user, *client, *shocker, *trigger).map(Link::PiShock),
         Transport::OpenShock {
             url,
             token,
@@ -273,6 +282,7 @@ pub fn open(t: &Transport) -> io::Result<Link> {
         | Transport::Handy { .. }
         | Transport::Howl { .. }
         | Transport::Toy { .. }
+        | Transport::PiShock { .. }
         | Transport::OpenShock { .. } => unreachable!(),
         Transport::Ble { name } => Box::new(crate::ble::tcode(name)?),
         Transport::Serial { path, baud } => {
@@ -310,8 +320,8 @@ pub fn open(t: &Transport) -> io::Result<Link> {
     }))
 }
 
-
-
+/// A `ws://` socket in non-blocking mode, shared by the TCode and Buttplug links. Every message
+/// is flushed as it is sent; what the socket will not take yet waits in a capped buffer.
 pub(crate) fn websocket(url: &str) -> io::Result<WebSocket<MaybeTlsStream<TcpStream>>> {
     let config = WebSocketConfig::default()
         .write_buffer_size(0)
@@ -324,8 +334,8 @@ pub(crate) fn websocket(url: &str) -> io::Result<WebSocket<MaybeTlsStream<TcpStr
     Ok(ws)
 }
 
-
-
+/// Sends one text frame, treating a would-block as sent (the socket flushes next write). A full
+/// write buffer is an error: the peer has stopped reading.
 pub(crate) fn ws_send(ws: &mut WebSocket<MaybeTlsStream<TcpStream>>, text: &str) -> io::Result<()> {
     match ws.send(Message::Text(text.into())) {
         Ok(()) => Ok(()),
@@ -334,7 +344,7 @@ pub(crate) fn ws_send(ws: &mut WebSocket<MaybeTlsStream<TcpStream>>, text: &str)
     }
 }
 
-
+/// A writer thread with a one-slot mailbox plus a thread that line-buffers a blocking reader.
 struct StreamConn {
     writer: MailboxWriter,
     reader: LineReader,
@@ -358,14 +368,14 @@ struct Mailbox {
     line: String,
     pending: bool,
     stop: bool,
-
+    /// The write that failed; every send after it fails too, until the output reconnects.
     error: Option<String>,
     write_us: Option<u32>,
 }
 
-
-
-
+/// Writes lines on its own thread so a device that stops draining (a pulled cable, a full
+/// buffer) never holds the tick. The mailbox keeps one line: positions are absolute, so a line
+/// not yet written is replaced by the newer one.
 struct MailboxWriter {
     shared: Arc<(Mutex<Mailbox>, Condvar)>,
     thread: Option<JoinHandle<()>>,
@@ -394,7 +404,7 @@ impl MailboxWriter {
                         while !m.pending && !m.stop {
                             m = wake.wait(m).unwrap();
                         }
-
+                        // A line handed in before the stop still goes out.
                         if m.stop && !m.pending {
                             break;
                         }
@@ -500,7 +510,7 @@ impl Drop for LineReader {
     }
 }
 
-
+/// Appends complete lines from `bytes` to `out`, keeping the unterminated tail in `partial`.
 pub(crate) fn split_lines(partial: &mut Vec<u8>, bytes: &[u8], out: &mut Vec<String>) {
     for &b in bytes {
         if b == b'\n' {
@@ -576,7 +586,7 @@ mod tests {
         assert_eq!(host_of("shock.local:8080"), "shock.local:8080");
     }
 
-
+    /// A writer that records what it got, and can be told to fail.
     struct Sink(Arc<Mutex<Vec<u8>>>, bool);
 
     impl Write for Sink {

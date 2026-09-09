@@ -1,3 +1,6 @@
+//! VideoToolbox sessions are prepared off the render thread, then consumed there through
+//! IOSurface textures. Only the final output uses the player's existing readback buffers.
+
 use std::ffi::{CStr, c_char, c_void};
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
@@ -35,7 +38,7 @@ struct Key {
 }
 
 struct Session(NonNull<c_void>);
-
+// Created on one worker and transferred once. No concurrent calls or GL objects in Session.
 unsafe impl Send for Session {}
 
 fn error_text(error: &[c_char]) -> String {
@@ -105,7 +108,7 @@ impl Drop for Surface {
 }
 
 struct Ready {
-
+    // Textures must release their IOSurface references before the session's pixel buffers.
     input: Surface,
     output: Surface,
     session: Session,
@@ -148,7 +151,7 @@ impl Upscaler {
         }
     }
 
-
+    /// Returns the source-sized framebuffer once ready. Until then mpv keeps drawing Sharp.
     pub fn prepare(&mut self) -> Option<(u32, u32, u32)> {
         let request = self.shared.lock().unwrap().request;
         if request != self.request {
@@ -221,11 +224,11 @@ impl Upscaler {
         self.ready.as_ref().map(|ready| (ready.input.fbo, key.source.0, key.source.1))
     }
 
-
-
+    /// Processes the rendered input, then fits Apple's fixed scaling ratio to the host size.
+    /// A failed frame is still presented from the input; subsequent frames use Sharp.
     pub fn process(&mut self, target: u32, width: u32, height: u32) {
         let Some(ready) = &self.ready else { return };
-
+        // Make GL's IOSurface writes visible to Metal before Core Image reads them.
         unsafe { gl::Finish() };
         let result = ready.session.process();
         let (fbo, factor) = if result.is_ok() { (ready.output.fbo, ready.key.factor) } else { (ready.input.fbo, 1.0) };

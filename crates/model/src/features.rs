@@ -1,28 +1,32 @@
+//! One movement feature row from what the engine already computes, in `ml/models/movement.py`'s
+//! `FeatureLayout` order with `ml/data/dataset.py`'s normalisation constant for constant. This
+//! is the whole per-frame contract: change it and the Python changes with it.
+
 use bp_tracking::FlowPoint;
 
-
+/// Displacements are pixels of a 384 px wide frame; this brings a normal stroke to about 1.
 pub const FLOW_SCALE: f32 = 8.0;
 pub const FLOW_CLIP: f32 = 4.0;
-
+/// Per column of `signals`, in engine component order (stroke, sway, surge, roll, pitch, twist).
 pub const SIGNAL_SCALE: [f32; 6] = [8.0, 4.0, 128.0, 128.0, 128.0, 128.0];
-
+/// Staleness caps in seconds; absent means the cap.
 pub const BOX_STALE_MAX: f32 = 10.0;
 pub const SEMANTIC_STALE_MAX: f32 = 2.0;
-
+/// A frame interval in ms is divided by this.
 pub const INTERVAL_SCALE: f64 = 33.3;
-
-
+/// The interval a window's first row always carries: one nominal frame (`feature_row` prepends
+/// `time_ms[0] - 1000 / 30`).
 pub const FIRST_INTERVAL: f32 = (1000.0 / 30.0 / INTERVAL_SCALE) as f32;
-
+/// Grid points per flow field and channels per point (dx, dy, err, textured).
 pub const GRID_POINTS: usize = 192;
 const GRID_CHANNELS: usize = 4;
 const FIELD: usize = GRID_POINTS * GRID_CHANNELS;
-
+/// Detector kinds the one-hot covers, in `bp_detect::Kind::ALL` order.
 pub const BOX_KINDS: usize = 6;
-
+/// Coverage columns kept: the first four kinds (genitals, breasts, buttocks, faces).
 pub const BOX_COVERAGE: usize = 4;
 
-
+/// The row's spans, in order. `Meta` checks an export against this at load.
 pub const MOVEMENT_LAYOUT: &[(&str, usize)] = &[
     ("frame_field", FIELD),
     ("region_field", FIELD),
@@ -68,30 +72,30 @@ pub const PACE: usize = offset(12);
 pub const FUTURE_MASK: usize = offset(13);
 pub const SEMANTIC_STALE: usize = offset(14);
 pub const SEMANTIC_PRESENT: usize = offset(15);
-
+/// Width of one row.
 pub const MOVEMENT_WIDTH: usize = offset(16);
 
-
-
-
+/// The detector's latest run, as the row reads it: when it ran (on the caller's clock), what it
+/// chose, and how much of the picture each kind covered on that run alone. A run that found
+/// nothing still counts: its coverage and its time are what the model sees.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoxRun {
     pub time_ms: f64,
-
+    /// The chosen box in 0..1 of the frame, `None` when the run found nothing worth following.
     pub rect: Option<[f32; 4]>,
-
+    /// Index into `bp_detect::Kind::ALL` of the box's kind; `None` for a covered class.
     pub kind: Option<usize>,
     pub confidence: f32,
     pub coverage: [f32; BOX_KINDS],
 }
 
-
-
-
+/// One frame's inputs. `chain` is the region tracker's last `Sample.motion`, held across frames
+/// that produced none (the first frame, the frame after a cut); `now_ms` is on the same clock
+/// as `detection.time_ms`, which is not necessarily the frame's media time.
 pub struct FrameInput<'a> {
     pub frame_field: &'a [FlowPoint],
     pub region_field: &'a [FlowPoint],
-
+    /// The region tracker's region, or the default centre box.
     pub region: [f32; 4],
     pub chain: [f64; 6],
     pub signals: [f64; 6],
@@ -102,11 +106,11 @@ pub struct FrameInput<'a> {
     pub pace: f32,
 }
 
-
+/// The 0.2, 0.2, 0.6, 0.6 box the region tracker uses when none is set.
 pub const DEFAULT_REGION: [f32; 4] = [0.2, 0.2, 0.6, 0.6];
 
-
-
+/// One flow grid: untextured points zeroed, displacements scaled to O(1) and clipped, the error
+/// through a log. `field` may be shorter than the grid (before the first frame); the rest is 0.
 fn field_block(field: &[FlowPoint], out: &mut [f32]) {
     out.fill(0.0);
     for (p, point) in field.iter().take(GRID_POINTS).enumerate() {
@@ -119,8 +123,8 @@ fn field_block(field: &[FlowPoint], out: &mut [f32]) {
     }
 }
 
-
-
+/// Fills `out` (`MOVEMENT_WIDTH` wide) with the frame's row. The future mask is left at 0; the
+/// ring sets it per window, as `feature_row` does.
 pub fn movement_row(input: &FrameInput, out: &mut [f32]) {
     assert_eq!(out.len(), MOVEMENT_WIDTH);
     field_block(input.frame_field, &mut out[FRAME_FIELD..FRAME_FIELD + FIELD]);
@@ -147,7 +151,7 @@ pub fn movement_row(input: &FrameInput, out: &mut [f32]) {
     }
     out[PACE..PACE + 6].fill(input.pace);
     out[FUTURE_MASK] = 0.0;
-
+    // The shipped model trained with the semantic backbone absent: stale at the cap, not present.
     out[SEMANTIC_STALE] = SEMANTIC_STALE_MAX;
     out[SEMANTIC_PRESENT] = 0.0;
 }
@@ -185,11 +189,11 @@ mod tests {
         assert_eq!(out[BOX_STALE], 2.5);
         assert_eq!(&out[PACE..PACE + 6], &[0.7; 6]);
         assert_eq!((out[FUTURE_MASK], out[SEMANTIC_STALE], out[SEMANTIC_PRESENT]), (0.0, 2.0, 0.0));
-
+        // No detector: the box block is zeros and the staleness is at its cap.
         movement_row(&FrameInput { detection: None, ..input }, &mut out);
         assert!(out[BOX..BOX_STALE].iter().all(|v| *v == 0.0));
         assert_eq!(out[BOX_STALE], BOX_STALE_MAX);
-
+        // A run that found nothing keeps its coverage and time.
         let miss = BoxRun { rect: None, kind: None, confidence: f32::NAN, ..run };
         movement_row(&FrameInput { detection: Some(&miss), ..input }, &mut out);
         assert!(out[BOX..BOX_COVERAGE_AT].iter().all(|v| *v == 0.0));

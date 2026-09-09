@@ -1,3 +1,10 @@
+//! AI Motion in the engine: a feed that turns each frame into the movement model's row, runs
+//! the window on a cadence and hands back the frames it scored. One feed per consumer: the
+//! live worker (causal, every 4 frames), the lookahead (16 frames of future, every 8) and a
+//! generation (`predict.py`'s own alignment: hop 64, scored 64..128). The whole-frame flow grid
+//! is a second tracker with the full frame as its region, beside the region tracker the feed
+//! is handed after its push, exactly as `spike/dump-features.mjs` builds the training rows.
+
 use std::sync::Arc;
 
 use bp_model::{
@@ -10,8 +17,8 @@ use bp_tracking::{Motion, Region, Sample, TrackOptions, Tracker};
 use crate::detect::Verdict;
 use crate::track_component;
 
-
-
+/// A detector verdict as the feature row reads it: the box, its kind's index in
+/// `bp_detect::Kind::ALL` (none for a covered class), the confidence and this run's coverage.
 pub(crate) fn box_run(v: &Verdict) -> BoxRun {
     BoxRun {
         time_ms: v.time_ms,
@@ -31,8 +38,8 @@ pub(crate) fn box_run(v: &Verdict) -> BoxRun {
     }
 }
 
-
-
+/// How often a feed runs the window, how much future the present has, and after how many rows
+/// the first run happens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Cadence {
     pub hop: usize,
@@ -41,20 +48,20 @@ pub(crate) struct Cadence {
 }
 
 impl Cadence {
-
+    /// Every 4 frames, no future: 0.6 ms a frame and 130 ms of added latency.
     pub const LIVE: Cadence = Cadence {
         hop: 4,
         future: 0,
         first_run: 4,
     };
-
+    /// The lookahead is ahead of the playhead, so it hops by 8 and reads 8.
     pub const LOOKAHEAD: Cadence = Cadence {
         hop: 8,
         future: FUTURE,
         first_run: 8,
     };
-
-
+    /// `predict.py`: windows hop by the scored width, the first starting 64 frames before the
+    /// title, so every frame is scored once with the same context it had in evaluation.
     pub const GENERATE: Cadence = Cadence {
         hop: PAST - SCORE_START,
         future: FUTURE,
@@ -69,17 +76,17 @@ pub(crate) struct MotionFeed {
     cadence: Cadence,
     row: Vec<f32>,
     smoothers: [Smoother; 6],
-
+    /// The depth trim's running centre per head, `decoder::dense_signal` one frame at a time.
     centres: [Smoother; 6],
     gates: [ActiveGate; 6],
-
+    /// Head index to motion component index, from the metadata's axis order.
     components: [Option<usize>; 6],
-
+    /// The region tracker's last motion, held across frames that produced none.
     chain: Motion,
     cuts_seen: u64,
     last_time: Option<f64>,
     interval_ms: f64,
-
+    /// The last run's cost.
     pub run_ms: f64,
 }
 
@@ -120,7 +127,7 @@ impl MotionFeed {
         }
     }
 
-
+    /// Whether this feed runs the given model.
     pub fn same(&self, loaded: &Arc<Loaded>) -> bool {
         Arc::ptr_eq(&self.loaded, loaded)
     }
@@ -131,14 +138,14 @@ impl MotionFeed {
         }
     }
 
-
+    /// The measured frame interval, for spacing live samples.
     pub fn interval_ms(&self) -> f64 {
         self.interval_ms
     }
 
-
-
-
+    /// One frame after the region tracker has seen it. `detection` and `now_ms` share a clock;
+    /// `time_ms` is the frame's media time. Returns the frames this push scored, oldest first,
+    /// or nothing between hops.
     #[allow(clippy::too_many_arguments)]
     pub fn push(
         &mut self,
@@ -196,9 +203,9 @@ impl MotionFeed {
         Ok(out)
     }
 
-
-
-
+    /// The end of a file: the last frame repeated until every real frame has been scored, as
+    /// `predict.py`'s clipped index does. `sink` sees frames in order and may see the last
+    /// frame's time more than once.
     pub fn flush(&mut self, time_ms: f64, sink: &mut impl FnMut(Heads)) -> Result<(), String> {
         for _ in 0..WINDOW {
             self.runner.ring.push_repeat(time_ms);
@@ -209,11 +216,11 @@ impl MotionFeed {
         Ok(())
     }
 
-
-
-
-
-
+    /// A scored frame as the live path plays it: the smoothed position per motion component,
+    /// NaN where the gate has released the axis or the model has no head for it.
+    ///
+    /// `energy` is the rows' Intensity per motion component: it scales the smoothing and the
+    /// gate through `DecodeConfig::energised`, and nothing else.
     pub fn live(&mut self, h: &Heads, pace: f64, energy: &[f64; 6]) -> Motion {
         let base = self.loaded.meta.decode_config(pace);
         let mut out = [f64::NAN; 6];

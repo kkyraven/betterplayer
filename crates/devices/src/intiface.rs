@@ -1,3 +1,12 @@
+//! A Buttplug v3 server standing in for Intiface Central on `ws://127.0.0.1:12345`, so a
+//! page that scripts an Intiface toy (faptap.net) drives our stroke axis instead. It offers
+//! one device, "Better Player", with one linear actuator: each `LinearCmd` moves the stroke
+//! to its position over its duration; `StopDeviceCmd`, `StopAllDevices` and the client going
+//! away release the axis. The engine reads the stroke every tick with `stroke_at`.
+//!
+//! The one failure worth reporting is the bind, which `start` returns. Connections that
+//! drop before or during the handshake (port scans, probes) are ignored, not remembered.
+
 use std::io::ErrorKind;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,15 +18,15 @@ use serde_json::{Value, json};
 use tungstenite::{Message, WebSocket};
 
 pub const DEFAULT_PORT: u16 = 12345;
-
-
+/// What the server calls itself in `ServerInfo`; the Buttplug client refuses it so the app
+/// never drives itself.
 pub const SERVER_NAME: &str = "Better Player";
-
+/// How often the accept loop and a connection's read loop look at the stop flag.
 const POLL: Duration = Duration::from_millis(50);
-
+/// How long a client may take to send its upgrade request after connecting.
 const HANDSHAKE: Duration = Duration::from_secs(3);
 
-
+/// A commanded stroke: from where the axis was at the command toward `to` over the duration.
 #[derive(Clone, Copy, Debug)]
 struct Move {
     from: f64,
@@ -41,12 +50,12 @@ impl Move {
 #[derive(Default)]
 struct State {
     clients: usize,
-
+    /// What the newest client called itself in `RequestServerInfo`.
     client: Option<String>,
     stroke: Option<Move>,
 }
 
-
+/// What the server is doing, for the UI.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IntifaceStatus {
     pub port: u16,
@@ -62,8 +71,8 @@ pub struct IntifaceServer {
 }
 
 impl IntifaceServer {
-
-
+    /// Binds the loopback port and starts accepting. Fails at once when the port is taken
+    /// (Intiface Central itself, most likely).
     pub fn start(port: u16) -> Result<IntifaceServer, String> {
         let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|e| match e.kind() {
             ErrorKind::AddrInUse => format!("port {port} is in use (is Intiface Central running?)"),
@@ -91,7 +100,7 @@ impl IntifaceServer {
         self.port
     }
 
-
+    /// The stroke a client is commanding right now, 0..1; `None` when nobody is.
     pub fn stroke_at(&self, now: Instant) -> Option<f64> {
         self.state.lock().unwrap().stroke.map(|m| m.at(now))
     }
@@ -140,8 +149,8 @@ fn accept_loop(listener: TcpListener, state: Arc<Mutex<State>>, stop: Arc<Atomic
 fn serve(stream: TcpStream, state: Arc<Mutex<State>>, stop: Arc<AtomicBool>) {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_nodelay(true);
-
-
+    // The handshake gets its own budget: at `POLL` a client that pauses after connecting is
+    // dropped (`Interrupted` here, `TimedOut` on Windows). Once up, reads poll the stop flag.
     let _ = stream.set_read_timeout(Some(HANDSHAKE));
     let Ok(mut ws) = tungstenite::accept(stream) else {
         return;
@@ -177,7 +186,7 @@ fn serve(stream: TcpStream, state: Arc<Mutex<State>>, stop: Arc<AtomicBool>) {
     let _ = ws.close(None);
     let mut s = state.lock().unwrap();
     s.clients = s.clients.saturating_sub(1);
-
+    // The last client gone takes its stroke with it, so the axis homes rather than holds.
     if s.clients == 0 {
         s.stroke = None;
         s.client = None;
@@ -197,7 +206,7 @@ fn error(id: u64, message: &str) -> Value {
     json!({ "Error": { "Id": id, "ErrorMessage": message, "ErrorCode": 3 } })
 }
 
-
+/// The one device on offer: a stroker with a single position actuator.
 fn device() -> Value {
     json!({
         "DeviceIndex": 0,
@@ -211,7 +220,7 @@ fn device() -> Value {
     })
 }
 
-
+/// One client message to its reply; `None` for messages that get no reply.
 fn handle(msg: &Value, state: &Mutex<State>) -> Option<Value> {
     let (name, body) = msg.as_object()?.iter().next()?;
     let id = body.get("Id").and_then(Value::as_u64).unwrap_or(0);
@@ -247,7 +256,7 @@ fn handle(msg: &Value, state: &Mutex<State>) -> Option<Value> {
                 .max(0.0);
             let now = Instant::now();
             let mut s = state.lock().unwrap();
-
+            // The first command starts from its own position: the engine eases the axis into it.
             let from = s.stroke.map_or(position, |m| m.at(now));
             s.stroke = Some(Move {
                 from,
@@ -311,7 +320,7 @@ mod tests {
             (0.8, 0.8),
             "the first command is the position itself"
         );
-
+        // A second command starts from where the first one is now.
         let mut s = state.lock().unwrap();
         s.stroke = Some(Move {
             from: 0.0,
@@ -349,11 +358,11 @@ mod tests {
             .unwrap()
             .port();
         let server = IntifaceServer::start(port).unwrap();
-
+        // A port scan: connect, say nothing, leave.
         drop(TcpStream::connect(("127.0.0.1", port)).unwrap());
         thread::sleep(Duration::from_millis(100));
         assert_eq!(server.status(), IntifaceStatus { port, clients: 0, client: None });
-
+        // A client that pauses after connecting still gets its handshake.
         let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         thread::sleep(Duration::from_millis(200));
         let (mut ws, _) = tungstenite::client(format!("ws://127.0.0.1:{port}"), stream).unwrap();

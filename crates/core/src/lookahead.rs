@@ -1,3 +1,12 @@
+//! Tracking ahead of playback for a local file, so an axis can run ahead of the picture (a
+//! negative offset). A second, silent mpv decodes at full speed from a little before the
+//! playhead into a small frame, the tracker runs on those frames, and the motion is kept by
+//! media time for the tick to read at media time minus the offset. The live path
+//! (`track.rs`) covers whatever is not tracked yet. It pauses once far enough ahead, so on
+//! average it costs one extra decode at playback speed. With the movement model loaded and an
+//! axis on AI Motion, the same frames feed the model with its full 16 frames of future, into a
+//! second store.
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -10,25 +19,25 @@ use crate::detect::Detect;
 use crate::motion::{Cadence, MotionFeed, box_run};
 use crate::{AutoRegion, RegionSource, Shared, next_auto_region};
 
-
+/// Frame width the tracker runs on; the height follows the picture.
 pub(crate) const WIDTH: u32 = 384;
-
-
+/// Footage before the target the tracker runs through so its normalisation has settled by
+/// the time its output is needed.
 const WARMUP_MS: f64 = 3000.0;
-
+/// The decode pauses this far ahead of the playhead and resumes at the low mark.
 const LEAD_PAUSE_MS: f64 = 60_000.0;
 const LEAD_RESUME_MS: f64 = 30_000.0;
-
+/// This far behind the playhead the run is restarted rather than left to catch up.
 const BEHIND_MS: f64 = 1500.0;
-
+/// A run is given this long to reach the playhead before it is restarted for being behind.
 const HOLDOFF_MS: f64 = 5000.0;
-
+/// A playhead this far from the run's end is a seek, which restarts at once.
 const SEEK_MS: f64 = 10_000.0;
-
+/// Runs kept, so seeking back into tracked footage needs no decode.
 const RUNS_KEPT: usize = 24;
 const FRAME_WAIT: Duration = Duration::from_millis(100);
 
-
+/// Tracked motion by media time, in runs: one per start or seek, each ascending in time.
 #[derive(Default)]
 pub struct Store {
     runs: Vec<Vec<(f64, Motion)>>,
@@ -53,14 +62,14 @@ impl Store {
         run.push((time_ms, motion));
     }
 
-
+    /// The run covering `time_ms`, newest first.
     fn run_at(&self, time_ms: f64) -> Option<&[(f64, Motion)]> {
         self.runs.iter().rev().map(Vec::as_slice).find(|r| {
             r.first().is_some_and(|f| f.0 <= time_ms) && r.last().is_some_and(|l| time_ms <= l.0)
         })
     }
 
-
+    /// Motion at `time_ms` by linear interpolation, `None` where nothing is tracked.
     pub fn value_at(&self, time_ms: f64) -> Option<Motion> {
         let run = self.run_at(time_ms)?;
         let i = run.partition_point(|(t, _)| *t <= time_ms);
@@ -76,25 +85,25 @@ impl Store {
         Some(std::array::from_fn(|k| va[k] + (vb[k] - va[k]) * u))
     }
 
-
+    /// How far past `time_ms` the run covering it reaches.
     pub fn ahead_of(&self, time_ms: f64) -> Option<f64> {
         self.run_at(time_ms)
             .and_then(|r| r.last())
             .map(|l| l.0 - time_ms)
     }
 
-
+    /// The newest run's first and last sample times.
     fn newest(&self) -> Option<(f64, f64)> {
         let run = self.runs.last()?;
         Some((run.first()?.0, run.last()?.0))
     }
 }
 
-
+/// A running lookahead. Dropping it stops the decode; the thread lets go on its own.
 pub struct Lookahead {
     pub path: String,
     store: Arc<Mutex<Store>>,
-
+    /// The movement model's output by media time, NaN where it has released a component.
     model_store: Arc<Mutex<Store>>,
     stop: Arc<AtomicBool>,
 }
@@ -134,7 +143,7 @@ impl Lookahead {
         self.store.lock().unwrap().value_at(time_ms)
     }
 
-
+    /// The model's motion at `time_ms`, `None` where it has not scored yet.
     pub fn model_value_at(&self, time_ms: f64) -> Option<Motion> {
         self.model_store.lock().unwrap().value_at(time_ms)
     }
@@ -150,11 +159,11 @@ impl Drop for Lookahead {
     }
 }
 
-
+/// The last restart: when, and the playhead it aimed to have covered.
 struct Restart {
     at: Instant,
     target_ms: f64,
-
+    /// Frames from before the seek are still in flight; wait for one near the seek point.
     expect_from_ms: Option<f64>,
 }
 
@@ -185,9 +194,9 @@ fn run(
     player.load(path, None)?;
 
     let mut tracker = Tracker::new(*shared.track_options.lock().unwrap());
-
+    // The movement model's feed, made once the model is loaded and an axis asks for it.
     let mut feed: Option<MotionFeed> = None;
-
+    // The detector's box for these frames: the live one sees a different scene this far ahead.
     let auto_box: Arc<Mutex<AutoRegion>> = Arc::new(Mutex::new(AutoRegion::default()));
     let latest: Arc<Mutex<Option<BoxRun>>> = Arc::new(Mutex::new(None));
     let detect = shared.detector_model.lock().unwrap().clone().map(|model| {
@@ -215,13 +224,13 @@ fn run(
     let mut rgb = Vec::new();
 
     while !stop.load(Ordering::Relaxed) {
-
+        // Nothing can be asked of mpv before the file is in.
         if !loaded.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(20));
             continue;
         }
-
-
+        // The output takes the picture's shape once known, so regions mean the same here as
+        // on screen.
         let s = *size.lock().unwrap();
         if s != fitted && s.0 > 0 && s.1 > 0 {
             fitted = s;
@@ -230,7 +239,7 @@ fn run(
             fps = player.video_fps();
         }
 
-
+        // Follow the playhead: restart when the run will not serve it, pause once far ahead.
         let pos = shared.clock.lock().unwrap().peek();
         let (covers_ahead, newest) = {
             let st = store.lock().unwrap();
@@ -273,7 +282,7 @@ fn run(
         let Some(frame) = player.acquire_wait(FRAME_WAIT) else {
             continue;
         };
-
+        // Redraws (a resize) carry no position; only decoded frames do.
         let Some(pts) = frame.pts else { continue };
         let mut time = pts * 1000.0;
         if let Some(r) = restart.as_mut() {
@@ -284,8 +293,8 @@ fn run(
                 r.expect_from_ms = None;
             }
         }
-
-
+        // The position is read before each frame is drawn and can repeat when it has not
+        // advanced yet; a repeat is the next frame.
         if let Some(l) = last_time {
             if time <= l {
                 time = l + if fps > 0.0 {
@@ -328,7 +337,7 @@ fn run(
                 store.lock().unwrap().push(s.time_ms, s.motion);
             }
         }
-
+        // The model sees the same frame, with the detector's latest run on this decode's clock.
         match shared.motion_loaded().filter(|_| shared.motion_wanted()) {
             Some(loaded) => {
                 if feed.as_ref().is_none_or(|f| !f.same(&loaded)) {
@@ -364,7 +373,7 @@ fn run(
             None => feed = None,
         }
 
-
+        // The detector looks after every cut and at the live interval, in media time.
         if let Some(d) = detect.as_ref().filter(|d| d.ready()) {
             if shared.region.lock().unwrap().source == RegionSource::Auto {
                 let interval = shared.detect_options.lock().unwrap().interval_ms;
@@ -395,7 +404,7 @@ fn run(
     Ok(())
 }
 
-
+/// Fit before loading: resizing a paused first frame can discard or duplicate it.
 pub(crate) fn silent_player(
     path: &str,
     hwdec: Option<String>,
@@ -405,7 +414,7 @@ pub(crate) fn silent_player(
     let info = bp_player::probe_video(path)?;
     let height =
         ((WIDTH as f64 * info.height as f64 / info.width as f64 / 2.0).round() as u32 * 2).max(2);
-
+    // FFmpeg defaults untagged inputs to BT.601; mpv instead guesses from resolution.
     let matrix = match info.color_matrix.as_str() {
         "auto" | "bt.601" => "bt601",
         "bt.709" => "bt709",
@@ -422,9 +431,9 @@ pub(crate) fn silent_player(
     )
 }
 
-
-
-
+/// Use the dumper's libswscale conversion before rendering at 1:1. GPU downscaling and
+/// RGB-derived luma produce different flow fields from FFmpeg's direct gray conversion.
+/// Color consumers use the dumper's detector path, which converts scaled RGB to luma.
 fn silent_options(hwdec: Option<String>, color: bool, matrix: &str) -> PlayerOptions {
     let mut mpv_options: Vec<_> = [
         "aid=no",
@@ -442,7 +451,7 @@ fn silent_options(hwdec: Option<String>, color: bool, matrix: &str) -> PlayerOpt
         (k.to_string(), v.to_string())
     })
     .collect();
-
+    // libavfilter needs CPU frames; zero-copy hardware surfaces cannot enter swscale.
     let hwdec = Some(match hwdec.as_deref().unwrap_or("auto-copy") {
         "videotoolbox" => "videotoolbox-copy".into(),
         "d3d11va" => "d3d11va-copy".into(),
@@ -463,7 +472,7 @@ fn silent_options(hwdec: Option<String>, color: bool, matrix: &str) -> PlayerOpt
     }
 }
 
-
+/// Rec. 601 luma from packed BGRA, into a reused buffer.
 pub(crate) fn bgra_to_gray(bgra: &[u8], n: usize, out: &mut Vec<u8>) {
     out.clear();
     out.reserve(n);
@@ -486,7 +495,7 @@ pub(crate) fn bgra_to_rgb(bgra: &[u8], n: usize, out: &mut Vec<u8>) {
 mod tests {
     use super::*;
 
-
+    /// Requires FFmpeg and an offscreen GL context. Compares decoded pixels, not model scores.
     #[test]
     #[cfg(target_os = "macos")]
     #[ignore = "requires ffmpeg, VideoToolbox and a GPU context"]
@@ -593,7 +602,7 @@ mod tests {
         if custom.is_some() {
             return;
         }
-
+        // Exercise frame timing, decimation, portrait fitting and explicit color metadata.
         for matrix in ["unknown", "bt709"] {
             let result = Command::new("ffmpeg")
                 .args([
@@ -666,7 +675,7 @@ mod tests {
         s.begin();
         s.push(1000.0, m(0.0));
         s.push(2000.0, m(1.0));
-        s.push(1500.0, m(0.5));
+        s.push(1500.0, m(0.5)); // out of order: dropped
         assert_eq!(s.value_at(1500.0), Some(m(0.5)));
         assert_eq!(s.value_at(2500.0), None);
         assert_eq!(s.ahead_of(1000.0), Some(1000.0));

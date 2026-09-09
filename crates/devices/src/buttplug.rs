@@ -1,3 +1,10 @@
+//! Buttplug v3 client over WebSocket (Intiface Central at `ws://127.0.0.1:12345`).
+//! Stroke goes to every linear actuator, vibrate to every vibrator, twist to every
+//! rotator. While a script drives the stroke each keyframe goes out once as a `LinearCmd`
+//! to the next position over the time until it, which is the move a Handy, Keon or Launch
+//! plays natively. Everything else (levels, a live stroke, a paused one) goes out every
+//! 100 ms, the rate BLE toys cope with, with durations matching so motion stays continuous.
+
 use std::collections::VecDeque;
 use std::io::{self, ErrorKind};
 use std::net::TcpStream;
@@ -14,8 +21,8 @@ use crate::tcode::AxisClamp;
 use crate::transport::{websocket, ws_send};
 
 const SEND_EVERY_MS: f64 = 100.0;
-
-
+/// A keyframe already sent goes again when its arrival moved by more than this (a seek
+/// within its segment, a rate change), not for tick jitter.
 const KEYFRAME_SLIP: Duration = Duration::from_millis(40);
 
 struct Device {
@@ -25,16 +32,16 @@ struct Device {
     vibrate: Vec<usize>,
     rotate: usize,
     last: [Option<u16>; 3],
-
+    /// A device's first `LinearCmd` glides over `CONNECT_GLIDE_MS`; no stroke is sent until then.
     glide_until: Option<Instant>,
-
+    /// The keyframe last sent (its video time) and when the device was told to arrive.
     keyframe: Option<(f64, Instant)>,
 }
 
 impl Device {
-
-
-
+    /// The stroke to send this tick as (position, duration ms), if any. The first move glides;
+    /// then a keyframe goes out once as it starts (again if its arrival slipped), and without
+    /// one the sampled position goes out when `due`.
     fn stroke(
         &mut self,
         sampled: Option<f64>,
@@ -91,8 +98,8 @@ pub struct Buttplug {
 }
 
 impl Buttplug {
-
-
+    /// Connects, completes the handshake, asks for the device list and starts scanning.
+    /// Blocks up to a few seconds; call off the tick thread.
     pub fn connect(url: &str) -> io::Result<Buttplug> {
         let ws = websocket(url)?;
         let mut bp = Buttplug {
@@ -120,7 +127,7 @@ impl Buttplug {
             }
             for msg in bp.read_all()? {
                 if let Some(info) = msg.get("ServerInfo") {
-
+                    // Our own stand-in on the same port: connecting would loop L0 back to itself.
                     if info.get("ServerName").and_then(Value::as_str) == Some(intiface::SERVER_NAME) {
                         return Err(io::Error::other("this is the app's own Intiface server"));
                     }
@@ -172,7 +179,7 @@ impl Buttplug {
         Ok(out)
     }
 
-
+    /// Reads device events and keeps the server's ping alive. Call every tick.
     pub fn poll(&mut self) -> io::Result<()> {
         for msg in self.read_all()? {
             if let Some(list) = msg
@@ -210,7 +217,7 @@ impl Buttplug {
         Ok(())
     }
 
-
+    /// True once after the device set changed.
     pub fn devices_changed(&mut self) -> bool {
         std::mem::take(&mut self.changed)
     }
@@ -231,11 +238,11 @@ impl Buttplug {
         self.log.drain(..).collect()
     }
 
-
-
-
-
-
+    /// Sends stroke, vibrate and twist to every device that changed. An axis that is not
+    /// `active` (paused, with the user stopping levels on pause) rests its vibrators and
+    /// rotators at once, below any range floor; the stroke holds. A `keyframe` is sent as one
+    /// move the moment it starts; levels and a sampled stroke wait for the 100 ms cadence.
+    /// Returns whether anything was sent this tick.
     pub fn send(
         &mut self,
         values: &[f64; Axis::COUNT],
@@ -259,7 +266,7 @@ impl Buttplug {
         let stroke = clamped(Axis::L0);
         let keyframe = keyframe.and_then(|k| Some((ranged(Axis::L0, k.pos)?, k)));
         let vibrate = level(Axis::V0, 0.0);
-
+        // Twist is a speed from the middle, so the middle is still.
         let twist = level(Axis::R0, 0.5);
         let mut batch = Vec::new();
         let now = Instant::now();
@@ -389,22 +396,22 @@ mod tests {
     fn keyframes_go_out_once_as_they_start_and_samples_fill_in() {
         let mut d = linear();
         let t0 = Instant::now();
-
+        // The first move glides, then nothing until the glide is over.
         assert_eq!(d.stroke(Some(0.5), None, true, 100, t0), Some((0.5, CONNECT_GLIDE_MS as u64)));
         assert_eq!(d.stroke(Some(0.6), None, true, 100, t0 + Duration::from_millis(100)), None);
         let t1 = t0 + Duration::from_millis(CONNECT_GLIDE_MS as u64);
-
+        // A keyframe goes out as soon as it starts, whatever the cadence, and only once.
         let k = Keyframe { at_ms: 1000.0, pos: 0.9, in_ms: 300.0 };
         assert_eq!(d.stroke(Some(0.55), Some((0.9, k)), false, 10, t1), Some((0.9, 300)));
         let later = Keyframe { in_ms: 290.0, ..k };
         assert_eq!(d.stroke(Some(0.6), Some((0.9, later)), true, 100, t1 + Duration::from_millis(10)), None);
-
+        // A seek within the segment changes its arrival and it goes again.
         let seek = Keyframe { in_ms: 500.0, ..k };
         assert_eq!(d.stroke(Some(0.6), Some((0.9, seek)), false, 10, t1 + Duration::from_millis(20)), Some((0.9, 500)));
-
+        // Without a keyframe (paused, a live source) the sampled stroke goes out on the cadence.
         assert_eq!(d.stroke(Some(0.7), None, false, 10, t1 + Duration::from_millis(30)), None);
         assert_eq!(d.stroke(Some(0.7), None, true, 100, t1 + Duration::from_millis(100)), Some((0.7, 100)));
-
+        // And the same keyframe goes out again after that, so a resume picks the move back up.
         assert_eq!(d.stroke(Some(0.7), Some((0.9, k)), false, 10, t1 + Duration::from_millis(110)), Some((0.9, 300)));
     }
 

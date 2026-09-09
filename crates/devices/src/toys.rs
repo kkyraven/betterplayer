@@ -1,3 +1,15 @@
+//! Bluetooth toys through an embedded Buttplug server: one server and client for the process,
+//! on their own tokio runtime thread, started on first use. The wizard scans through it; a
+//! `Toy` output binds one of its devices (`Hub::bind`) and sends it values through `ToyLink`.
+//!
+//! Buttplug describes a device as features, each with one output (vibrate, rotate, position
+//! and so on). Every feature follows one axis or is off; `default_axis` picks the axis until
+//! the user changes it. An intensity feature on a position or rotation axis takes that axis's
+//! speed (`follows_speed`), so a plain stroke script drives a vibrator; on an intensity axis it
+//! takes the value. A position (and a two-way rotate) then goes through the axis's range clamp;
+//! a level feature (everything else) goes through its own `LevelMap`: where along the input it
+//! starts, where it reaches full, and the floor and cap of what the toy gets.
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, ErrorKind};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -21,23 +33,23 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::output::{CONNECT_GLIDE_MS, Keyframe};
 use crate::tcode::AxisClamp;
 
-
+/// How long a connecting output waits for its device before failing (and retrying).
 pub const BIND_TIMEOUT: Duration = Duration::from_secs(15);
-
+/// Commands go out at most this often per device, the rate BLE toys cope with.
 const SEND_EVERY_MS: f64 = 100.0;
-
-
+/// A keyframe already sent goes again when its arrival moved by more than this (a seek
+/// within its segment, a rate change), not for tick jitter.
 const KEYFRAME_SLIP: Duration = Duration::from_millis(40);
-
+/// Axis speed an intensity feature reads as full: lengths of the axis per second.
 const SPEED_FULL: f64 = 4.0;
-
+/// Smoothing on the speed, so a 100 ms sample of a 10 ms tick does not flicker.
 const SPEED_TAU_MS: f64 = 150.0;
 const BATTERY_EVERY: Duration = Duration::from_secs(60);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 pub const TEST_MS: u32 = 3000;
 
-
-
+/// What a feature does. Both of Buttplug's position outputs are `position` to the UI; a timed
+/// position carries the interval as its duration so motion stays continuous.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FeatureKind {
     Vibrate,
@@ -52,8 +64,8 @@ pub enum FeatureKind {
 }
 
 impl FeatureKind {
-
-
+    /// Buttplug output types in the order a feature is matched: a timed position wins over a
+    /// plain one when a feature offers both.
     const ALL: [(OutputType, FeatureKind); 9] = [
         (
             OutputType::HwPositionWithDuration,
@@ -91,32 +103,32 @@ impl FeatureKind {
 pub struct ToyFeature {
     pub index: u32,
     pub kind: FeatureKind,
-
+    /// Buttplug's description, `Vibrator 1` or empty.
     pub description: String,
-
+    /// A rotate whose range goes below zero turns both ways: direction from the half.
     pub signed: bool,
 }
 
 impl ToyFeature {
-
-
+    /// A level rather than a place: vibrate, oscillate, constrict, spray, a one-way rotate, heat
+    /// and light. Positions and a two-way rotate are places and keep the axis's range instead.
     pub fn is_level(&self) -> bool {
         !self.kind.is_position() && !(self.kind == FeatureKind::Rotate && self.signed)
     }
 }
 
-
-
-
+/// How a level feature turns its input (the axis's speed or value, 0 to 1) into what the toy
+/// gets: nothing up to `from`, `floor` just past it, a straight line to `cap` at `to`, and `cap`
+/// beyond. Zero in is always zero out, so a floor never turns silence into stimulation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LevelMap {
-
+    /// Input level the toy starts at; below it the toy is off.
     pub from: f64,
-
+    /// Input level the toy reaches `cap` at.
     pub to: f64,
-
+    /// What the toy gets as it starts.
     pub floor: f64,
-
+    /// The most the toy ever gets.
     pub cap: f64,
 }
 
@@ -127,7 +139,7 @@ impl Default for LevelMap {
 }
 
 impl LevelMap {
-
+    /// Everything within 0 to 1, `to` never below `from` and `cap` never below `floor`.
     pub fn validated(self) -> LevelMap {
         let unit = |v: f64| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
         let from = unit(self.from);
@@ -135,7 +147,7 @@ impl LevelMap {
         LevelMap { from, to: unit(self.to).max(from), floor, cap: unit(self.cap).max(floor) }
     }
 
-
+    /// The toy's level for an input level.
     pub fn apply(&self, input: f64) -> f64 {
         if input <= self.from || input <= 0.0 {
             return 0.0;
@@ -145,8 +157,8 @@ impl LevelMap {
         self.scale(t)
     }
 
-
-
+    /// The output side alone: `floor` to `cap` over 0 to 1, zero staying zero. The wizard's
+    /// test sweep uses this so a raised `from` cannot silence it.
     pub fn scale(&self, t: f64) -> f64 {
         if t <= 0.0 {
             return 0.0;
@@ -155,22 +167,22 @@ impl LevelMap {
     }
 }
 
-
+/// A device the embedded server has connected, for the wizard and for binding.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToyInfo {
     pub index: u32,
     pub name: String,
-
+    /// The server's identifier: a MAC, or the CoreBluetooth id on macOS.
     pub address: String,
     pub features: Vec<ToyFeature>,
     pub battery: Option<u8>,
-
+    /// Whether an output already drives it.
     pub bound: bool,
 }
 
-
-
-
+/// The axis a feature follows until the user picks another: positions and intensities follow
+/// the stroke (intensities as its speed), a two-way rotate the twist, constrict suction, spray
+/// lube; temperature and lights stay off.
 pub fn default_axis(f: &ToyFeature) -> Option<Axis> {
     match f.kind {
         FeatureKind::Position
@@ -184,8 +196,8 @@ pub fn default_axis(f: &ToyFeature) -> Option<Axis> {
     }
 }
 
-
-
+/// Whether a feature on an axis takes the axis's speed rather than its value: intensities
+/// (and a one-way rotate) on a position or rotation axis do.
 pub fn follows_speed(f: &ToyFeature, axis: Axis) -> bool {
     if f.kind.is_position() || (f.kind == FeatureKind::Rotate && f.signed) {
         return false;
@@ -196,7 +208,7 @@ pub fn follows_speed(f: &ToyFeature, axis: Axis) -> bool {
     )
 }
 
-
+/// One command per feature, newest wins; `Stop` releases every output of the device.
 pub(crate) enum DevCmd {
     Output(u32, ClientDeviceOutputCommand),
     Stop,
@@ -217,10 +229,10 @@ struct State {
     devices: BTreeMap<u32, Entry>,
     bound: HashSet<u32>,
     wizard_scanning: bool,
-
-
+    /// The address each output waiting in `bind` asked for (empty when it has none); scanning
+    /// stays on while any are, and a name match never takes a device one of them wants.
     waiting: Vec<String>,
-
+    /// Why the server is not running: no adapter, no permission, a failed start.
     error: Option<String>,
 }
 
@@ -242,7 +254,7 @@ pub struct Hub {
 
 static HUB: OnceLock<Hub> = OnceLock::new();
 
-
+/// The process's embedded server, started on the first call.
 pub fn hub() -> &'static Hub {
     HUB.get_or_init(Hub::start)
 }
@@ -283,7 +295,7 @@ impl Hub {
         let _ = self.tx.send(Cmd::Scan(state.want_scan()));
     }
 
-
+    /// The wizard's Bluetooth panel is open: scan while it is.
     pub fn set_wizard_scanning(&self, on: bool) {
         let mut s = self.shared.state.lock().unwrap();
         if s.wizard_scanning != on {
@@ -312,8 +324,8 @@ impl Hub {
         })
     }
 
-
-
+    /// Waits for this exact address, or a unique name when no address was saved.
+    /// Blocks; call it off the tick thread.
     pub fn bind(
         &'static self,
         address: &str,
@@ -417,7 +429,7 @@ impl Shared {
     }
 }
 
-
+/// Saved addresses never fall back to names: a different toy must be added explicitly.
 fn pick(s: &State, address: &str, name: &str) -> Option<u32> {
     let mut free = s
         .devices
@@ -437,7 +449,7 @@ fn pick(s: &State, address: &str, name: &str) -> Option<u32> {
     matches.next().is_none().then_some(first.info.index)
 }
 
-
+/// Load the bundled protocols, keeping OSSM exclusively on our dedicated BLE transport.
 fn device_config() -> Result<DeviceConfigurationManager, String> {
     let all = load_protocol_configs(&None, &None, false)
         .map_err(|e| format!("device config: {e}"))?
@@ -455,8 +467,8 @@ fn device_config() -> Result<DeviceConfigurationManager, String> {
     builder.finish().map_err(|e| format!("device config: {e}"))
 }
 
-
-
+/// Builds the server and client, then serves scan requests and device events until the
+/// client disconnects. Runs on the hub's runtime.
 async fn run(shared: Arc<Shared>, mut rx: UnboundedReceiver<Cmd>) -> Result<(), String> {
     let dcm = device_config()?;
     let mut dmb = ServerDeviceManagerBuilder::new(dcm);
@@ -481,7 +493,7 @@ async fn run(shared: Arc<Shared>, mut rx: UnboundedReceiver<Cmd>) -> Result<(), 
             ev = events.next() => match ev {
                 Some(ButtplugClientEvent::DeviceAdded(d)) => add_device(&shared, &dm, d),
                 Some(ButtplugClientEvent::DeviceRemoved(d)) => remove_device(&shared, d.index()),
-
+                // The adapter stopped on its own (a radio reset): pick up again while wanted.
                 Some(ButtplugClientEvent::ScanningFinished) if scanning => {
                     let _ = client.start_scanning().await;
                 }
@@ -492,9 +504,9 @@ async fn run(shared: Arc<Shared>, mut rx: UnboundedReceiver<Cmd>) -> Result<(), 
                 Some(Cmd::Scan(on)) if on != scanning => {
                     scanning = on;
                     let r = if on { client.start_scanning().await } else { client.stop_scanning().await };
-
-
-
+                    // A scan the server refuses is the error the UI shows; the next request
+                    // tries again, and one that works clears it. Bluetooth being off is not
+                    // one: buttplug's manager waits for the adapter and logs the failure.
                     let mut s = shared.state.lock().unwrap();
                     match r {
                         Ok(()) => s.error = None,
@@ -521,8 +533,8 @@ fn features_of(d: &ButtplugClientDevice) -> Vec<ToyFeature> {
 }
 
 fn feature_of(f: &DeviceFeature) -> Option<ToyFeature> {
-
-
+    // Percent commands and off require zero. Some heaters advertise only 37..42 degrees;
+    // exposing those would offer an off setting that the protocol cannot send.
     let (_, kind) = FeatureKind::ALL.iter().find(|(t, _)| {
         f.get_output_limits(*t)
             .is_some_and(|limits| limits.step_limit().contains(0))
@@ -570,9 +582,9 @@ fn remove_device(shared: &Arc<Shared>, index: u32) {
     shared.changed.notify_all();
 }
 
-
-
-
+/// Serves one device: drains its mailbox to the newest command per feature and sends those in
+/// turn, so a slow toy falls behind by one command, never a queue. Reads the battery once a
+/// minute when the device reports it.
 async fn device_task(
     device: ButtplugClientDevice,
     mut rx: UnboundedReceiver<DevCmd>,
@@ -585,7 +597,7 @@ async fn device_task(
         let first = if has_battery {
             tokio::select! {
                 c = rx.recv() => c,
-
+                // Read on its own task, so a slow answer never holds up the commands.
                 _ = tokio::time::sleep_until(next_battery) => {
                     next_battery += BATTERY_EVERY;
                     let (device, shared, error) = (device.clone(), shared.clone(), error.clone());
@@ -648,7 +660,7 @@ async fn command_result(
         .map_err(|e| e.to_string())
 }
 
-
+/// Reject further values before discarding pending writes from the failed connection.
 fn record_failure(
     shared: &Shared,
     error: &Mutex<Option<String>>,
@@ -661,26 +673,26 @@ fn record_failure(
     shared.changed.notify_all();
 }
 
-
+/// One bound device. Values arrive every tick; commands leave every 100 ms.
 pub struct ToyLink {
     hub: &'static Hub,
     tx: UnboundedSender<DevCmd>,
     pub info: ToyInfo,
-
+    /// The axis each feature follows, by position in `info.features`.
     axes: Vec<Option<Axis>>,
-
+    /// How each level feature maps its input; positions ignore theirs.
     levels: Vec<LevelMap>,
-
-
+    /// Each feature's input level as of the last tick (before its map), while its axis drives
+    /// it; for the UI's live marker.
     inputs: Vec<Option<f64>>,
-
+    /// The last value sent per feature, in thousandths, so unchanged values stay home.
     last: Vec<Option<i32>>,
     speed: [f64; Axis::COUNT],
     prev: [Option<f64>; Axis::COUNT],
     since_send_ms: f64,
-
+    /// Each timed actuator gets its own first-move glide.
     glide_until: Vec<Option<Instant>>,
-
+    /// Per feature, the keyframe last sent (its video time) and when the toy was told to arrive.
     keyframe: Vec<Option<(f64, Instant)>>,
     testing_since: Option<Instant>,
 }
@@ -698,7 +710,7 @@ impl ToyLink {
         }
     }
 
-
+    /// Tests only this toy's assigned motion features. Heating, lights and spray stay untouched.
     pub fn test(&mut self) {
         self.testing_since = Some(Instant::now());
     }
@@ -714,8 +726,8 @@ impl ToyLink {
             .and_then(|e| e.info.battery)
     }
 
-
-
+    /// Applies the user's axis choices over the defaults. Takes effect on the next send: a
+    /// feature switched off rests, one that changed axis follows the new one.
     pub fn set_axes(&mut self, overrides: &HashMap<u32, Option<Axis>>) {
         self.axes = self
             .info
@@ -730,7 +742,7 @@ impl ToyLink {
             .collect();
     }
 
-
+    /// The user's level maps over the defaults, by feature index. Takes effect on the next send.
     pub fn set_levels(&mut self, overrides: &HashMap<u32, LevelMap>) {
         self.levels = self
             .info
@@ -740,8 +752,8 @@ impl ToyLink {
             .collect();
     }
 
-
-
+    /// Each feature with the axis it follows and its live input level (None while nothing
+    /// drives it, and for a place rather than a level).
     pub fn axes(&self) -> impl Iterator<Item = (&ToyFeature, Option<Axis>, Option<f64>)> {
         self.info
             .features
@@ -764,7 +776,7 @@ impl ToyLink {
         }
     }
 
-
+    /// Value a feature takes from its axis before the clamp: the axis's speed or its value.
     fn raw(&self, f: &ToyFeature, axis: Axis, values: &[f64; Axis::COUNT]) -> f64 {
         if follows_speed(f, axis) {
             (self.speed[axis.index()] / SPEED_FULL).min(1.0)
@@ -773,8 +785,8 @@ impl ToyLink {
         }
     }
 
-
-
+    /// Sends every feature whose value changed. A feature that is off, or whose axis is
+    /// disabled, goes to rest once if it was ever driven. Returns whether anything went out.
     pub fn send(
         &mut self,
         values: &[f64; Axis::COUNT],
@@ -785,9 +797,9 @@ impl ToyLink {
         self.send_scaled(values, clamps, interval_ms, active, 1.0, None)
     }
 
-
-
-
+    /// As `send`, with the session scale on levels and the stroke's next `keyframe`: a timed
+    /// position on L0 is sent one move per keyframe the moment it starts (again if its arrival
+    /// slipped), instead of a stop-start sample every 100 ms. Everything else keeps the cadence.
     pub fn send_scaled(
         &mut self,
         values: &[f64; Axis::COUNT],
@@ -820,7 +832,7 @@ impl ToyLink {
             self.since_send_ms = 0.0;
         }
         let now = Instant::now();
-
+        // The test sweep only advances on the cadence, so its finishing rest is never skipped.
         let test = self
             .testing_since
             .filter(|_| due)
@@ -837,7 +849,7 @@ impl ToyLink {
         let mut sent = false;
         for i in 0..self.info.features.len() {
             let f = &self.info.features[i];
-
+            // A timed position on the stroke plays keyframes once its connect glide is over.
             if let Some(k) = keyed.filter(|_| {
                 f.kind == FeatureKind::TimedPosition && self.axes[i] == Some(Axis::L0) && self.glide_until[i].is_some()
             }) {
@@ -874,7 +886,7 @@ impl ToyLink {
                     if let Some(ms) = testing.filter(|_| testable) {
                         let phase = ms as f64 / TEST_MS as f64 * std::f64::consts::TAU;
                         return Some(if f.is_level() {
-
+                            // The sweep shows the toy's own floor and cap, whatever `from` is.
                             level.scale(0.2 * (phase / 2.0).sin().max(0.0))
                         } else {
                             let raw = 0.5 - 0.2 * phase.sin();
@@ -919,8 +931,8 @@ impl ToyLink {
     }
 }
 
-
-
+/// Where a feature sits when nothing drives it: intensities at zero, a two-way rotate at its
+/// middle. Positions have no rest; they stay put.
 fn rest(f: &ToyFeature) -> Option<f64> {
     match f.kind {
         FeatureKind::Position | FeatureKind::TimedPosition => None,
@@ -929,8 +941,8 @@ fn rest(f: &ToyFeature) -> Option<f64> {
     }
 }
 
-
-
+/// The command for a feature at `v` (0 to 1; a two-way rotate maps it to -1 to 1), with the
+/// value in thousandths as sent, for skipping repeats.
 fn command(f: &ToyFeature, v: f64, duration: u32) -> (i32, ClientDeviceOutputCommand) {
     use ClientDeviceCommandValue::Percent;
     use ClientDeviceOutputCommand as C;
@@ -966,7 +978,7 @@ impl Drop for ToyLink {
 pub(crate) mod tests {
     use super::*;
 
-
+    // An isolated hub per test, with a mailbox in place of physical hardware.
     pub(crate) fn fixture(kinds: &[FeatureKind]) -> (ToyLink, UnboundedReceiver<DevCmd>) {
         let (tx, _rx) = unbounded_channel();
         let hub = Box::leak(Box::new(Hub {
@@ -1197,7 +1209,7 @@ pub(crate) mod tests {
     #[test]
     fn stroke_speed_drives_vibration_but_a_level_floor_cannot_raise_silence() {
         let (mut link, mut rx) = fixture(&[FeatureKind::Vibrate]);
-
+        // The stroke's own range is the position's business; the vibe has its own floor.
         let mut clamps = [AxisClamp::default(); Axis::COUNT];
         clamps[Axis::L0.index()].min = 0.3;
         link.set_levels(&HashMap::from([(0, LevelMap { floor: 0.3, ..LevelMap::default() })]));
@@ -1234,7 +1246,7 @@ pub(crate) mod tests {
         let d = LevelMap::default();
         assert_eq!(d.apply(0.0), 0.0);
         assert!((d.apply(0.37) - 0.37).abs() < 1e-9, "the default is the identity");
-
+        // A window with no width is a switch at `from`; the cap is what it switches to.
         let step = LevelMap { from: 0.5, to: 0.5, floor: 0.2, cap: 0.8 };
         assert_eq!(step.apply(0.5), 0.0);
         assert!((step.apply(0.51) - 0.8).abs() < 1e-9);
@@ -1302,12 +1314,12 @@ pub(crate) mod tests {
         link.set_axes(&HashMap::from([(0, Some(Axis::L0)), (1, Some(Axis::V0))]));
         let clamps = [AxisClamp::default(); Axis::COUNT];
         let on = [true; Axis::COUNT];
-
+        // The connect glide first; keyframes wait for it.
         link.send_scaled(&[0.5; Axis::COUNT], &clamps, 100, &on, 1.0, Some(Keyframe { at_ms: 1000.0, pos: 0.9, in_ms: 300.0 })).unwrap();
         assert!(matches!(rx.try_recv(), Ok(DevCmd::Output(0, ClientDeviceOutputCommand::HwPositionWithDuration(_, CONNECT_GLIDE_MS)))));
         assert_eq!(output_value(&mut rx), (1, 0.5));
         link.glide_until[0] = Some(Instant::now() - Duration::from_millis(1));
-
+        // A keyframe goes out on an off-cadence tick, once; the vibrator waits for the cadence.
         let k = Keyframe { at_ms: 1000.0, pos: 0.9, in_ms: 300.0 };
         assert!(link.send_scaled(&[0.6; Axis::COUNT], &clamps, 10, &on, 1.0, Some(k)).unwrap());
         assert!(matches!(rx.try_recv(), Ok(DevCmd::Output(0, ClientDeviceOutputCommand::HwPositionWithDuration(ClientDeviceCommandValue::Percent(p), 300))) if (p - 0.9).abs() < 1e-9));
@@ -1318,7 +1330,7 @@ pub(crate) mod tests {
         }
         assert_eq!(output_value(&mut rx), (1, 0.6));
         assert!(rx.try_recv().is_err());
-
+        // The next keyframe, then a pause (no keyframe) sends the sampled stroke on the cadence.
         assert!(link.send_scaled(&[0.7; Axis::COUNT], &clamps, 10, &on, 1.0, Some(Keyframe { at_ms: 1300.0, pos: 0.1, in_ms: 250.0 })).unwrap());
         assert!(matches!(rx.try_recv(), Ok(DevCmd::Output(0, ClientDeviceOutputCommand::HwPositionWithDuration(ClientDeviceCommandValue::Percent(p), 250))) if (p - 0.1).abs() < 1e-9));
         assert!(link.send_scaled(&[0.7; Axis::COUNT], &clamps, 100, &on, 1.0, None).unwrap());

@@ -1,3 +1,6 @@
+//! Speed statistics for cards and the scrubber. Speed is in position units (0..100) per
+//! second, the number funscript tools show, so 400 reads as "fast" everywhere.
+
 use crate::funscript::Script;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -6,7 +9,7 @@ pub struct SpeedStats {
     pub max: f64,
 }
 
-
+/// Time-weighted average speed per bucket across the media duration.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Heatmap {
     pub buckets: Vec<f64>,
@@ -29,7 +32,7 @@ pub fn speed_stats(script: &Script) -> SpeedStats {
     SpeedStats { average: if time > 0.0 { total / time } else { 0.0 }, max }
 }
 
-
+/// `n` buckets spanning `0..duration_ms` (the media length, so gaps read as gaps).
 pub fn heatmap(script: &Script, duration_ms: f64, n: usize) -> Heatmap {
     let mut buckets = vec![0.0; n];
     if n == 0 || duration_ms <= 0.0 {
@@ -62,12 +65,12 @@ pub fn heatmap(script: &Script, duration_ms: f64, n: usize) -> Heatmap {
     Heatmap { buckets }
 }
 
-
+/// A keyframe step smaller than this (5 of 100 units) is a wobble, not a move.
 const STILL_STEP: f64 = 0.05;
 
-
-
-
+/// Spans of at least `min_ms` where the script does not move: the lead-in before the first
+/// action, and runs of keyframes that each step less than five units. What plays after the
+/// last action is left out; the media's length is not the script's business.
 pub fn stills(script: &Script, min_ms: f64) -> Vec<(f64, f64)> {
     let mut out = Vec::new();
     let Some(first) = script.actions.first() else { return out };

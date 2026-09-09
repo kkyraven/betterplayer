@@ -1,3 +1,9 @@
+//! Session volume ramp for a restim output: `V0` starts low and rises to a cap over a set
+//! playing time, so the first minutes are gentle and the level the user calibrated in
+//! restim is reached without touching the master knob. Counts playing time only, rises
+//! linearly and never above the maximum, and restarts on reconnect or by request. restim's
+//! master volume, inactivity ramp and hard limits still multiply on top.
+
 use bp_script::{Axis, Kind};
 
 pub const DEFAULT_VOLUME_FLOOR: f64 = 0.75;
@@ -7,7 +13,7 @@ const FADE_MS: f64 = 2000.0;
 pub struct VolumeBoost {
     pub enabled: bool,
     pub axis: Axis,
-
+    /// Added full-range volume at the source axis's maximum, 0..1.
     pub amount: f64,
 }
 
@@ -46,8 +52,8 @@ impl VolumeSettings {
         }
     }
 
-
-
+    /// Scales normal volume into the selected limits, then adds boost after the output range.
+    /// Explicit silence and a zero output range stay silent even when the boost axis is driven.
     pub fn target(self, volume: f64, output_min: f64, output_max: f64, source: Option<f64>) -> f64 {
         if !volume.is_finite() || volume <= 0.0 { return 0.0; }
         let scaled = self.min + volume.clamp(0.0, 1.0) * (self.max - self.min);
@@ -60,7 +66,7 @@ impl VolumeSettings {
     }
 }
 
-
+/// Volume envelope for each restim connection. Silence resets the next two-second fade.
 #[derive(Debug, Default)]
 pub(crate) struct Volume {
     active: bool,
@@ -84,9 +90,9 @@ impl Volume {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RampConfig {
     pub enabled: bool,
-
+    /// Volume at the start, 0..1, before the floor and onset fade.
     pub start: f64,
-
+    /// Volume the ramp ends at, 0..1.
     pub max: f64,
     pub duration_ms: f64,
 }
@@ -102,10 +108,10 @@ impl Default for RampConfig {
     }
 }
 
-
+/// Where the ramp is, for the UI.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RampProgress {
-
+    /// The multiplier in force, 0..1.
     pub value: f64,
     pub elapsed_ms: f64,
     pub duration_ms: f64,
@@ -124,7 +130,7 @@ impl Ramp {
         self.config
     }
 
-
+    /// Applies new settings. Turning the ramp on starts it from the beginning.
     pub fn set_config(&mut self, config: RampConfig) {
         if config.enabled && !self.config.enabled {
             self.elapsed_ms = 0.0;
@@ -142,14 +148,14 @@ impl Ramp {
         self.elapsed_ms = 0.0;
     }
 
-
+    /// Counts `dt_ms` of playing time; paused time does not move it.
     pub fn advance(&mut self, playing: bool, dt_ms: f64) {
         if self.config.enabled && playing {
             self.elapsed_ms = (self.elapsed_ms + dt_ms).min(self.config.duration_ms);
         }
     }
 
-
+    /// The multiplier in force, `None` while the ramp is off.
     pub fn value(&self) -> Option<f64> {
         let c = self.config;
         if !c.enabled {
@@ -164,9 +170,9 @@ impl Ramp {
         Some(c.start + (max - c.start) * u)
     }
 
-
-
-
+    /// Scales the volume axis by the ramp: the `.volume` script's value when one drives it,
+    /// full otherwise. Volume counts as driven while the ramp is on. Nothing changes when
+    /// the ramp is off.
     pub fn apply(&self, values: &mut [f64; Axis::COUNT], driven: &mut [bool; Axis::COUNT]) {
         let Some(ramp) = self.value() else { return };
         let i = Axis::EV.index();
@@ -302,7 +308,7 @@ mod tests {
             !driven[Axis::EV.index()],
             "off: volume is left to the script and restim"
         );
-
+        // Turning it on again starts over.
         r.advance(true, 60_000.0);
         off.enabled = true;
         r.set_config(off);

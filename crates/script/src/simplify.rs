@@ -1,6 +1,11 @@
+//! Ramer-Douglas-Peucker on a time series: a point within `eps` of the line between the kept
+//! points either side of it is dropped, so frame-rate samples become keyframes. The one Rust
+//! twin of `ml/decoder.py::rdp`: vertical distance in position units, strictly greater than
+//! epsilon keeps a point, endpoints always kept, the first of equal distances wins.
+
 use crate::Action;
 
-
+/// Indices kept over `pos` sampled at `time_ms`, ascending.
 pub fn rdp_indices(time_ms: &[f64], pos: &[f64], eps: f64) -> Vec<usize> {
     let n = pos.len();
     if n < 3 {
@@ -33,7 +38,7 @@ pub fn rdp_indices(time_ms: &[f64], pos: &[f64], eps: f64) -> Vec<usize> {
     (0..n).filter(|&i| keep[i]).collect()
 }
 
-
+/// `rdp_indices` over actions.
 pub fn simplify(actions: &[Action], eps: f64) -> Vec<Action> {
     let time: Vec<f64> = actions.iter().map(|a| a.at).collect();
     let pos: Vec<f64> = actions.iter().map(|a| a.pos).collect();

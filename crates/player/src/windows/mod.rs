@@ -1,3 +1,5 @@
+//! Windows only: the ANGLE context, the GPU probe, the NvOFFRUC bindings and the DLSS 5 worker.
+
 pub mod dlss;
 pub mod dlss5;
 pub mod egl;
@@ -14,7 +16,7 @@ use windows::core::PCWSTR;
 
 use crate::enhance::EnhanceCapabilities;
 
-
+/// The folder this addon was loaded from, where optional DLLs are looked for first.
 pub fn module_dir() -> Option<PathBuf> {
     unsafe {
         let mut module = HMODULE::default();
@@ -26,9 +28,9 @@ pub fn module_dir() -> Option<PathBuf> {
             return None;
         }
         let path = String::from_utf16_lossy(&buf[..len]);
-
-
-
+        // Node opens addons by their verbatim (`\\?\`) path and the loader reports it back that
+        // way. LoadLibraryExW's per-DLL directory search, which finds libGLESv2.dll next to
+        // libEGL.dll, wants a plain fully qualified path, so the prefix goes.
         let path = match path.strip_prefix(r"\\?\UNC\") {
             Some(rest) => format!(r"\\{rest}"),
             None => path.strip_prefix(r"\\?\").map(str::to_owned).unwrap_or(path),
@@ -37,10 +39,10 @@ pub fn module_dir() -> Option<PathBuf> {
     }
 }
 
-
-
-
-
+/// Loads a DLL from next to the addon when a copy is there, else by the loader's own search
+/// order. The addon-local load also resolves the DLL's own dependents from that folder
+/// (`libGLESv2.dll` next to `libEGL.dll`), which `LoadLibrary`'s default search does not.
+/// The error names every path tried.
 pub fn load_dll(name: &str) -> Result<Library, String> {
     let mut errors = Vec::new();
     if let Some(path) = module_dir().map(|d| d.join(name)) {
@@ -69,8 +71,8 @@ fn describe(e: &libloading::Error) -> String {
     }
 }
 
-
-
+/// What this GPU offers: VSR on an NVIDIA card with a new enough driver; frame generation and
+/// DLSS 5 once their runtimes are present and the D3D11 render path exists (it does not yet).
 pub fn capabilities() -> EnhanceCapabilities {
     let gpu = match probe::gpu() {
         Ok(g) => g,
@@ -87,8 +89,8 @@ pub fn capabilities() -> EnhanceCapabilities {
         Ok(()) => "frame generation needs the D3D11 render path, not built yet".to_string(),
         Err(_) => format!("{} not found next to the engine", fruc::DLL),
     };
-
-
+    // DLSS 5 runs its worker over a byte pipe, so the render path (windows/dlss.rs) needs no
+    // D3D11 interop: it is available whenever the runtime is present next to the engine.
     let (dlss, dlss_reason) = match dlss5::available() {
         Ok(_) => (true, None),
         Err(e) => (false, Some(e)),

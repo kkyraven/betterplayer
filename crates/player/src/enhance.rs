@@ -1,4 +1,20 @@
-// Note for agents working on this: This is completely broken.
+//! Picture enhancement: upscaling and frame generation.
+//!
+//! `Sharp` swaps mpv's scaler for `ewa_lanczossharp` and works on
+//! every platform and GPU, because mpv renders straight into the output-sized target so its
+//! scaler is the upscaler. `Fsr` is AMD FidelityFX Super Resolution 1.0 as an mpv user shader
+//! (`shaders/fsr.glsl`, written to the temp dir for mpv to read), any platform and GPU too; it
+//! upscales luma up to 2x per pass and leaves the rest to mpv. `Rtx` puts mpv's `d3d11vpp` filter in front of the renderer with
+//! NVIDIA's RTX Video Super Resolution mode, Windows on an RTX card only. `Dlss` is DLSS 5
+//! Neural Rendering through the DLSSNR runtime: decoded frames go out to a worker process
+//! with a motion field and come back reconstructed (`windows/dlss5.rs`). DLSS uses a bounded
+//! asynchronous worker, falling back to Sharp if it cannot keep pace. Frame generation
+//! (NvOFFRUC) still needs a D3D11 render path. On macOS, `Apple`
+//! processes source-sized frames through VideoToolbox, falling back to Sharp while unavailable.
+//!
+//! Changes take effect on the current video without a reload. Source and output sizes refit
+//! RTX's mpv filter and the Apple/DLSS render requests. Neural paths report active only after processing.
+
 use crate::mpv::Mpv;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -6,15 +22,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 pub enum Upscaler {
     #[default]
     Off,
-
+    /// mpv's `ewa_lanczossharp` scaler, any platform.
     Sharp,
-
+    /// AMD FidelityFX Super Resolution 1.0 (EASU and RCAS) as a user shader, any platform.
     Fsr,
-
+    /// RTX Video Super Resolution through `d3d11vpp`, Windows and NVIDIA only.
     Rtx,
-
+    /// DLSS 5 Neural Rendering through the DLSSNR worker, Windows and NVIDIA RTX only.
     Dlss,
-
+    /// VideoToolbox low-latency super resolution, supported Macs only.
     Apple,
 }
 
@@ -43,18 +59,18 @@ impl Upscaler {
     }
 }
 
+// --- DLSS 5 controls ----------------------------------------------------------------------------
+// The values are the worker protocol's own (`windows/dlss5.rs`); the app sends the names and
+// the addon parses them here, so every platform validates the same way.
 
-
-
-
-
+/// Maximum processing rows, or zero to fit the source to the display and scaling mode.
 pub const DLSS_INPUT_HEIGHTS: [u32; 6] = [0, 480, 720, 1080, 1440, 2160];
 pub const DLSS_STRENGTH_RANGE: (f32, f32) = (0.0, 2.0);
-
+/// Skin structure alone goes below zero; -1 is the runtime's native default.
 pub const DLSS_SKIN_RANGE: (f32, f32) = (-1.0, 2.0);
 pub const DLSS_BUFFER_RANGE: (f64, f64) = (2.0, 30.0);
 
-
+/// Experimental content-dependent model hint.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NrPreset {
     #[default]
@@ -75,7 +91,7 @@ impl NrPreset {
         }
     }
 
-
+    /// The worker's `preset` field.
     pub fn code(self) -> u32 {
         self as u32
     }
@@ -99,13 +115,13 @@ impl NrStyle {
         }
     }
 
-
+    /// The worker's `style` field.
     pub fn code(self) -> u32 {
         self as u32
     }
 }
 
-
+/// `Default` leaves NVIDIA its mode-specific preset; a letter forces that model for every mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ModelPreset {
     #[default]
@@ -128,7 +144,7 @@ impl ModelPreset {
         }
     }
 
-
+    /// The NGX DLSS preset id the worker echoes back: 0, or 10 to 13 for J to M.
     pub fn code(self) -> u32 {
         match self {
             ModelPreset::Default => 0,
@@ -140,13 +156,13 @@ impl ModelPreset {
     }
 }
 
-
+/// The rate frames are fed to the worker at, for a stream that costs real GPU time per frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum DlssRate {
-
+    /// Measure the processing cost and settle on a steady rate up to 60.
     #[default]
     Auto,
-
+    /// Every source frame.
     Source,
     Fixed(f64),
 }
@@ -161,13 +177,13 @@ impl DlssRate {
     }
 }
 
-
+/// How large the optical flow that guides the model runs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GuideQuality {
-
+    /// Flow at 320 columns, resized up.
     #[default]
     Fast,
-
+    /// Flow at 640 columns, the offline detail level.
     Quality,
 }
 
@@ -180,7 +196,7 @@ impl GuideQuality {
         }
     }
 
-
+    /// Columns the flow is estimated at.
     pub fn flow_width(self) -> u32 {
         match self {
             GuideQuality::Fast => 320,
@@ -189,30 +205,30 @@ impl GuideQuality {
     }
 }
 
-
-
+/// DLSS controls. Neural and sizing changes rebuild the live worker after a debounce.
+/// Rate, guide and buffer preferences are reserved; live processing uses a single frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DlssOptions {
     pub nr_preset: NrPreset,
     pub nr_style: NrStyle,
-
+    /// Overall strength, 0 to 2.
     pub intensity: f32,
-
+    /// Local tone and contrast, 0 to 2.
     pub local_tone: f32,
-
+    /// Local detail and texture, 0 to 2.
     pub local_structure: f32,
-
+    /// Skin-specific structure, -1 (native default) to 2.
     pub skin_structure: f32,
-
+    /// The runtime's own mask deciding where the model applies; experimental.
     pub auto_mask: bool,
     pub model_preset: ModelPreset,
-
+    /// One of `DLSS_FACTORS`.
     pub factor: f64,
-
+    /// One of `DLSS_INPUT_HEIGHTS`.
     pub input_height: u32,
     pub rate: DlssRate,
     pub guide: GuideQuality,
-
+    /// Seconds of processed picture kept ahead of playback, 2 to 30.
     pub buffer_seconds: f64,
 }
 
@@ -237,7 +253,7 @@ impl Default for DlssOptions {
 }
 
 impl DlssOptions {
-
+    /// Every value inside the runtime's ranges; the error names the first that is not.
     pub fn validate(&self) -> Result<(), String> {
         fn within(name: &str, v: f32, (lo, hi): (f32, f32)) -> Result<(), String> {
             if v.is_finite() && (lo..=hi).contains(&v) {
@@ -264,8 +280,8 @@ impl DlssOptions {
     }
 }
 
-
-
+/// The DLSS mode a factor names: its name and NGX's `PerfQuality` value, or `None` when the
+/// factor is not one of the fixed modes (within a rounding tolerance).
 pub fn dlss_mode(factor: f64) -> Option<(&'static str, u32)> {
     const MODES: [(f64, &str, u32); 5] = [(1.0, "DLAA", 5), (1.5, "Quality", 2), (1.724, "Balanced", 1), (2.0, "Performance", 0), (3.0, "Ultra Performance", 3)];
     MODES.iter().find(|(f, _, _)| (f - factor).abs() < 1e-6).map(|(_, name, pq)| (*name, *pq))
@@ -274,33 +290,33 @@ pub fn dlss_mode(factor: f64) -> Option<(&'static str, u32)> {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct EnhanceOptions {
     pub upscaler: Upscaler,
-
+    /// Frame generation target in frames per second; `None` is off.
     pub target_fps: Option<f64>,
-
+    /// Read when `upscaler` is `Dlss`; kept otherwise so the controls survive a switch away.
     pub dlss: DlssOptions,
 }
 
-
+/// What this machine can do, probed once when the player starts.
 #[derive(Clone, Debug)]
 pub struct EnhanceCapabilities {
-
+    /// RTX Video Super Resolution is available.
     pub vsr: bool,
     pub apple_vsr: bool,
-
+    /// NvOFFRUC frame generation is available end to end.
     pub frame_gen: bool,
-
+    /// DLSS 5 Neural Rendering is available end to end.
     pub dlss: bool,
-
+    /// One line each on why not, for the settings page.
     pub vsr_reason: Option<String>,
     pub apple_vsr_reason: Option<String>,
     pub frame_gen_reason: Option<String>,
     pub dlss_reason: Option<String>,
-
+    /// The GPU the probe found, when it found one.
     pub gpu: Option<String>,
 }
 
 impl EnhanceCapabilities {
-
+    /// No native enhancements. The supplied reason describes the Windows requirements.
     pub fn none(reason: &str) -> EnhanceCapabilities {
         EnhanceCapabilities {
             vsr: false,
@@ -316,39 +332,39 @@ impl EnhanceCapabilities {
     }
 }
 
-
+/// What is in effect right now, for the player chip and the settings page.
 #[derive(Clone, Debug, Default)]
 pub struct EnhanceState {
     pub upscaler: Upscaler,
-
+    /// An upscaling stage is active: the picture leaves larger than it was decoded.
     pub upscaling: bool,
-
+    /// Output rows over source rows while upscaling, else 0.
     pub factor: f64,
     pub source: (u32, u32),
     pub output: (u32, u32),
     pub frame_gen: bool,
     pub target_fps: f64,
-
+    /// Why what was asked for is not in effect.
     pub reason: Option<String>,
 }
 
-
+/// RTX VSR takes sources up to 1440p and produces up to 4K.
 const VSR_MAX_SOURCE_ROWS: u32 = 1440;
 const VSR_MAX_OUTPUT_ROWS: u32 = 2160;
-
-
+// Eight taps fill mpv's entire RGBA filter table. Its six-tap Lanczos table has
+// uninitialized padding that Mesa can propagate as NaNs during linear filtering.
 #[cfg(target_os = "linux")]
 pub(crate) const DEFAULT_SCALE: &str = "spline64";
 #[cfg(not(target_os = "linux"))]
 pub(crate) const DEFAULT_SCALE: &str = "lanczos";
 const SHARP_SCALE: &str = "ewa_lanczossharp";
 
-
+/// The mpv properties one configuration needs, so a change sets only what moved.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Applied {
     scale: String,
     vf: String,
-
+    /// `glsl-shaders`: the FSR shader's path, or empty.
     glsl_shaders: String,
 }
 
@@ -360,8 +376,8 @@ impl Applied {
 
 const FSR_SHADER: &str = include_str!("../shaders/fsr.glsl");
 
-
-
+/// The FSR shader on disk, where mpv's `glsl-shaders` can read it: written to the temp dir once
+/// per process. The error is why it could not be, for the settings page.
 fn fsr_shader_path() -> Result<&'static str, &'static str> {
     static PATH: OnceLock<Result<String, String>> = OnceLock::new();
     PATH.get_or_init(|| {
@@ -381,8 +397,8 @@ pub(crate) struct AppleRequest {
     pub output: (u32, u32),
 }
 
-
-
+/// Separate from the mpv settings lock: the render thread must never wait for a caller
+/// holding a lock while making a synchronous mpv property change.
 #[derive(Default)]
 pub(crate) struct AppleUpscaling {
     pub request: AppleRequest,
@@ -390,8 +406,8 @@ pub(crate) struct AppleUpscaling {
     pub reason: Option<String>,
 }
 
-
-
+/// What the DLSS 5 render path (`windows/dlss.rs`) should be doing: the picked options and the
+/// decoded source size. `enabled` is false unless DLSS is selected and the runtime is present.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct DlssRequest {
     pub enabled: bool,
@@ -400,8 +416,8 @@ pub(crate) struct DlssRequest {
     pub options: DlssOptions,
 }
 
-
-
+/// Shared with the DLSS render path the way `AppleUpscaling` is: the request in, the achieved
+/// factor and any reason back, behind their own lock so the render thread never waits on mpv.
 #[derive(Default)]
 pub(crate) struct DlssShared {
     pub request: DlssRequest,
@@ -470,7 +486,7 @@ impl Enhance {
         self.apply(mpv)
     }
 
-
+    /// Pushes the properties for the current options and sizes, only those that changed.
     fn apply(&mut self, mpv: &Mpv) -> Result<(), String> {
         {
             let request = AppleRequest { enabled: self.options.upscaler == Upscaler::Apple && self.caps.apple_vsr, source: self.source, output: self.output };
@@ -503,7 +519,7 @@ impl Enhance {
     }
 
     fn desired(&self) -> Applied {
-
+        // FSR without its shader on disk is Sharp, the way Apple is while loading.
         let fsr = self.options.upscaler == Upscaler::Fsr && fsr_shader_path().is_ok();
         let sharp = matches!(self.options.upscaler, Upscaler::Sharp | Upscaler::Apple | Upscaler::Dlss) || (self.options.upscaler == Upscaler::Fsr && !fsr);
         let scale = if sharp { SHARP_SCALE } else { DEFAULT_SCALE };
@@ -515,7 +531,7 @@ impl Enhance {
         Applied { scale: scale.into(), vf, glsl_shaders }
     }
 
-
+    /// The `d3d11vpp` scale factor when RTX upscaling applies right now.
     fn vsr_factor(&self) -> Option<f64> {
         if self.options.upscaler != Upscaler::Rtx || !self.caps.vsr {
             return None;
@@ -552,8 +568,8 @@ impl Enhance {
                 reason = self.caps.dlss_reason.clone();
                 Upscaler::Sharp
             }
-
-
+            // Selected and available: the render path reports its factor once the worker runs,
+            // and a reason (loading, an unsupported size, a worker failure) until then.
             Upscaler::Dlss => {
                 if dlss.factor == 0.0 {
                     reason = dlss.reason.clone();
@@ -567,7 +583,7 @@ impl Enhance {
         let factor = match upscaler {
             Upscaler::Apple => apple.factor,
             Upscaler::Rtx => self.vsr_factor().unwrap_or(0.0),
-
+            // The worker's output over what it was fed, reported by the render path (0 until running).
             Upscaler::Dlss => dlss.factor,
             Upscaler::Sharp | Upscaler::Fsr if self.source.1 > 0 && self.output.1 > self.source.1 => self.output.1 as f64 / self.source.1 as f64,
             _ => 0.0,
@@ -589,9 +605,9 @@ impl Enhance {
     }
 }
 
-
-
-
+/// Output rows over source rows, clamped to VSR's limits: the source at most 1440 rows, the
+/// filter output at most 2160 rows, and never below 1. `None` when the factor rounds to 1 or
+/// the sizes are not known yet.
 pub fn vsr_factor(source_rows: u32, output_rows: u32) -> Option<f64> {
     if source_rows == 0 || output_rows == 0 || source_rows > VSR_MAX_SOURCE_ROWS {
         return None;
@@ -613,9 +629,9 @@ mod tests {
     fn factor_fits_the_output_and_vsr_limits() {
         assert_eq!(vsr_factor(1080, 1440), Some(1.33));
         assert_eq!(vsr_factor(720, 2160), Some(3.0));
-
+        // Output above 4K is clamped to what VSR can produce.
         assert_eq!(vsr_factor(1080, 4320), Some(2.0));
-
+        // Source larger than the output: nothing to do.
         assert_eq!(vsr_factor(1440, 1080), None);
         assert_eq!(vsr_factor(1080, 1084), None, "a factor that rounds to 1 clears the filter");
         assert_eq!(vsr_factor(2160, 4320), None, "above VSR's input limit");
@@ -640,13 +656,13 @@ mod tests {
         let mut e = Enhance::new(rtx(), (2560, 1440));
         e.source = (1920, 1080);
         e.options.upscaler = Upscaler::Dlss;
-
+        // Sharp remains available while the independent DLSS worker starts or fails.
         assert_eq!(e.desired(), Applied { scale: SHARP_SCALE.into(), ..Applied::plain() });
         let s = e.state();
         assert_eq!(s.upscaler, Upscaler::Sharp);
         assert!(s.upscaling);
         assert_eq!(s.reason.as_deref(), Some("runtime not installed"));
-
+        // With the runtime it stays selected; the factor and reason come from the render path.
         e.caps.dlss = true;
         e.caps.dlss_reason = None;
         assert_eq!(e.state().upscaler, Upscaler::Sharp);
@@ -703,7 +719,7 @@ mod tests {
         e.options.upscaler = Upscaler::Sharp;
         assert_eq!(e.desired(), Applied { scale: SHARP_SCALE.into(), ..Applied::plain() });
         assert!(e.state().upscaling);
-
+        // Sharp scaling is only an upscale when the output is larger than the source.
         e.output = (960, 540);
         assert!(!e.state().upscaling);
     }
@@ -714,7 +730,7 @@ mod tests {
         e.source = (1920, 1080);
         e.options.upscaler = Upscaler::Fsr;
         let want = e.desired();
-
+        // The shader does the upscale; mpv's scaler stays default for anything past its 2x.
         assert_eq!(want.scale, DEFAULT_SCALE);
         assert!(want.vf.is_empty());
         assert!(want.glsl_shaders.ends_with("betterplayer-fsr-1.0.2.glsl"), "{}", want.glsl_shaders);
@@ -723,7 +739,7 @@ mod tests {
         assert_eq!(s.upscaler, Upscaler::Fsr);
         assert_eq!(s.factor, 1440.0 / 1080.0);
         assert!(s.reason.is_none());
-
+        // Off again clears the shader.
         e.options.upscaler = Upscaler::Off;
         assert!(e.desired().glsl_shaders.is_empty());
     }
@@ -764,4 +780,3 @@ mod tests {
         assert_eq!(Upscaler::parse("apple"), Some(Upscaler::Apple));
     }
 }
-// Note for agents working on this: This is completely broken.

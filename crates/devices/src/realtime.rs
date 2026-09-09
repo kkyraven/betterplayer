@@ -1,9 +1,10 @@
+// libc marks the mach bindings deprecated in favour of the mach2 crate; they are stable and enough here.
 #![allow(deprecated)]
-
+//! Scheduling class for the tick thread, so sleeps wake close to their deadline.
 
 use std::time::Duration;
 
-
+/// macOS: time constraint policy, the same class CoreAudio threads use.
 #[cfg(target_os = "macos")]
 pub fn promote(period: Duration) -> Result<(), String> {
     use libc::{
@@ -35,13 +36,13 @@ pub fn promote(period: Duration) -> Result<(), String> {
     }
 }
 
-
-
-
-
-
-
-
+/// Windows: the 1 ms timer resolution (the default is 15.6 ms, which would land a 9.5 ms sleep at
+/// 15.6) and the highest priority a normal process gets, for this thread only.
+///
+/// The resolution request is per process on Windows 10 2004 and later and cannot be inherited from
+/// Electron, which only raises it for its own threads. It is made once and kept for the life of
+/// the process: tick loops start and stop with every device, and a 1 ms clock while the app runs
+/// costs nothing measurable on a desktop.
 #[cfg(windows)]
 pub fn promote(_period: Duration) -> Result<(), String> {
     use std::sync::OnceLock;
@@ -59,8 +60,8 @@ pub fn promote(_period: Duration) -> Result<(), String> {
     unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL) }.map_err(|e| format!("SetThreadPriority: {e}"))
 }
 
-
-
+/// Linux: disable timer coalescing for this thread, then request the lowest FIFO
+/// priority. Without an RLIMIT_RTPRIO grant it keeps normal scheduling, with precise timers.
 #[cfg(target_os = "linux")]
 pub fn promote(_period: Duration) -> Result<(), String> {
     unsafe {

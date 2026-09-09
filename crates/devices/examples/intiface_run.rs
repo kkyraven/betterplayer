@@ -1,3 +1,4 @@
+// Runs the app's Intiface stand-in on 12345 and prints what clients do, for a manual probe.
 use std::time::{Duration, Instant};
 fn main() {
     let server = bp_devices::IntifaceServer::start(12345).expect("bind 12345");

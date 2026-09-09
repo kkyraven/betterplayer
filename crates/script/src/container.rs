@@ -1,3 +1,6 @@
+//! Finds every script for a media file: sibling funscripts by suffix, a zip beside the
+//! media, and single-file bundles (EroScripts `axes`, XTPlayer `channels`).
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
@@ -28,18 +31,18 @@ impl Container {
 #[derive(Clone, Debug)]
 pub struct LoadedScript {
     pub axis: Axis,
-
-
+    /// Name of this script among several for the same axis (`mouth`, `alternative`,
+    /// `1`), None for the plain one.
     pub variant: Option<String>,
-
+    /// The file the script came from (the zip or bundle for packed scripts).
     pub source: PathBuf,
     pub container: Container,
     pub script: Script,
 }
 
-
-
-
+/// Every script for `media`, several per axis when variants exist, in a stable order:
+/// sibling files first (what the user most recently dropped next to the video), then the
+/// zip, then bundles, plain scripts before named variants.
 pub fn find_scripts(media: &Path) -> Vec<LoadedScript> {
     let Some(stem) = media.file_stem().and_then(|s| s.to_str()) else { return Vec::new() };
     let dir = media.parent().unwrap_or(Path::new("."));
@@ -71,10 +74,23 @@ pub fn find_scripts(media: &Path) -> Vec<LoadedScript> {
     found.into_values().collect()
 }
 
+/// Other folders fill axes absent beside the media. Each folder contributes its full
+/// variant set, and the first folder with an axis wins.
+pub fn find_scripts_with_folders(media: &Path, folders: &[String]) -> Vec<LoadedScript> {
+    let mut scripts = find_scripts(media);
+    let Some(name) = media.file_name() else { return scripts };
+    for folder in folders {
+        let axes: Vec<Axis> = scripts.iter().map(|s| s.axis).collect();
+        scripts.extend(find_scripts(&Path::new(folder).join(name)).into_iter().filter(|s| !axes.contains(&s.axis)));
+    }
+    scripts.sort_by_key(|s| s.axis);
+    scripts
+}
 
-
-
-
+/// The part between the media stem and `.funscript`, without its separator, when `path` is a
+/// script for this media. `Name.funscript` gives an empty suffix. Separators are a dot
+/// (`name.alternative`), an underscore (`name_simple`) or parentheses (`name (Less Vibration)`);
+/// the suffix may hold several dotted parts (`alternative.mouth.a`).
 fn suffix_for(path: &Path, stem: &str) -> Option<String> {
     let name = path.file_name()?.to_str()?;
     let rest = name.strip_prefix(stem)?;
@@ -88,11 +104,11 @@ fn suffix_for(path: &Path, stem: &str) -> Option<String> {
     rest.strip_prefix(['.', '_']).map(str::to_string)
 }
 
-
-
-
-
-
+/// Axis and variant for a file suffix. A part that names an axis picks it and the other
+/// parts become the variant (`alternative.roll` is roll, variant `alternative`); `vib1`
+/// and `vibe2` pick the first and second vibration axis; a part with an axis name and a
+/// trailing number (`stroke1`) keeps the number as the variant; anything else is a named
+/// variant of the stroke.
 pub fn classify_suffix(suffix: &str) -> (Axis, Option<String>) {
     let parts: Vec<&str> = suffix.split('.').filter(|p| !p.is_empty()).collect();
     let mut axis = None;
@@ -128,7 +144,7 @@ pub fn classify_suffix(suffix: &str) -> (Axis, Option<String>) {
     (axis.unwrap_or(Axis::L0), variant)
 }
 
-
+/// The scripts to play by default: per axis the plain one, else the first variant.
 pub fn select_default(scripts: &[LoadedScript]) -> Vec<&LoadedScript> {
     let mut out: Vec<&LoadedScript> = Vec::new();
     for s in scripts {
@@ -139,16 +155,16 @@ pub fn select_default(scripts: &[LoadedScript]) -> Vec<&LoadedScript> {
     out
 }
 
-
-
+/// One funscript file may be a plain script or a bundle; returns every script inside.
+/// The text is deserialised once into `Raw`, whichever shape it turns out to be.
 fn parse_any(text: &str, source: &Path, suffix: String) -> Vec<LoadedScript> {
     let Ok(raw) = Raw::parse(text) else { return Vec::new() };
     let mut out = Vec::new();
     let (file_axis, variant) = if suffix.is_empty() { (Axis::L0, None) } else { classify_suffix(&suffix) };
     let Raw { actions, inverted, metadata, axes, channels } = raw;
     if let Some(axes) = axes {
-
-
+        // EroScripts v1.1: root actions are the file's axis (L0 unless the suffix names one),
+        // `axes` carries the rest. A suffixed bundle file names a variant for everything inside it.
         let root = Script::from_raw(actions, inverted, metadata);
         out.push(LoadedScript { axis: file_axis, variant: variant.clone(), source: source.into(), container: Container::Axes, script: root });
         for a in axes {
@@ -179,7 +195,7 @@ fn read_zip(zip_path: &Path, stem: &str) -> Vec<LoadedScript> {
     names.sort();
     for name in names {
         let inner = Path::new(&name);
-
+        // Inside a zip the base name may differ from the media; fall back to the suffix alone.
         let suffix = suffix_for(inner, stem).or_else(|| {
             let n = inner.file_name()?.to_str()?.strip_suffix(".funscript")?;
             Some(n.split_once('.').map(|(_, rest)| rest).unwrap_or("").to_string())
@@ -211,6 +227,56 @@ mod tests {
     }
 
     const ONE: &str = r#"{"actions":[{"at":0,"pos":0},{"at":1000,"pos":100}]}"#;
+
+    #[test]
+    fn shock_script_is_separate_from_stroke() {
+        let d = tmp("shock-axis");
+        fs::write(d.join("film.funscript"), ONE).unwrap();
+        fs::write(d.join("film.shock.funscript"), ONE).unwrap();
+        let scripts = find_scripts(&d.join("film.mp4"));
+        assert_eq!(scripts.iter().map(|s| s.axis).collect::<Vec<_>>(), vec![Axis::L0, Axis::S0]);
+        assert_eq!(classify_suffix("SHOCK"), (Axis::S0, None));
+        assert_eq!(classify_suffix("alternative.shock"), (Axis::S0, Some("alternative".into())));
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn other_folders_fill_missing_axes_without_replacing_siblings() {
+        let d = tmp("other-folders");
+        let video = d.join("video");
+        let first = d.join("first");
+        let second = d.join("second");
+        for dir in [&video, &first, &second] { fs::create_dir_all(dir).unwrap(); }
+        fs::write(video.join("clip.alternative.funscript"), ONE).unwrap();
+        fs::write(first.join("clip.funscript"), ONE).unwrap();
+        fs::write(first.join("clip.roll.funscript"), ONE).unwrap();
+        fs::write(first.join("clip.alternative.roll.funscript"), ONE).unwrap();
+        fs::write(second.join("clip.roll.funscript"), ONE).unwrap();
+        fs::write(second.join("clip.pitch.funscript"), ONE).unwrap();
+        fs::write(second.join("other.twist.funscript"), ONE).unwrap();
+        let folders = vec![first.to_string_lossy().into_owned(), second.to_string_lossy().into_owned()];
+        let scripts = find_scripts_with_folders(&video.join("clip.mp4"), &folders);
+        assert_eq!(scripts.len(), 4);
+        assert_eq!(scripts[0].source, video.join("clip.alternative.funscript"));
+        assert!(scripts.iter().filter(|s| s.axis == Axis::R1).all(|s| s.source.parent() == Some(first.as_path())));
+        assert_eq!(scripts.last().unwrap().source, second.join("clip.pitch.funscript"));
+        assert_eq!(select_default(&scripts).len(), 3);
+        assert_eq!(find_scripts_with_folders(&video.join("clip.mp4"), &[]).len(), 1);
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn unreadable_or_empty_siblings_allow_fallback() {
+        let d = tmp("empty-fallback");
+        let other = d.join("other");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(d.join("clip.funscript"), r#"{"actions":[]}"#).unwrap();
+        fs::write(other.join("clip.funscript"), ONE).unwrap();
+        let scripts = find_scripts_with_folders(&d.join("clip.mp4"), &[other.to_string_lossy().into_owned()]);
+        assert_eq!(scripts.len(), 1);
+        assert_eq!(scripts[0].source, other.join("clip.funscript"));
+        fs::remove_dir_all(d).unwrap();
+    }
 
     #[test]
     fn siblings_by_suffix() {

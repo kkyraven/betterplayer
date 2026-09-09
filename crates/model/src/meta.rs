@@ -1,10 +1,15 @@
+//! `metadata.json` beside the weights: what every column of the input means, the axis order,
+//! the window geometry, the decoder's thresholds and the pace table. Read once at load and
+//! checked against this crate's own layout, so a re-export that moves a field cannot run
+//! silently against rows built for the old one.
+
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::Deserialize;
 
-
-
+/// Which of our models a file is for. `Detector` is the region detector of `bp-detect`, listed
+/// here so the host has one vocabulary for the three kinds it downloads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModelKind {
     Detector,
@@ -31,7 +36,7 @@ impl ModelKind {
     }
 }
 
-
+/// One span of the input row.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct Field {
     pub name: String,
@@ -50,14 +55,14 @@ struct Thresholds {
     event: f64,
     active: f64,
     active_hold_s: f64,
-
+    /// Written by newer exports beside the other thresholds.
     nms_frames: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 struct Decode {
     nms_frames: Option<usize>,
-
+    /// Depth trim about the running centre; 1.0 is the model's own depth.
     amplitude: Option<f64>,
     centre_tau_ms: Option<f64>,
 }
@@ -97,21 +102,21 @@ struct Raw {
     window: Window,
 }
 
-
-
-
+/// Non-maximum suppression half width the motion decoder uses when the export does not say.
+/// 4 frames since 2026-09-05: +0.025 event F1 on 62 titles paired against 3, the shape
+/// untouched. Music runs at 50 Hz and was scored at 3, so it keeps 3 (`NMS_FRAMES_MUSIC`).
 pub const NMS_FRAMES_DEFAULT: usize = 4;
 pub const NMS_FRAMES_MUSIC: usize = 3;
 
-
+/// Everything the engine reads off the graph, validated.
 #[derive(Clone, Debug)]
 pub struct Meta {
     pub kind: ModelKind,
     pub version: String,
-
+    /// Axis ids in head order.
     pub axes: Vec<String>,
     pub input_name: String,
-
+    /// `[1, frames, width]`.
     pub input_shape: [usize; 3],
     pub outputs: Vec<String>,
     pub fields: Vec<Field>,
@@ -121,7 +126,7 @@ pub struct Meta {
     pub nms_frames: usize,
     pub amplitude: f64,
     pub centre_tau_ms: f64,
-
+    /// Per axis in `axes` order; empty where the export had none.
     pub pace_cdf: Vec<Vec<f64>>,
     pub fps: f64,
     pub frames: usize,
@@ -196,7 +201,7 @@ impl Meta {
         })
     }
 
-
+    /// Everything the decoder needs from the export, at one pace.
     pub fn decode_config(&self, pace: f64) -> crate::decoder::DecodeConfig {
         crate::decoder::DecodeConfig {
             tau_ms: crate::pace::tau_for_pace(pace),
@@ -211,7 +216,7 @@ impl Meta {
     }
 }
 
-
+/// The export's fields against this crate's, name by name and offset by offset.
 fn check_layout(layout: &Layout, expected: &[(&str, usize)]) -> Result<(), String> {
     let mut offset = 0;
     let mut ours = Vec::with_capacity(expected.len());
@@ -253,8 +258,8 @@ mod tests {
         )
     }
 
-
-
+    /// The metadata bundled in `app/models` is what the installer ships; it has to parse here,
+    /// name the version the spec expects, and carry the decode settings it was scored with.
     #[test]
     fn the_bundled_movement_metadata_parses_and_matches_the_spec() {
         let m = Meta::parse(include_str!("../../../../app/models/movement-a-20260905-ens5.json")).unwrap();
@@ -265,7 +270,7 @@ mod tests {
         let music = Meta::parse(include_str!("../../../../app/models/music-20260905b-av.json")).unwrap();
         assert_eq!(music.version, crate::spec::MUSIC.version);
         assert_eq!(music.kind, ModelKind::Music);
-
+        // The music exports name no suppression width; they decode at the width they were scored at.
         assert_eq!((music.nms_frames, music.amplitude), (NMS_FRAMES_MUSIC, 1.0));
         let variation = Meta::parse(include_str!("../../../../app/models/music-20260905-av.json")).unwrap();
         assert_eq!(variation.version, crate::spec::MUSIC_VARIATION.version);

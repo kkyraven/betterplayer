@@ -1,4 +1,10 @@
+//! Node bindings for the engine. Class names and shapes here are the contract the app sees.
+
 use std::collections::HashMap;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -30,36 +36,36 @@ impl From<bp_player::Percentiles> for Percentiles {
 pub struct RenderStats {
     pub frames: f64,
     pub dropped: f64,
-
+    /// Frame updates that went undrawn while the picture was gone.
     pub skipped: f64,
     pub render_errors: f64,
     pub gl_errors: f64,
     pub last_gl_error: u32,
     pub render_ms: Percentiles,
-
+    /// Copy queued to frame published.
     pub readback_ms: Percentiles,
     pub interval_ms: Percentiles,
-
+    /// Frame published to `acquire` taking it.
     pub present_ms: Percentiles,
 }
 
 #[napi(object)]
 pub struct EngineOptions {
-
+    /// Output tick rate, default 100.
     pub hz: Option<u32>,
     pub spin_us: Option<u32>,
     pub hwdec: Option<String>,
     pub verbose: Option<bool>,
-
-
+    /// Frame bytes are BGRA; sample `.bgra` in the shader. Default true except on Windows, where
+    /// ANGLE swizzles BGRA reads on the CPU and RGBA is several times faster; read `bgra()`.
     pub bgra: Option<bool>,
-
+    /// Default true. Fenced readback, published as soon as the GPU has copied the frame.
     pub async_readback: Option<bool>,
-
+    /// Extra mpv options applied before init.
     pub mpv_options: Option<HashMap<String, String>>,
 }
 
-
+/// Upscaling, frame generation and DLSS 5 this machine offers; each reason says what is missing.
 #[napi(object)]
 pub struct EnhanceCapabilities {
     pub vsr: bool,
@@ -73,55 +79,55 @@ pub struct EnhanceCapabilities {
     pub gpu: Option<String>,
 }
 
-
+/// The DLSS 5 controls, named as the settings name them; the engine validates the ranges.
 #[napi(object)]
 pub struct DlssOptions {
-
+    /// `default`, `1`, `2` or `3`.
     pub nr_preset: String,
-
+    /// `default`, `natural` or `cinematic`.
     pub nr_style: String,
-
+    /// 0 to 2.
     pub intensity: f64,
-
+    /// 0 to 2.
     pub local_tone: f64,
-
+    /// 0 to 2.
     pub local_structure: f64,
-
+    /// -1 (the native default) to 2.
     pub skin_structure: f64,
     pub auto_mask: bool,
-
+    /// `default`, `j`, `k`, `l` or `m`.
     pub model_preset: String,
-
+    /// One of NVIDIA's modes: 1, 1.5, 1.724, 2 or 3.
     pub factor: f64,
-
+    /// 480, 720, 1080, 1440 or 2160.
     pub input_height: u32,
-
+    /// `auto`, `source` or a frame rate.
     pub rate: String,
-
+    /// `fast` or `quality`.
     pub guide: String,
-
+    /// 2 to 30.
     pub buffer_seconds: f64,
 }
 
 #[napi(object)]
 pub struct EnhanceOptions {
-
-
-
+    /// `off`, `sharp` (mpv's ewa_lanczossharp, any GPU), `fsr` (AMD FidelityFX Super Resolution
+    /// 1.0, any GPU), `rtx` (RTX Video Super Resolution, Windows), `apple` (macOS VideoToolbox)
+    /// or `dlss` (DLSS 5 Neural Rendering, Windows).
     pub upscaler: String,
-
+    /// Frame generation target in frames per second; absent or 0 is off.
     pub target_fps: Option<f64>,
-
+    /// The DLSS 5 controls; absent keeps the engine's defaults.
     pub dlss: Option<DlssOptions>,
 }
 
-
+/// What is in effect right now, which differs from the options where the machine cannot do them.
 #[napi(object)]
 pub struct EnhanceState {
     pub upscaler: String,
-
+    /// The picture leaves larger than it was decoded.
     pub upscaling: bool,
-
+    /// Output rows over source rows while upscaling, else 0.
     pub factor: f64,
     pub source_width: u32,
     pub source_height: u32,
@@ -129,11 +135,11 @@ pub struct EnhanceState {
     pub output_height: u32,
     pub frame_gen: bool,
     pub target_fps: f64,
-
+    /// Why what was asked for is not in effect.
     pub reason: Option<String>,
 }
 
-
+/// The settings' names into the engine's values, each checked; the error names the field.
 fn parse_dlss(d: DlssOptions) -> std::result::Result<bp_player::DlssOptions, String> {
     let options = bp_player::DlssOptions {
         nr_preset: bp_player::NrPreset::parse(&d.nr_preset)
@@ -172,7 +178,7 @@ pub struct Bookmark {
     pub at_ms: f64,
 }
 
-
+/// A stretch of a script with no movement.
 #[napi(object)]
 pub struct Span {
     pub start_ms: f64,
@@ -182,20 +188,20 @@ pub struct Span {
 #[napi(object)]
 pub struct ScriptInfo {
     pub axis: String,
-
+    /// Name among several scripts for the axis; absent for the plain one.
     pub variant: Option<String>,
-
+    /// Whether this is the script playing on its axis.
     pub selected: bool,
     pub source: String,
     pub container: String,
     pub actions: u32,
     pub duration_ms: f64,
-
+    /// Position units (0..100) per second.
     pub average_speed: f64,
     pub max_speed: f64,
-
+    /// Average speed per bucket across `0..durationMs`.
     pub heatmap: Vec<f64>,
-
+    /// Spans of a second or more with no movement, the lead-in before the first action included.
     pub gaps: Vec<Span>,
     pub chapters: Vec<Chapter>,
     pub bookmarks: Vec<Bookmark>,
@@ -211,32 +217,32 @@ pub struct MediaInfo {
 pub struct AxisSettings {
     pub enabled: bool,
     pub offset_ms: f64,
-
+    /// Output range, 0..1.
     pub min: f64,
     pub max: f64,
-
+    /// Scale of the scripted motion around the rest value; 1 plays the script as written.
     pub amplitude: f64,
     pub invert: bool,
-
+    /// `step`, `linear` or `pchip`.
     pub interpolation: String,
-
+    /// Play another axis's script on this one.
     pub link: Option<String>,
-
+    /// `none`, `random` or `sine`.
     pub provider: String,
-
+    /// Random: targets per second.
     pub provider_speed: f64,
-
+    /// Sine: period in ms.
     pub provider_period_ms: f64,
     pub provider_blend: f64,
     pub fill_gaps_over_ms: f64,
-
+    /// 0 disables auto-home.
     pub auto_home_delay_ms: f64,
     pub auto_home_duration_ms: f64,
-
+    /// Full-range units per second, 0 disables.
     pub speed_limit: f64,
-
+    /// Axis whose depth reduces this one, with the default curve.
     pub smart_limit_input: Option<String>,
-
+    /// Stretch the script so its own lowest and highest positions play as 0 and 1.
     pub extend_range: Option<bool>,
 }
 
@@ -308,7 +314,7 @@ impl AxisSettings {
     }
 }
 
-
+/// A button press reported by a device (`ok`, `left`, `right`, `edge` on TCode boards).
 #[napi(object)]
 pub struct DeviceInput {
     pub output: u32,
@@ -317,32 +323,32 @@ pub struct DeviceInput {
 
 #[napi(object)]
 pub struct OutputState {
-
+    /// Final Restim values sent this connection, keyed by internal axis id, in 0..1.
     pub sent_values: HashMap<String, f64>,
     pub id: u32,
     pub kind: String,
     pub address: String,
-
+    /// `stroker` or `restim`: which axis family the output speaks.
     pub profile: String,
-
+    /// `connecting`, `connected` or `error`.
     pub status: String,
     pub error: Option<String>,
     pub device: Option<String>,
     pub tcode: Option<String>,
-
+    /// The session volume ramp's progress, while it is on and the profile is restim.
     pub ramp: Option<RampProgress>,
-
+    /// What a connected Howl phone last reported.
     pub howl: Option<HowlStatus>,
-
+    /// What a connected OSSM last reported.
     pub ossm: Option<OssmStatus>,
-
+    /// A connected toy's features and the axis each follows; empty for every other output.
     pub features: Vec<OutputFeature>,
-
+    /// Battery level of a toy that reports one, 0 to 100.
     pub battery: Option<u8>,
 }
 
-
-
+/// Howl's player and main controls, from its last reply. `position` is in seconds, the powers
+/// are 0..200.
 #[napi(object)]
 pub struct HowlStatus {
     pub playing: bool,
@@ -353,9 +359,9 @@ pub struct HowlStatus {
     pub mute: bool,
 }
 
-
-
-
+/// An OSSM's firmware state (`streaming.idle` while it takes positions, `streaming.preflight`
+/// until its speed knob is at zero, `homing.forward` and `homing.backward`, `menu.idle`), its
+/// effective speed 0..100 (the knob) and the carriage position in mm.
 #[napi(object)]
 pub struct OssmStatus {
     pub state: String,
@@ -363,8 +369,8 @@ pub struct OssmStatus {
     pub position_mm: f64,
 }
 
-
-
+/// A second axis shaken into an output's stroke: a sine at `hz` whose swing is `depth` in
+/// full-range units, scaled by the source axis's value.
 #[napi(object)]
 pub struct VibrationConfig {
     pub source: String,
@@ -372,11 +378,11 @@ pub struct VibrationConfig {
     pub hz: f64,
 }
 
-
-
-
-
-
+/// One feature of a toy (embedded Buttplug): `kind` is `vibrate`, `rotate`, `oscillate`,
+/// `constrict`, `position`, `spray`, `temperature` or `led`. `axis` is the axis id it follows,
+/// unset when off; `speed` says it takes that axis's speed rather than its value. `level` says
+/// it is a level with its own `FeatureLevel` map rather than a place within the axis's range,
+/// and `input` is that level's input right now (0 to 1, before the map) while its axis drives it.
 #[napi(object)]
 pub struct OutputFeature {
     pub index: u32,
@@ -388,8 +394,8 @@ pub struct OutputFeature {
     pub input: Option<f64>,
 }
 
-
-
+/// How a toy's level feature maps its input to the toy: off up to `from`, `floor` just past
+/// it, a straight line to `cap` at `to`, `cap` beyond. All 0 to 1; zero in is always zero out.
 #[napi(object)]
 pub struct FeatureLevel {
     pub from: f64,
@@ -398,8 +404,8 @@ pub struct FeatureLevel {
     pub cap: f64,
 }
 
-
-
+/// A device the embedded Buttplug server has connected, from `toyDevices`. `bound` means an
+/// output already drives it.
 #[napi(object)]
 pub struct ToyDevice {
     pub index: u32,
@@ -410,7 +416,7 @@ pub struct ToyDevice {
     pub bound: bool,
 }
 
-
+/// One feature of a device from `toyDevices`; `kind` as in `OutputFeature`.
 #[napi(object)]
 pub struct ToyFeature {
     pub index: u32,
@@ -418,46 +424,46 @@ pub struct ToyFeature {
     pub description: String,
 }
 
-
+/// The embedded Buttplug server's devices, and why it is not running when it is not.
 #[napi(object)]
 pub struct ToyScanState {
     pub devices: Vec<ToyDevice>,
     pub error: Option<String>,
 }
 
-
+/// The Buttplug server standing in for Intiface Central, from `intifaceState`.
 #[napi(object)]
 pub struct IntifaceState {
     pub port: u16,
-
+    /// Connected clients.
     pub clients: u32,
-
+    /// What the newest client called itself.
     pub client: Option<String>,
 }
 
-
-
+/// Counters and timings for one output, from `outputStats`. Ask while a diagnostics view
+/// is open, not every frame: the write samples are sorted on each call.
 #[napi(object)]
 pub struct OutputStats {
     pub lines_sent: f64,
     pub write_us: PercentilesUs,
-
+    /// Newest first.
     pub received: Vec<String>,
 }
 
-
+/// How the tick thread is keeping time, from `tickStats`.
 #[napi(object)]
 pub struct EngineTickStats {
     pub hz: u32,
     pub realtime: bool,
-
+    /// How late precise ticks fired past their deadline.
     pub late_us: PercentilesUs,
-
+    /// From firing to the last output written, so lock waits and device writes show.
     pub work_us: PercentilesUs,
 }
 
-
-
+/// Session volume ramp on a restim output: `V0` rises from `start` to `max` (0..1) over
+/// `durationMs` of playing time, restarting on every connect.
 #[napi(object)]
 pub struct RampConfig {
     pub enabled: bool,
@@ -466,21 +472,21 @@ pub struct RampConfig {
     pub duration_ms: f64,
 }
 
-
+/// Optional volume added past the normal limits as a motion axis rises.
 #[napi(object)]
 pub struct EstimVolumeBoost {
     pub enabled: bool,
     pub axis: String,
-
+    /// Added volume at the source axis's maximum, 0..1.
     pub amount: f64,
 }
 
-
-
+/// Estim settings shared by every restim output: electrode balance, volume limits and
+/// boost. With `params` off, carrier and pulse scripts and parameter sources stay in the app.
 #[napi(object)]
 pub struct EstimOptions {
     pub contrast: f64,
-
+    /// Minimum of the normal volume range, 0..1; defaults to 0.75. Zero volume stays silent.
     pub volume_floor: Option<f64>,
     pub volume_max: Option<f64>,
     pub volume_boost: Option<EstimVolumeBoost>,
@@ -489,7 +495,7 @@ pub struct EstimOptions {
 
 #[napi(object)]
 pub struct RampProgress {
-
+    /// The multiplier in force, 0..1.
     pub value: f64,
     pub elapsed_ms: f64,
     pub duration_ms: f64,
@@ -497,14 +503,14 @@ pub struct RampProgress {
     pub max: f64,
 }
 
-
-
-
-
-
-
-
-
+/// Where a restim parameter axis (`C0`, `P0`..`P3`) takes its value without a script:
+/// `restim` (nothing sent), `fixed` with `value` 0..1 of the axis range, `sweep` with
+/// `provider` `sine` (`providerPeriodMs`) or `random` (`providerSpeed`), `audio` (the sound
+/// track's loudness, once `beatLoad` has run) or `detection` with `kinds` from
+/// `detectionKinds()` (how much of the picture they cover, once a model is loaded and frames
+/// arrive; see `wantsFrames`). Detection also takes `bias` (−1..1, skews the value down or
+/// up), and holds the value between triggers when `holdOnCut` or `holdCoverageOver` (0..1 of
+/// the coverage) is set, moving by at most `jump` (0..1 of the range) per trigger.
 #[napi(object)]
 pub struct ParamSource {
     pub source: String,
@@ -519,14 +525,14 @@ pub struct ParamSource {
     pub jump: Option<f64>,
 }
 
-
+/// What a held Detection source is sending for an axis and the media time it was set.
 #[napi(object)]
 pub struct ParamHold {
     pub value: f64,
     pub since_ms: f64,
 }
 
-
+/// The kinds a Detection parameter source can watch, in the order `trackState().detector.coverage` uses.
 #[napi]
 pub fn detection_kinds() -> Vec<String> {
     bp_core::DetectKind::ALL
@@ -630,15 +636,15 @@ impl ParamSource {
     }
 }
 
-
-
-
+/// Bits of `EngineState.axisFlags`: the axis has a script, is derived from another axis
+/// (alpha and beta from the stroke, electrodes 1 to 4 from those), is driven by hand, or an
+/// outside source (the live tracker, a remote client) is driving it.
 pub const AXIS_FLAG_SCRIPT: u8 = bp_core::FLAG_SCRIPT;
 pub const AXIS_FLAG_DERIVED: u8 = bp_core::FLAG_DERIVED;
 pub const AXIS_FLAG_LIVE: u8 = bp_core::FLAG_LIVE;
 pub const AXIS_FLAG_TRACKED: u8 = bp_core::FLAG_TRACKED;
 
-
+/// Everything the UI polls every frame: plain values and two small typed arrays.
 #[napi(object)]
 pub struct EngineState {
     pub time_ms: f64,
@@ -646,32 +652,32 @@ pub struct EngineState {
     pub paused: bool,
     pub rate: f64,
     pub loaded: bool,
-
+    /// The clock is following a VR player, not our own.
     pub following: bool,
-
+    /// The decoded picture size, 0 by 0 until a file has loaded.
     pub video_width: u32,
     pub video_height: u32,
-
+    /// Pipeline output per axis, 0..1, in `axes()` order.
     pub axis_values: Float64Array,
-
+    /// Per axis in `axes()` order: bit 0 has a script, bit 1 derived, bit 2 live, bit 3 tracked.
     pub axis_flags: Uint8Array,
-
+    /// Moves whenever `axisFlags` do, so the host can skip diffing them.
     pub flags_version: f64,
     pub outputs: Vec<OutputState>,
-
+    /// Why the last load failed (mpv's message), until the next load.
     pub error: Option<String>,
 }
 
-
+/// What the VR player we are following reports.
 #[napi(object)]
 pub struct FollowState {
-
+    /// `deovr`, `heresphere` or `whirligig`.
     pub kind: String,
     pub address: String,
-
+    /// `connecting`, `connected` or `error`.
     pub status: String,
     pub error: Option<String>,
-
+    /// The file the player has open; pass it to `loadScripts`.
     pub path: Option<String>,
     pub playing: bool,
     pub time_ms: f64,
@@ -679,21 +685,21 @@ pub struct FollowState {
     pub rate: f64,
 }
 
-
-
-
-
+/// Live tracker tunables. `sensitivity` scales the per-frame pixel motion. Timing is not
+/// here: each axis's offset says how far behind (or, with a lookahead, ahead of) the picture
+/// it runs. `pace` (0..1, default 0.5) is what the two AI sources are conditioned on, one
+/// value per video.
 #[napi(object)]
 pub struct TrackOptions {
     pub sensitivity: Option<f64>,
     pub pace: Option<f64>,
-
+    /// Mean absolute frame difference (0..255) that counts as a scene cut; default 18.
     pub cut_threshold: Option<f64>,
-
+    /// How long the output eases into the new signal after a cut; default 250.
     pub ease_ms: Option<f64>,
-
+    /// Bounce at the bottom of a stroke deeper than usual; default true.
     pub flourishes: Option<bool>,
-
+    /// Clamp per-frame signals far past the recent motion; default true.
     pub clamp_jumps: Option<bool>,
 }
 
@@ -727,13 +733,13 @@ impl Default for TrackOptions {
     }
 }
 
-
-
-
-
-
-
-
+/// One row of the tracking table. `source` is `video`, `beat`, `hero`, `ai-motion`, `ai-music`,
+/// `faptap` or `off`; `intensity` scales the
+/// motion about the middle (1 is as tracked, 0 holds still, 2 doubles it); `min`..`max` in 0..1
+/// is the span of the axis the motion is squeezed into; `smoothingMs` is the time constant of
+/// the smoothing on the axis's motion component, 0 for none. Axes without a motion component
+/// (vibrate, estim) are ignored. The component per axis is fixed: L0 stroke, L2 sway, L1 surge,
+/// R1 roll, R2 pitch, R0 twist.
 #[napi(object)]
 pub struct TrackAxis {
     pub axis: String,
@@ -745,7 +751,7 @@ pub struct TrackAxis {
     pub invert: bool,
 }
 
-
+/// The engine's table with `rows` written over it; rows for unknown axes are an error.
 fn track_axes(rows: Vec<TrackAxis>, mut table: bp_core::TrackAxes) -> Result<bp_core::TrackAxes> {
     for r in rows {
         let source = match r.source.as_str() {
@@ -771,7 +777,7 @@ fn track_axes(rows: Vec<TrackAxis>, mut table: bp_core::TrackAxes) -> Result<bp_
     Ok(table)
 }
 
-
+/// The part of the frame to track, in 0..1 with a top-left origin.
 #[napi(object)]
 pub struct TrackRegion {
     pub x: f64,
@@ -780,8 +786,8 @@ pub struct TrackRegion {
     pub h: f64,
 }
 
-
-
+/// One tracked frame keyed by the page's media time: the stroke, and every component
+/// (stroke, sway, surge, roll, pitch, twist).
 #[napi(object)]
 pub struct TrackSample {
     pub time_ms: f64,
@@ -789,45 +795,45 @@ pub struct TrackSample {
     pub motion: Vec<f64>,
 }
 
-
+/// A whole-file generation's progress.
 #[napi(object)]
 pub struct GenerateState {
-
-
+    /// `idle`, `loading` (the file, and a detector on Auto), `running`, `music` (waiting on
+    /// the music model's own pass), `done`, `cancelled` or `error`.
     pub status: String,
     pub error: Option<String>,
-
+    /// Media time reached and the file's length.
     pub time_ms: f64,
     pub duration_ms: f64,
-
+    /// Frames got through per wall second, once running.
     pub fps: f64,
     pub frames: f64,
-
+    /// Hero hits seen so far.
     pub hits: f64,
-
+    /// The movement model's provider and the time its windows have taken, when it ran.
     pub provider: Option<String>,
     pub model_ms: f64,
 }
 
-
+/// One script from a generation, as file contents.
 #[napi(object)]
 pub struct GeneratedScript {
     pub axis: String,
-
+    /// The sibling file's suffix (`sway` for `name.sway.funscript`), empty for the stroke.
     pub suffix: String,
     pub actions: f64,
     pub duration_ms: f64,
     pub json: String,
 }
 
-
+/// One script to install with `setGenerated`: an axis id and funscript JSON.
 #[napi(object)]
 pub struct GeneratedInput {
     pub axis: String,
     pub json: String,
 }
 
-
+/// A box the detector chose, in 0..1 of the frame.
 #[napi(object)]
 pub struct FoundBox {
     pub x: f64,
@@ -838,7 +844,7 @@ pub struct FoundBox {
     pub confidence: f64,
 }
 
-
+/// One detector run's boxes of the kinds asked for, from `detectBoxes`.
 #[napi(object)]
 pub struct DetectBoxes {
     pub runs: f64,
@@ -847,22 +853,22 @@ pub struct DetectBoxes {
 
 #[napi(object)]
 pub struct DetectorState {
-
+    /// `none`, `loading`, `ready` or `error`.
     pub status: String,
     pub error: Option<String>,
     pub model: Option<String>,
-
+    /// `coreml` or `cpu` once loaded.
     pub provider: Option<String>,
-
+    /// The last run's choice; null when it found nothing worth following.
     pub found: Option<FoundBox>,
     pub run_ms: f64,
     pub runs: f64,
-
+    /// Share of the frame each kind covers, in `detectionKinds()` order, smoothed across runs.
     pub coverage: Vec<f64>,
 }
 
-
-
+/// One file of a model in the host's model folder. `url` and `sha256` say where a download
+/// comes from and what it must hash to; both are empty for a bundled model.
 #[napi(object)]
 pub struct ModelFile {
     pub file: String,
@@ -870,9 +876,9 @@ pub struct ModelFile {
     pub sha256: String,
 }
 
-
-
-
+/// A model the app uses: `kind` is `detector`, `motion` or `music`; `files` is the weights then
+/// the metadata. Ours ship inside the app (`bundled`). The detectors are AGPL-3.0 downloads:
+/// verify every `sha256`, never bundle, and show the licence for agreement first (`consent`).
 #[napi(object)]
 pub struct ModelInfo {
     pub id: String,
@@ -888,26 +894,26 @@ pub struct ModelInfo {
     pub consent: bool,
 }
 
-
+/// What one of the AI models is doing, from `modelState`.
 #[napi(object)]
 pub struct ModelState {
-
+    /// `none`, `loading`, `ready` or `error`.
     pub status: String,
     pub error: Option<String>,
     pub model: Option<String>,
     pub version: Option<String>,
-
+    /// `coreml` or `cpu` once loaded, and why the first choice was not taken.
     pub provider: Option<String>,
     pub fallback: Option<String>,
-
+    /// The warmup's median window, and the last window's cost, in ms.
     pub warmup_ms: f64,
     pub run_ms: f64,
-
+    /// The movement model cannot keep up live; its axes stay on the flow tracker.
     pub too_slow: bool,
 }
 
-
-
+/// A model the app may offer to download. Every one is treated as AGPL-3.0: show the licence
+/// and ask before fetching, verify `sha256`, never bundle.
 #[napi(object)]
 pub struct DetectorModel {
     pub id: String,
@@ -925,44 +931,44 @@ pub struct DetectorModel {
 #[napi(object)]
 pub struct TrackState {
     pub active: bool,
-
+    /// `idle`, `locating` or `tracking`.
     pub state: String,
-
+    /// The region in use, null for the centre, and whether the detector chose it.
     pub region: Option<TrackRegion>,
     pub auto: bool,
     pub detector: DetectorState,
-
+    /// The movement model, for axes on AI Motion.
     pub model: ModelState,
-
+    /// Newest tracked stroke, 0..1.
     pub position: f64,
-
+    /// Newest position per component: stroke, sway, surge, roll, pitch, twist.
     pub motion: Vec<f64>,
-
-
+    /// How far past the playhead the lookahead has tracked, null without one (a page, or a
+    /// file that is not local).
     pub ahead_ms: Option<f64>,
-
+    /// Frame rate measured from arrivals.
     pub fps: f64,
     pub frames: f64,
-
+    /// Scene cuts, clamped jumps and dropped fits since the start.
     pub cuts: f64,
     pub jumps: f64,
     pub drops: f64,
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+/// One of: `{kind:'serial', path, baud}`, `{kind:'udp'|'tcp', host, port}`,
+/// `{kind:'websocket'|'buttplug', url}`, `{kind:'ble', name}` for a TCode board over BLE,
+/// `{kind:'ossm', name}` for an OSSM over its firmware's BLE streaming service, or
+/// `{kind:'coyote', name, strengthA, strengthB}` for a DG-Lab Coyote v3. BLE `name` matches
+/// the start of an advertised name or address from `bleScan`; an empty Coyote or OSSM name
+/// takes the first one that answers. Coyote strengths are the per-channel cap, 0..200, and default to
+/// 0: nothing comes out until the user raises them. `{kind:'handy', key, appKey?, hosting?}` takes a
+/// connection key, an optional app key (which picks API v3) and where the script is hosted,
+/// `cloud` or `lan`. `{kind:'howl', host, key}` is the Howl app on a phone at `host`, with the
+/// key its settings show. `{kind:'toy', name, address}` is a Bluetooth toy through the embedded
+/// Buttplug server, matched by the `address` `toyDevices` reported, or a unique `name` if no address is supplied.
+/// `{kind:'openshock', url?, token, shocker, trigger?}` is one OpenShock shocker (by its id) over
+/// the API at `url` (the public service without one), fired by `trigger`. `profile` is
+/// `stroker` (default) or `restim`.
 #[napi(object)]
 pub struct Transport {
     pub kind: String,
@@ -981,11 +987,14 @@ pub struct Transport {
     pub address: Option<String>,
     pub token: Option<String>,
     pub shocker: Option<String>,
+    pub username: Option<String>,
+    pub user_id: Option<u32>,
+    pub client_id: Option<u32>,
     pub trigger: Option<OpenShockTrigger>,
 }
 
-
-
+/// When an OpenShock shocker fires: while `axis` is past `line` (0..1), above it or below.
+/// `control` is `shock`, `vibrate` or `sound`; `intensity` 0..100, zero fires nothing.
 #[napi(object)]
 pub struct OpenShockTrigger {
     pub axis: String,
@@ -1068,6 +1077,14 @@ impl Transport {
                 name: self.name.clone().unwrap_or_default(),
                 address: self.address.clone().unwrap_or_default(),
             },
+            "pishock" => bp_devices::Transport::PiShock {
+                username: need(&self.username, "username")?,
+                key: need(&self.token, "token")?,
+                user: self.user_id.filter(|v| *v > 0).ok_or_else(|| err("PiShock needs userId".into()))?,
+                client: self.client_id.filter(|v| *v > 0).ok_or_else(|| err("PiShock needs clientId".into()))?,
+                shocker: need(&self.shocker, "shocker")?.parse::<u32>().ok().filter(|v| *v > 0).ok_or_else(|| err("PiShock needs shocker".into()))?,
+                trigger: self.trigger.as_ref().map(OpenShockTrigger::to_core).transpose()?.unwrap_or_default(),
+            },
             "openshock" => bp_devices::Transport::OpenShock {
                 url: self
                     .url
@@ -1095,16 +1112,18 @@ pub struct AxisClamp {
     pub max: f64,
 }
 
-
-
+/// Player, clock, script mixer and device outputs in one object. Frames are written into
+/// host memory exactly as in Phase 0.
 #[napi]
 pub struct Engine {
     inner: bp_core::Engine,
-
+    pishock_enabled: bool,
+    pishock_outputs: Vec<u32>,
+    /// Host frame memory. Held so the typed arrays stay alive while the engine writes to them.
     buffers: Vec<Uint8Array>,
 }
 
-
+/// Checks three host buffers of exactly width * height * 4 bytes and takes their addresses.
 fn external(width: u32, height: u32, buffers: &[Uint8Array]) -> Result<bp_core::External> {
     let len = width as usize * height as usize * 4;
     if buffers.len() != 3 {
@@ -1128,7 +1147,7 @@ fn external(width: u32, height: u32, buffers: &[Uint8Array]) -> Result<bp_core::
 
 #[napi]
 impl Engine {
-
+    /// `buffers` are three `Uint8Array(width * height * 4)` the engine writes frames into.
     #[napi(constructor)]
     pub fn new(
         width: u32,
@@ -1170,17 +1189,18 @@ impl Engine {
         )
         .map_err(err)?;
         inner.player.resize(width, height, Some(ext)).map_err(err)?;
-        Ok(Engine { inner, buffers })
+        Ok(Engine { inner, buffers, pishock_enabled: false, pishock_outputs: Vec::new() })
     }
 
-
-
-
-
-
-
-
-
+    /// Loads the video and every script beside it, starting at `startSeconds` when given.
+    /// The scripts are read and measured off the JS thread (or taken from `prepare`), then
+    /// the file and the scripts swap in together; the promise resolves with the scripts.
+    /// `state().loaded` is set at once, the duration and picture follow when mpv has opened
+    /// the file. For a library server's stream, `scriptsPath` is the local stand-in whose
+    /// siblings hold the cached scripts, and `headers` the HTTP headers the stream needs
+    /// (`Field: value`, comma separated; pass an empty string for none), which also keeps
+    /// yt-dlp away from the URL.
+    /// Aborting `signal` prevents a pending script scan from installing the media.
     #[napi(ts_return_type = "Promise<MediaInfo>")]
     pub fn load(
         &self,
@@ -1189,32 +1209,45 @@ impl Engine {
         variants: Option<HashMap<String, String>>,
         scripts_path: Option<String>,
         headers: Option<String>,
+        signal: Option<AbortSignal>,
+        script_folders: Option<Vec<String>>,
     ) -> Result<AsyncTask<LoadScripts>> {
         let variants = variant_pairs(variants)?;
-        Ok(AsyncTask::new(LoadScripts {
-            loader: self.inner.loader(),
-            path,
-            start_seconds: Some(start_seconds),
-            variants,
-            scripts_path,
-            headers,
-        }))
+        let cancelled = Arc::new(AtomicBool::new(false));
+        if let Some(signal) = &signal {
+            let cancelled = Arc::clone(&cancelled);
+            signal.on_abort(move || cancelled.store(true, Ordering::Relaxed));
+        }
+        Ok(AsyncTask::with_optional_signal(
+            LoadScripts {
+                loader: self.inner.loader(),
+                path,
+                start_seconds: Some(start_seconds),
+                variants,
+                scripts_path,
+                script_folders: script_folders.unwrap_or_default(),
+                headers,
+                cancelled,
+            },
+            signal,
+        ))
     }
 
-
-
-
+    /// Scans the scripts beside `path` (or beside `scriptsPath`, as in `load`) ahead of its
+    /// `load`, off the JS thread, so a session's next clip swaps in without waiting for the
+    /// scan. One file is kept; a later call replaces it.
     #[napi(ts_return_type = "Promise<void>")]
-    pub fn prepare(&self, path: String, scripts_path: Option<String>) -> AsyncTask<Prepare> {
+    pub fn prepare(&self, path: String, scripts_path: Option<String>, script_folders: Option<Vec<String>>) -> AsyncTask<Prepare> {
         AsyncTask::new(Prepare {
             loader: self.inner.loader(),
             path,
             scripts_path,
+            script_folders: script_folders.unwrap_or_default(),
         })
     }
 
-
-
+    /// Plays a named variant on an axis (null for the plain script). Returns every script
+    /// for the media with the selection marked.
     #[napi]
     pub fn select_variant(
         &self,
@@ -1229,19 +1262,20 @@ impl Engine {
             .collect())
     }
 
-
+    /// Stops playback and drops the scripts.
     #[napi]
     pub fn unload(&self) -> Result<()> {
         self.inner.unload().map_err(err)
     }
 
-
-
+    /// The scripts beside `path` without touching the player, for driving devices off a
+    /// VR player's clock. Same threading as `load`.
     #[napi(ts_return_type = "Promise<MediaInfo>")]
     pub fn load_scripts(
         &self,
         path: String,
         variants: Option<HashMap<String, String>>,
+        script_folders: Option<Vec<String>>,
     ) -> Result<AsyncTask<LoadScripts>> {
         Ok(AsyncTask::new(LoadScripts {
             loader: self.inner.loader(),
@@ -1249,13 +1283,15 @@ impl Engine {
             start_seconds: None,
             variants: variant_pairs(variants)?,
             scripts_path: None,
+            script_folders: script_folders.unwrap_or_default(),
             headers: None,
+            cancelled: Arc::new(AtomicBool::new(false)),
         }))
     }
 
-
-
-
+    /// Follows a VR player's clock: `deovr` or `heresphere` (port 23554) or `whirligig`
+    /// (port 2000). Local playback pauses. Watch `followState().path` and hand it to
+    /// `loadScripts` when it changes.
     #[napi]
     pub fn follow(&self, kind: String, host: String, port: Option<u16>) -> Result<()> {
         let kind = bp_core::FollowKind::from_str(&kind)
@@ -1263,30 +1299,30 @@ impl Engine {
         self.inner.follow(kind, &host, port).map_err(err)
     }
 
-
+    /// Stops following and puts the clock back on our own player.
     #[napi]
     pub fn unfollow(&self) {
         self.inner.unfollow()
     }
 
-
-
+    /// Whether frames should keep coming through `trackFrame` while tracking is off: a
+    /// Detection parameter source is set on a restim output, or `setDetectBoxes` is on.
     #[napi]
     pub fn wants_frames(&self) -> bool {
         self.inner.wants_frames()
     }
 
-
-
-
+    /// The host hides what the detector finds (Gooner mode): frames are wanted (see
+    /// `wantsFrames`) and every one is run, not one per `setDetectOptions` interval. Read the
+    /// boxes with `detectBoxes`.
     #[napi]
     pub fn set_detect_boxes(&self, wanted: bool) {
         self.inner.set_boxes_wanted(wanted)
     }
 
-
-
-
+    /// Every box of the detector's last run whose class is one of `kinds` (`detectionKinds()`
+    /// ids), in 0..1 of the frame, with the run's number so a host can tell a fresh run from
+    /// the last one. Run 0 and no boxes until a model is ready and has seen a frame.
     #[napi]
     pub fn detect_boxes(&self, kinds: Vec<String>) -> DetectBoxes {
         let kinds: Vec<bp_core::DetectKind> = kinds
@@ -1300,7 +1336,7 @@ impl Engine {
         }
     }
 
-
+    /// Null when not following.
     #[napi]
     pub fn follow_state(&self) -> Option<FollowState> {
         self.inner.follow_state().map(|s| {
@@ -1343,7 +1379,7 @@ impl Engine {
         self.inner.set_rate(rate).map_err(err)
     }
 
-
+    /// 0..1.
     #[napi]
     pub fn set_volume(&self, volume: f64) -> Result<()> {
         self.inner.player.set_volume(volume).map_err(err)
@@ -1364,22 +1400,22 @@ impl Engine {
         self.inner.player.muted()
     }
 
-
+    /// Seeks to the exact time rather than the nearest keyframe, for the editor.
     #[napi]
     pub fn seek_exact(&self, seconds: f64) -> Result<()> {
         self.inner.seek_exact(seconds).map_err(err)
     }
 
-
+    /// Steps one frame forward (or back with `false`); the player is left paused.
     #[napi]
     pub fn frame_step(&self, forward: bool) -> Result<()> {
         self.inner.frame_step(forward).map_err(err)
     }
 
-
-
-
-
+    /// The editor's draft for one axis: keyframe times in ms and positions 0..1, played by
+    /// the mixer in place of the file's script until `clearDraft`. Without arrays the axis
+    /// goes back to the file's script. Outputs that host the script are left alone until
+    /// `pushDraftHosted`.
     #[napi]
     pub fn set_draft(
         &self,
@@ -1395,23 +1431,23 @@ impl Engine {
         Ok(())
     }
 
-
+    /// Drops the draft: the file's scripts play again everywhere.
     #[napi]
     pub fn clear_draft(&self) {
         self.inner.clear_draft()
     }
 
-
-
+    /// Hands the draft to outputs that host the script (Howl, the Handy), which take a whole
+    /// script: call it on pause rather than on every edit.
     #[napi]
     pub fn push_draft_hosted(&self) {
         self.inner.push_draft_hosted()
     }
 
-
-
-
-
+    /// Analyses one stretch of the loaded local file for the editor: a silent decode with
+    /// the 3 s warm-up, through the flow tracker, the detector on Auto and, when asked, the
+    /// movement model (which decodes 0.7 s past the range for its future frames). One run at
+    /// a time; watch `analyseState`. Local files only.
     #[napi(ts_return_type = "Promise<RangeAnalysis>")]
     pub fn analyse_range(&self, options: AnalyseOptions) -> Result<AsyncTask<AnalyseRange>> {
         let analyser = self.inner.range_analyser().map_err(err)?;
@@ -1445,20 +1481,20 @@ impl Engine {
         }
     }
 
-
-
+    /// The newest position a connected device reports for its own slider, 0..1 (a `#pos`,
+    /// `#slider` or echoed `L0` line); null while none does. For recording in the editor.
     #[napi]
     pub fn device_slider(&self) -> Option<f64> {
         self.inner.device_slider()
     }
 
-
+    /// Stops a running analysis; its promise rejects.
     #[napi]
     pub fn analyse_cancel(&self) {
         self.inner.range_cancel()
     }
 
-
+    /// Drops the editor's decode (about one extra mpv); the next analysis opens it again.
     #[napi]
     pub fn analyse_close(&self) {
         self.inner.range_close()
@@ -1487,18 +1523,18 @@ impl Engine {
         Ok(())
     }
 
-
+    /// Manual drive for "find my range": a raw device position, or null to release.
     #[napi]
     pub fn set_live(&self, axis_id: String, value: Option<f64>) -> Result<()> {
         self.inner.set_live(axis(&axis_id)?, value);
         Ok(())
     }
 
-
-
-
-
-
+    /// Starts the live tracker: hand it frames with `trackFrame` and the axes in the table
+    /// follow them through the normal per-axis pipeline, each behind the picture by its
+    /// offset. With `lookahead` the frames are the player's own: when the loaded file is
+    /// local a second decode tracks ahead of playback, so a negative offset runs the axis
+    /// ahead of the picture. Without `axes` the engine's default table applies.
     #[napi]
     pub fn track_start(
         &self,
@@ -1516,7 +1552,7 @@ impl Engine {
         Ok(())
     }
 
-
+    /// Live change to the tracking table; rows not given keep their current values.
     #[napi]
     pub fn set_track_axes(&self, axes: Vec<TrackAxis>) -> Result<()> {
         let table = track_axes(axes, self.inner.track_axes())?;
@@ -1524,22 +1560,22 @@ impl Engine {
         Ok(())
     }
 
-
+    /// Stops tracking and releases the axis. `trackSamples` still works afterwards.
     #[napi]
     pub fn track_stop(&self) {
         self.inner.track_stop()
     }
 
-
+    /// Browser playback state while tracking browser frames.
     #[napi]
     pub fn track_playback(&self, media_ms: f64, playing: bool, rate: f64) {
         self.inner.track_playback(media_ms, playing, rate);
     }
 
-
-
-
-
+    /// One row-major frame with the page's media time: grayscale (`channels` 1, the default)
+    /// or packed RGB (3). Only RGB frames reach the region detector. The bytes are copied, so
+    /// the caller can reuse the buffer. Frames that arrive while the tracker is busy replace
+    /// the one waiting.
     #[napi]
     pub fn track_frame(
         &self,
@@ -1565,14 +1601,14 @@ impl Engine {
         Ok(())
     }
 
-
+    /// Null tracks the centre 60 percent by 60 percent; a box picks it.
     #[napi]
     pub fn set_track_region(&self, region: Option<TrackRegion>) {
         self.inner.set_track_region(region.map(region_core))
     }
 
-
-
+    /// `auto` (the detector's box), `centre`, or `pick` with a region. `target` is the kind
+    /// Auto looks for (a `detectionKinds()` id), or null for genitals, else a face.
     #[napi]
     pub fn set_track_region_source(
         &self,
@@ -1599,9 +1635,9 @@ impl Engine {
         Ok(())
     }
 
-
-
-
+    /// Loads a downloaded model by id from `path` (or unloads with null). `cacheDir` keeps the
+    /// compiled CoreML graph between runs. Loading runs on its own thread; watch
+    /// `trackState().detector`.
     #[napi]
     pub fn set_detector(
         &self,
@@ -1627,8 +1663,8 @@ impl Engine {
         Ok(())
     }
 
-
-
+    /// Analyses a raw mono f32le sample file at 22050 Hz (from `audio:decode`) for the Beat
+    /// source. Axes on Beat get their scripts once it is ready; watch `beatState`.
     #[napi]
     pub fn beat_load(&self, path: String) {
         self.inner.beat_load(std::path::PathBuf::from(path))
@@ -1640,13 +1676,51 @@ impl Engine {
     }
 
     #[napi]
+    pub fn beat_window_begin(&self, reset: bool) -> u32 {
+        self.inner.beat_window_begin(reset)
+    }
+
+    #[napi]
+    pub fn beat_set_window(&self, track: BeatTrackInfo, start_ms: f64, token: u32, continuous: bool) -> bool {
+        self.inner.beat_set_window(bp_core::BeatTrack {
+            bpm: track.bpm,
+            beats: track.beats,
+            loudness: track.loudness,
+            onset: track.onset.into_iter().map(|v| v as f32).collect(),
+            envelope: track.envelope.into_iter().map(|v| v as f32).collect(),
+            duration_ms: track.duration_ms,
+        }, start_ms, token, continuous)
+    }
+
+    #[napi]
+    pub fn beat_window_error(&self, token: u32, error: String) {
+        self.inner.beat_window_error(token, error)
+    }
+
+    /// Starts the Beat source on live audio: feed it `beatLivePush`, and `beatClear` ends it.
+    #[napi]
+    pub fn beat_live_start(&self) {
+        self.inner.beat_live_start()
+    }
+
+    /// Mono f32 samples at 22050 Hz in playback order, from the same instant `trackFrame`
+    /// times count from.
+    #[napi]
+    pub fn beat_live_push(&self, samples: Float32Array) {
+        self.inner.beat_live_push(&samples)
+    }
+
+    #[napi]
     pub fn set_beat_options(&self, options: BeatOptions) -> Result<()> {
-        let style = bp_core::BeatStyle::from_str(&options.style)
-            .ok_or_else(|| err(format!("unknown beat style {}", options.style)))?;
+        let defaults = bp_core::BeatOptions::default();
+        let style = bp_core::BeatStyle::from_str(&options.style).unwrap_or(bp_core::BeatStyle::Strokes);
         self.inner.set_beat_options(bp_core::BeatOptions {
             style,
             volume_depth: options.volume_depth,
-            tempo_factor: options.tempo_factor.clamp(0.25, 4.0),
+            bounce: options.bounce.unwrap_or(true),
+            bounce_depth: options.bounce_depth.unwrap_or(defaults.bounce_depth),
+            bounce_speed: options.bounce_speed.unwrap_or(defaults.bounce_speed),
+            tempo_factor: if options.tempo_factor.is_finite() { options.tempo_factor.clamp(0.25, 4.0) } else { 1.0 },
         });
         Ok(())
     }
@@ -1666,9 +1740,17 @@ impl Engine {
             bp_core::MusicStatus::Ready => (None, 100.0),
             _ => (None, 0.0),
         };
+        let (full_status, full_error) = match b.full_status {
+            bp_core::BeatStatus::None => ("none", None),
+            bp_core::BeatStatus::Analysing => ("analysing", None),
+            bp_core::BeatStatus::Ready => ("ready", None),
+            bp_core::BeatStatus::Error(e) => ("error", Some(e)),
+        };
         BeatState {
             status: status.to_string(),
             error,
+            full_status: full_status.to_string(),
+            full_error,
             bpm: b.bpm,
             beats: b.beats as f64,
             style: b.options.style.as_str().to_string(),
@@ -1682,8 +1764,8 @@ impl Engine {
         }
     }
 
-
-
+    /// The Hero source's target zone (null turns it off) and scroll direction (`auto`,
+    /// `right-to-left`, `left-to-right`, `top-down`, `bottom-up`).
     #[napi]
     pub fn set_hero_options(&self, zone: Option<TrackRegion>, direction: String) -> Result<()> {
         let direction = bp_core::HeroDirection::from_str(&direction)
@@ -1700,8 +1782,8 @@ impl Engine {
         Ok(())
     }
 
-
-
+    /// What one colour bucket does on `axis`, or on every axis without its own table when
+    /// `axis` is null.
     #[napi]
     pub fn set_hero_colour(
         &self,
@@ -1753,13 +1835,13 @@ impl Engine {
         Ok(())
     }
 
-
+    /// The playback multiplier a colour hit or a zone asks for right now, 1 for none.
     #[napi]
     pub fn effect_speed(&self) -> f64 {
         self.inner.effect_speed()
     }
 
-
+    /// Replaces the zone effects as a whole; a rule out of range refuses the lot.
     #[napi]
     pub fn set_zones(&self, enabled: bool, zones: Vec<ZoneRule>) -> Result<()> {
         let valid = |v: f64, lo: f64, hi: f64| v.is_finite() && v >= lo && v <= hi;
@@ -1823,7 +1905,7 @@ impl Engine {
         Ok(())
     }
 
-
+    /// Every zone's share and whether it is on. Cheap; poll it with `trackState`.
     #[napi]
     pub fn zone_state(&self) -> Vec<ZoneMatch> {
         self.inner
@@ -1833,7 +1915,7 @@ impl Engine {
             .collect()
     }
 
-
+    /// The axis follows the shared colour table again.
     #[napi]
     pub fn clear_hero_axis_colours(&self, axis: String) -> Result<()> {
         self.inner.clear_hero_axis_colours(self::axis(&axis)?);
@@ -1877,7 +1959,7 @@ impl Engine {
         }
     }
 
-
+    /// How often the detector looks between cuts, and the room left around its box.
     #[napi]
     pub fn set_detect_options(&self, interval_ms: f64, padding: f64) {
         self.inner.set_detect_options(bp_core::DetectOptions {
@@ -1894,10 +1976,10 @@ impl Engine {
         self.inner.set_track_options(options.to_core())
     }
 
-
-
-
-
+    /// Loads a downloaded AI model by id (`kind` `motion` or `music`; `detector` goes through
+    /// `setDetector`) from its weights and the metadata beside them, or unloads with nulls.
+    /// `cacheDir` keeps the compiled CoreML graph and the music model's video passes between
+    /// runs. Loading runs on its own thread; watch `modelState`.
     #[napi]
     pub fn set_model(
         &self,
@@ -1931,7 +2013,7 @@ impl Engine {
         Ok(())
     }
 
-
+    /// What an AI model is doing. For `detector`, see `trackState().detector`.
     #[napi]
     pub fn model_state(&self, kind: String) -> Result<ModelState> {
         let kind = bp_core::ModelKind::from_id(&kind)
@@ -1960,8 +2042,8 @@ impl Engine {
         }
     }
 
-
-
+    /// The last two seconds of tracked positions, for a trace view. Copies them, so ask
+    /// while the view is open rather than every frame.
     #[napi]
     pub fn track_trace(&self) -> Vec<TrackSample> {
         self.inner
@@ -1971,7 +2053,7 @@ impl Engine {
             .collect()
     }
 
-
+    /// Every tracked sample from `sinceMs` onward, for saving a funscript.
     #[napi]
     pub fn track_samples(&self, since_ms: f64) -> Vec<TrackSample> {
         self.inner
@@ -1981,10 +2063,10 @@ impl Engine {
             .collect()
     }
 
-
-
-
-
+    /// Runs the whole loaded file through with the tracking table as it stands and resolves
+    /// with one script per axis, ready to write: the flow tracker, the detector on Auto and
+    /// the Hero watcher see every frame; Beat axes take the analysed audio (load it first,
+    /// or they are left out). Local files only, one run at a time; watch `generateState`.
     #[napi(ts_return_type = "Promise<GeneratedScript[]>")]
     pub fn generate(&self) -> Result<AsyncTask<Generate>> {
         let generation = self.inner.generate().map_err(err)?;
@@ -2013,16 +2095,16 @@ impl Engine {
         }
     }
 
-
+    /// Stops a running generation; its promise rejects.
     #[napi]
     pub fn generate_cancel(&self) {
         self.inner.generate_cancel()
     }
 
-
-
-
-
+    /// Installs scripts generated for the loaded file (from `generate`, or saved from an
+    /// earlier run) for outputs that host the script themselves: Howl and the Handy play
+    /// them in place of the file's scripts on those axes. Every other output keeps the live
+    /// tracker. An empty list puts the file's scripts back; a load clears them.
     #[napi]
     pub fn set_generated(&self, scripts: Vec<GeneratedInput>) -> Result<()> {
         let parsed = scripts
@@ -2038,25 +2120,37 @@ impl Engine {
         Ok(())
     }
 
-
+    /// Starts connecting and returns the output id; watch `state().outputs` for progress.
     #[napi]
     pub fn connect(&mut self, transport: Transport) -> Result<u32> {
+        if transport.kind == "pishock" && !self.pishock_enabled { return Err(err("Supporter only".into())); }
         let p = transport
             .profile
             .as_deref()
             .map(profile)
             .transpose()?
             .unwrap_or_default();
-        Ok(self.inner.connect(transport.to_core()?, p))
+        let id = self.inner.connect(transport.to_core()?, p);
+        if transport.kind == "pishock" { self.pishock_outputs.push(id); }
+        Ok(id)
     }
 
+    /// Applies the host account entitlement and immediately drops PiShock outputs when revoked.
+    #[napi]
+    pub fn set_pishock_enabled(&mut self, enabled: bool) {
+        self.pishock_enabled = enabled;
+        if !enabled {
+            for id in self.pishock_outputs.drain(..) { self.inner.disconnect(id); }
+        }
+    }
 
+    /// Switches an output between the stroker and restim axis families.
     #[napi]
     pub fn set_output_profile(&self, id: u32, profile_name: String) -> Result<bool> {
         Ok(self.inner.set_output_profile(id, profile(&profile_name)?))
     }
 
-
+    /// Device button presses since the last call.
     #[napi]
     pub fn take_inputs(&self) -> Vec<DeviceInput> {
         self.inner
@@ -2070,12 +2164,13 @@ impl Engine {
     }
 
     #[napi]
-    pub fn disconnect(&self, id: u32) -> bool {
+    pub fn disconnect(&mut self, id: u32) -> bool {
+        self.pishock_outputs.retain(|kept| *kept != id);
         self.inner.disconnect(id)
     }
 
-
-
+    /// Points a toy's feature at an axis, or off with null. Kept across reconnects. False for
+    /// any other output.
     #[napi]
     pub fn set_output_feature_axis(
         &self,
@@ -2087,9 +2182,9 @@ impl Engine {
         Ok(self.inner.set_output_feature_axis(id, feature, axis))
     }
 
-
-
-
+    /// Gives a toy's level feature (vibrate, oscillate, constrict, spray, a one-way rotate,
+    /// heat, light) its own map, or the default (the identity) with null. Kept across
+    /// reconnects. False for any other output.
     #[napi]
     pub fn set_output_feature_level(&self, id: u32, feature: u32, level: Option<FeatureLevel>) -> Result<bool> {
         let level = level
@@ -2103,9 +2198,9 @@ impl Engine {
         Ok(self.inner.set_output_feature_level(id, feature, level))
     }
 
-
-
-
+    /// Whether levels (vibration, suction, a pump) rest while playback is paused, on every
+    /// output. Off, they hold their last value the way a stroker holds its position. Estim
+    /// mutes on pause either way. On until set.
     #[napi]
     pub fn set_stop_on_pause(&self, on: bool) {
         self.inner.set_stop_on_pause(on);
@@ -2116,8 +2211,8 @@ impl Engine {
         self.inner.stop_on_pause()
     }
 
-
-
+    /// Shakes another axis into an output's stroke, or stops with null. False for an unknown
+    /// output or one that takes no per-tick position (a toy, the Handy, Howl, a Coyote).
     #[napi]
     pub fn set_output_vibration(&self, id: u32, vibration: Option<VibrationConfig>) -> Result<bool> {
         let vibration = vibration
@@ -2135,9 +2230,9 @@ impl Engine {
         Ok(self.inner.set_output_vibration(id, vibration))
     }
 
-
-
-
+    /// When an output gets each position against the video, in ms: negative early (for a
+    /// slow device), positive late. False for an unknown output or one that plays the script
+    /// itself (the Handy, Howl).
     #[napi]
     pub fn set_output_delay(&self, id: u32, ms: f64) -> Result<bool> {
         if !ms.is_finite() {
@@ -2146,19 +2241,19 @@ impl Engine {
         Ok(self.inner.set_output_delay(id, ms.clamp(-5000.0, 5000.0)))
     }
 
-
+    /// Live per-channel strength on a Coyote output, 0..200. False for any other output.
     #[napi]
     pub fn set_coyote_strength(&self, id: u32, a: u8, b: u8) -> bool {
         self.inner.set_coyote_strength(id, a, b)
     }
 
-
+    /// Live trigger on an OpenShock output, kept across reconnects. False for any other output.
     #[napi]
     pub fn set_openshock_trigger(&self, id: u32, trigger: OpenShockTrigger) -> Result<bool> {
         Ok(self.inner.set_openshock_trigger(id, trigger.to_core()?))
     }
 
-
+    /// Temporary session output scale, 0..1. Zero stops output; one restores its configured range.
     #[napi]
     pub fn set_output_session_scale(&self, id: u32, scale: f64) -> bool {
         self.inner.set_output_session_scale(id, scale)
@@ -2177,7 +2272,7 @@ impl Engine {
         ))
     }
 
-
+    /// Clamps in axis table order, or null for an unknown output.
     #[napi]
     pub fn output_clamps(&self, id: u32) -> Option<Vec<AxisClamp>> {
         self.inner.output_clamps(id).map(|c| {
@@ -2191,8 +2286,8 @@ impl Engine {
         })
     }
 
-
-
+    /// Session volume ramp on a restim output; turning it on starts it over. False for an
+    /// unknown output.
     #[napi]
     pub fn set_output_ramp(&self, id: u32, config: RampConfig) -> bool {
         self.inner.set_output_ramp(
@@ -2211,8 +2306,8 @@ impl Engine {
         self.inner.restart_output_ramp(id)
     }
 
-
-
+    /// The wizard's test on an output that has its own: Howl plays a five second sine, an
+    /// OpenShock shocker gets one pulse. False for every other output: sweep the live axis for those.
     #[napi]
     pub fn test_output(&self, id: u32) -> bool {
         self.inner.test_output(id)
@@ -2228,9 +2323,9 @@ impl Engine {
         })
     }
 
-
-
-
+    /// Starts the Buttplug server that stands in for Intiface Central on `port` (12345 is
+    /// what faptap.net and other clients expect), so a page's `LinearCmd` drives the stroke.
+    /// Throws when the port is taken.
     #[napi]
     pub fn start_intiface(&self, port: u16) -> Result<()> {
         self.inner.start_intiface(port).map_err(err)
@@ -2241,7 +2336,7 @@ impl Engine {
         self.inner.stop_intiface()
     }
 
-
+    /// Null while the server is off.
     #[napi]
     pub fn intiface_state(&self) -> Option<IntifaceState> {
         self.inner.intiface_status().map(|s| IntifaceState {
@@ -2251,8 +2346,8 @@ impl Engine {
         })
     }
 
-
-
+    /// Where a restim parameter axis takes its value without a script. Applies while any
+    /// restim output exists. Errors for an axis that is not a parameter.
     #[napi]
     pub fn set_param_source(&self, axis_id: String, source: ParamSource) -> Result<()> {
         let a = axis(&axis_id)?;
@@ -2303,8 +2398,8 @@ impl Engine {
         }
     }
 
-
-
+    /// What a held Detection source is sending for the axis, null while it is not held or
+    /// nothing has arrived yet.
     #[napi]
     pub fn param_hold(&self, axis_id: String) -> Result<Option<ParamHold>> {
         Ok(self
@@ -2313,14 +2408,14 @@ impl Engine {
             .map(|(value, since_ms)| ParamHold { value, since_ms }))
     }
 
-
-
+    /// Whether a held Detection source waits on scene cuts: a host that sends frames now and
+    /// then while tracking is off should then send about ten a second.
     #[napi]
     pub fn wants_cuts(&self) -> bool {
         self.inner.wants_cuts()
     }
 
-
+    /// Everything the UI shows at 60 Hz.
     #[napi]
     pub fn state(&self) -> EngineState {
         let s = self.inner.state();
@@ -2396,7 +2491,7 @@ impl Engine {
         }
     }
 
-
+    /// Counters and timings for one output; null for an unknown id.
     #[napi]
     pub fn output_stats(&self, id: u32) -> Option<OutputStats> {
         self.inner.output_stats(id).map(|s| OutputStats {
@@ -2417,8 +2512,8 @@ impl Engine {
         }
     }
 
-
-
+    /// Whether anyone is looking at the frames. While false, mpv skips drawing and nothing
+    /// is read back; audio and the clock carry on. Call with the window's visibility.
     #[napi]
     pub fn set_presenting(&self, on: bool) -> Result<()> {
         self.inner.set_presenting(on).map_err(err)
@@ -2434,7 +2529,7 @@ impl Engine {
         self.inner.player.hwdec_current()
     }
 
-
+    /// `auto` picks the platform decoder, `no` forces software; applies to the next video.
     #[napi]
     pub fn set_hwdec(&self, value: String) -> Result<()> {
         let v = match value.as_str() {
@@ -2460,8 +2555,8 @@ impl Engine {
         }
     }
 
-
-
+    /// Applies upscaling and frame generation to the current video, no reload. Options the
+    /// machine cannot honour stay inert; `enhanceState().reason` says why.
     #[napi]
     pub fn set_enhance(&self, options: EnhanceOptions) -> Result<()> {
         let upscaler = bp_player::Upscaler::parse(&options.upscaler)
@@ -2481,7 +2576,7 @@ impl Engine {
             .map_err(err)
     }
 
-
+    /// What is in effect right now, for the player chip. Cheap; once a second is plenty.
     #[napi]
     pub fn enhance_state(&self) -> EnhanceState {
         let s = self.inner.player.enhance_state();
@@ -2499,7 +2594,7 @@ impl Engine {
         }
     }
 
-
+    /// The decoded picture width as mpv last reported it; also in `state()`.
     #[napi]
     pub fn video_width(&self) -> u32 {
         self.inner.video_size().0
@@ -2510,7 +2605,7 @@ impl Engine {
         self.inner.video_size().1
     }
 
-
+    /// Whether frame bytes are BGRA (else RGBA).
     #[napi]
     pub fn bgra(&self) -> bool {
         self.inner.player.bgra()
@@ -2526,8 +2621,8 @@ impl Engine {
         self.inner.player.size().1
     }
 
-
-
+    /// Changes output size with three new buffers of the new size. The old buffers are
+    /// released once the engine has switched over.
     #[napi]
     pub fn resize(&mut self, width: u32, height: u32, buffers: Vec<Uint8Array>) -> Result<()> {
         let ext = external(width, height, &buffers)?;
@@ -2539,7 +2634,7 @@ impl Engine {
         Ok(())
     }
 
-
+    /// Index into the buffers of the newest unread frame, or -1.
     #[napi]
     pub fn acquire(&self) -> i32 {
         self.inner.player.acquire().map(|i| i as i32).unwrap_or(-1)
@@ -2562,7 +2657,7 @@ impl Engine {
         }
     }
 
-
+    /// Drains buffered mpv log lines.
     #[napi]
     pub fn take_log(&self) -> Vec<String> {
         self.inner.player.take_log()
@@ -2584,17 +2679,19 @@ fn default_hwdec() -> &'static str {
     }
 }
 
-
-
-
-
+/// Reads and measures the scripts for a media file on a worker thread, then installs them
+/// on the JS thread, for `load` and `loadScripts`.
+/// Scripts for a file: the pool is scanned on a worker, then installed on the JS thread,
+/// with the file itself when `start_seconds` is `Some` (a `load`) and alone for `loadScripts`.
 pub struct LoadScripts {
     loader: bp_core::ScriptLoader,
     path: String,
     start_seconds: Option<Option<f64>>,
     variants: Vec<(bp_script::Axis, String)>,
     scripts_path: Option<String>,
+    script_folders: Vec<String>,
     headers: Option<String>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl Task for LoadScripts {
@@ -2604,10 +2701,14 @@ impl Task for LoadScripts {
     fn compute(&mut self) -> Result<Self::Output> {
         Ok(self
             .loader
-            .pool_for(&self.path, self.scripts_path.as_deref()))
+            .pool_for(&self.path, self.scripts_path.as_deref(), &self.script_folders))
     }
 
     fn resolve(&mut self, _env: Env, pool: Self::Output) -> Result<Self::JsValue> {
+        // An already-running scan cannot be canceled by libuv; it must not install its result.
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Err(Error::new(Status::Cancelled, "Media load cancelled"));
+        }
         let m = match self.start_seconds {
             Some(start) => self
                 .loader
@@ -2634,6 +2735,7 @@ pub struct Prepare {
     loader: bp_core::ScriptLoader,
     path: String,
     scripts_path: Option<String>,
+    script_folders: Vec<String>,
 }
 
 impl Task for Prepare {
@@ -2642,7 +2744,7 @@ impl Task for Prepare {
 
     fn compute(&mut self) -> Result<Self::Output> {
         self.loader
-            .prepare(&self.path, self.scripts_path.as_deref());
+            .prepare(&self.path, self.scripts_path.as_deref(), &self.script_folders);
         Ok(())
     }
 
@@ -2653,6 +2755,7 @@ impl Task for Prepare {
 
 pub struct ScanScripts {
     path: String,
+    script_folders: Vec<String>,
 }
 
 pub struct Generate {
@@ -2695,7 +2798,7 @@ impl Task for ScanScripts {
     type JsValue = Vec<ScriptInfo>;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        Ok(bp_core::scan_scripts(std::path::Path::new(&self.path)))
+        Ok(bp_core::scan_scripts_with_folders(std::path::Path::new(&self.path), &self.script_folders))
     }
 
     fn resolve(&mut self, _env: Env, infos: Self::Output) -> Result<Self::JsValue> {
@@ -2703,14 +2806,14 @@ impl Task for ScanScripts {
     }
 }
 
-
-
+/// Scripts beside a media file without loading anything, for the library scanner. Reads
+/// and parses on a worker thread.
 #[napi(ts_return_type = "Promise<Array<ScriptInfo>>")]
-pub fn scan_scripts(path: String) -> AsyncTask<ScanScripts> {
-    AsyncTask::new(ScanScripts { path })
+pub fn scan_scripts(path: String, script_folders: Option<Vec<String>>) -> AsyncTask<ScanScripts> {
+    AsyncTask::new(ScanScripts { path, script_folders: script_folders.unwrap_or_default() })
 }
 
-
+/// `{ L0: 'mouth' }` to axis pairs.
 fn variant_pairs(
     variants: Option<HashMap<String, String>>,
 ) -> Result<Vec<(bp_script::Axis, String)>> {
@@ -2789,8 +2892,8 @@ fn model_state_js(m: bp_core::ModelSnapshot) -> ModelState {
     }
 }
 
-
-
+/// Every model the app uses: the downloadable region detectors, then our bundled two.
+/// `detectorModels` lists the detectors alone, as before.
 #[napi]
 pub fn models() -> Vec<ModelInfo> {
     let detectors = bp_core::MODELS.iter().map(|m| ModelInfo {
@@ -2834,7 +2937,7 @@ pub fn models() -> Vec<ModelInfo> {
     detectors.chain(ours).collect()
 }
 
-
+/// The region models alone, in preference order. Kept one release beside `models`.
 #[napi]
 pub fn detector_models() -> Vec<DetectorModel> {
     bp_core::MODELS
@@ -2854,19 +2957,25 @@ pub fn detector_models() -> Vec<DetectorModel> {
         .collect()
 }
 
-
+/// Style and depth of the Beat source's strokes, plus the per-video tempo factor.
 #[napi(object)]
 pub struct BeatOptions {
-
+    /// Playback always uses strokes. Older style names migrate to strokes.
     pub style: String,
     pub volume_depth: bool,
-
+    /// Add a fast bottom bounce on loud beats. Defaults to true.
+    pub bounce: Option<bool>,
+    /// Fraction of the preceding stroke, 0.01..1. Defaults to one sixth.
+    pub bounce_depth: Option<f64>,
+    /// Multiple of the main stroke speed, 0.5..6. Defaults to 3.
+    pub bounce_speed: Option<f64>,
+    /// 0.5 halves the tempo, 2 doubles it.
     pub tempo_factor: f64,
 }
 
-
-
-
+/// The music model's pass over the file, for axes on AI CH/PMV: `none`, `watching` (the
+/// video pass, with `percent`), `modelling`, `ready` or `error`. Those axes play Beat's
+/// script until it is ready.
 #[napi(object)]
 pub struct MusicState {
     pub status: String,
@@ -2876,10 +2985,13 @@ pub struct MusicState {
 
 #[napi(object)]
 pub struct BeatState {
-
+    /// `none`, `analysing`, `ready` or `error`.
     pub status: String,
     pub error: Option<String>,
-
+    /// Readiness of the complete file for export and the music model.
+    pub full_status: String,
+    pub full_error: Option<String>,
+    /// Tempo after the factor.
     pub bpm: f64,
     pub beats: f64,
     pub style: String,
@@ -2888,8 +3000,8 @@ pub struct BeatState {
     pub model: MusicState,
 }
 
-
-
+/// What a colour does: how deep its hits go, the pattern on top, how eased the legs are,
+/// or nothing at all.
 #[napi(object)]
 pub struct HeroMusicRule {
     pub colour: Option<u32>,
@@ -2902,23 +3014,23 @@ pub struct HeroMusicRule {
     pub stroke_speed: Option<f64>,
     pub estim_max: Option<f64>,
     pub estim_max_relative: Option<f64>,
-
+    /// The vibration axis's output maximum while on.
     pub vibe_max: Option<f64>,
 }
 
-
-
-
+/// One zone effect from `setZones`: a box in 0..1 of the frame, its trigger (`colour` with
+/// `buckets` in Hero bucket order, or `part` with a `detectionKinds()` id) and what it
+/// overrides while it matches, held `holdMs` after. 1 and null leave a setting as it is.
 #[napi(object)]
 pub struct ZoneRule {
     pub colour_matches: Option<Vec<ZoneColourMatch>>,
     pub id: String,
     pub region: TrackRegion,
-
+    /// `colour` or `part`.
     pub trigger: String,
     pub buckets: Vec<u32>,
     pub part: Option<String>,
-
+    /// The share of the zone the colour must fill, or of the box and zone that must overlap.
     pub cover: f64,
     pub hold_ms: f64,
     pub tempo: f64,
@@ -2937,30 +3049,30 @@ pub struct ZoneColourMatch {
     pub tolerance: f64,
 }
 
-
+/// One zone's standing from `zoneState`.
 #[napi(object)]
 pub struct ZoneMatch {
     pub id: String,
-
+    /// The last measured share, 0..1.
     pub share: f64,
-
+    /// Matching now, or within its hold.
     pub active: bool,
-
+    /// The zone whose override is in force.
     pub leading: bool,
 }
 
 #[napi(object)]
 pub struct HeroColourRule {
     pub intensity: f64,
-
-
+    /// One of the engine's flourish names: `none`, `hold`, `vibrate`, `double`, `triple`,
+    /// `slam`, `bounce`, `rise`, `whip`, `shake`, `grind`.
     pub flourish: String,
-
+    /// 0 straight legs, 1 fully eased.
     pub smooth: f64,
     pub ignore: bool,
 }
 
-
+/// One colour in the Hero source's shared table, with the hits seen in it.
 #[napi(object)]
 pub struct HeroColour {
     pub bucket: u32,
@@ -2969,13 +3081,13 @@ pub struct HeroColour {
     pub flourish: String,
     pub smooth: f64,
     pub ignore: bool,
-
+    /// Hits seen in this colour so far.
     pub seen: u32,
 }
 
 #[napi(object)]
 pub struct HeroNote {
-
+    /// Position along the lane, 0..1 of the frame.
     pub pos: f64,
     pub size: f64,
     pub rgb: Vec<u32>,
@@ -2984,9 +3096,9 @@ pub struct HeroNote {
 #[napi(object)]
 pub struct HeroState {
     pub zone: Option<TrackRegion>,
-
+    /// The option: `auto` or a direction.
     pub direction: String,
-
+    /// What is in use once Auto has decided; null while it is looking.
     pub found: Option<String>,
     pub notes: Vec<HeroNote>,
     pub colours: Vec<HeroColour>,
@@ -2994,7 +3106,7 @@ pub struct HeroState {
     pub hits: f64,
 }
 
-
+/// One predicted landing from the Hero watcher.
 #[napi(object)]
 pub struct HeroHit {
     pub id: f64,
@@ -3011,7 +3123,7 @@ pub struct HeroPush {
     pub notes: u32,
 }
 
-
+/// The Hero note watcher on its own, for harnesses.
 #[napi]
 pub struct HeroWatcher {
     inner: bp_core::RawHero,
@@ -3036,7 +3148,7 @@ impl HeroWatcher {
         })
     }
 
-
+    /// One packed RGB frame with its media time.
     #[napi]
     pub fn push(&mut self, rgb: Uint8Array, width: u32, height: u32, time_ms: f64) -> HeroPush {
         self.inner
@@ -3060,24 +3172,95 @@ impl HeroWatcher {
     }
 }
 
-
+/// A beat analysis on its own, for harnesses: synchronous, on the calling thread.
 #[napi(object)]
 pub struct BeatTrackInfo {
     pub bpm: f64,
     pub beats: Vec<f64>,
-
+    /// Loudness 0..1 per beat.
     pub loudness: Vec<f64>,
-
+    /// Onset strength every `onsetHopMs` from the start: the curve the beats were tracked on.
     pub onset: Vec<f64>,
     pub onset_hop_ms: f64,
-
+    /// Loudness 0..1 every `envelopeHopMs` from the start.
     pub envelope: Vec<f64>,
     pub envelope_hop_ms: f64,
     pub duration_ms: f64,
 }
 
+#[napi(object)]
+pub struct BeatStrokeOptions {
+    pub style: Option<String>,
+    pub volume_depth: Option<bool>,
+    pub tempo_factor: Option<f64>,
+    pub flourishes: Option<bool>,
+    /// Fraction of the preceding stroke, 0.01..1. Defaults to one sixth.
+    pub bounce_depth: Option<f64>,
+    /// Multiple of the main stroke speed, 0.5..6. Defaults to 3.
+    pub bounce_speed: Option<f64>,
+    pub fps: Option<f64>,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub invert: Option<bool>,
+    pub alternate: Option<bool>,
+    pub min_speed: Option<f64>,
+    pub max_speed: Option<f64>,
+}
 
+#[napi(object)]
+pub struct BeatPoint {
+    pub at: f64,
+    /// Position units, 0..100, as in the editor and funscript files.
+    pub pos: f64,
+}
 
+/// The same stroke generator used by playback and whole-file export.
+#[napi]
+pub fn beat_generate(track: BeatTrackInfo, options: BeatStrokeOptions) -> Vec<BeatPoint> {
+    let defaults = bp_core::BeatGenerateOptions::default();
+    let script = bp_core::beat_generate(&bp_core::BeatTrack {
+        beats: track.beats,
+        loudness: track.loudness,
+        duration_ms: track.duration_ms,
+        ..Default::default()
+    }, bp_core::BeatGenerateOptions {
+        style: options.style.as_deref().and_then(bp_core::BeatStyle::from_str).unwrap_or(defaults.style),
+        volume_depth: options.volume_depth.unwrap_or(defaults.volume_depth),
+        tempo_factor: options.tempo_factor.unwrap_or(defaults.tempo_factor),
+        flourishes: options.flourishes.unwrap_or(defaults.flourishes),
+        bounce_depth: options.bounce_depth.unwrap_or(defaults.bounce_depth),
+        bounce_speed: options.bounce_speed.unwrap_or(defaults.bounce_speed),
+        fps: options.fps.unwrap_or(defaults.fps),
+        min: options.min.unwrap_or(0.0) / 100.0,
+        max: options.max.unwrap_or(100.0) / 100.0,
+        invert: options.invert.unwrap_or(false),
+        alternate: options.alternate.unwrap_or(false),
+        min_speed: options.min_speed.unwrap_or(defaults.min_speed),
+        max_speed: options.max_speed.unwrap_or(defaults.max_speed),
+        ..defaults
+    });
+    script.actions.into_iter().map(|a| BeatPoint { at: a.at, pos: (a.pos * 100.0).round() }).collect()
+}
+
+pub struct AnalyseBeats { path: String }
+
+impl Task for AnalyseBeats {
+    type Output = BeatTrackInfo;
+    type JsValue = BeatTrackInfo;
+
+    fn compute(&mut self) -> Result<Self::Output> { beat_analyse(self.path.clone()) }
+
+    fn resolve(&mut self, _env: Env, result: Self::Output) -> Result<Self::JsValue> { Ok(result) }
+}
+
+/// Audio analysis off the renderer thread, for editor beat grids and fills.
+#[napi(ts_return_type = "Promise<BeatTrackInfo>")]
+pub fn beat_analyse_async(path: String) -> AsyncTask<AnalyseBeats> {
+    AsyncTask::new(AnalyseBeats { path })
+}
+
+/// The analysis on the music model's 50 Hz grid (`bp_beat::grid50`), from `beatGrid50`: what
+/// the training dumper writes as `a2.npz`, so the app and the cache share one implementation.
 #[napi(object)]
 pub struct BeatGridInfo {
     pub hop_ms: f64,
@@ -3090,7 +3273,7 @@ pub struct BeatGridInfo {
     pub duration_ms: f64,
 }
 
-
+/// Analyses a raw mono f32le file at 22050 Hz and returns the track on the 50 Hz grid.
 #[napi]
 pub fn beat_grid50(path: String) -> Result<BeatGridInfo> {
     let bytes = std::fs::read(&path).map_err(|e| err(format!("{path}: {e}")))?;
@@ -3113,7 +3296,7 @@ pub fn beat_grid50(path: String) -> Result<BeatGridInfo> {
     })
 }
 
-
+/// Analyses a raw mono f32le file at 22050 Hz and returns every beat.
 #[napi]
 pub fn beat_analyse(path: String) -> Result<BeatTrackInfo> {
     let bytes = std::fs::read(&path).map_err(|e| err(format!("{path}: {e}")))?;
@@ -3134,7 +3317,7 @@ pub fn beat_analyse(path: String) -> Result<BeatTrackInfo> {
     })
 }
 
-
+/// A detector on its own, for harnesses: loads on the calling thread and runs synchronously.
 #[napi]
 pub struct Detector {
     inner: bp_detect::Detector,
@@ -3143,10 +3326,10 @@ pub struct Detector {
 #[napi(object)]
 pub struct DetectRun {
     pub found: Option<FoundBox>,
-
+    /// The kind of the chosen box, in `detectionKinds()` terms, or null when nothing was found.
     pub kind: Option<String>,
     pub all: Vec<FoundBox>,
-
+    /// Share of the frame each kind covers, in `detectionKinds()` order, this run only.
     pub coverage: Vec<f64>,
     pub run_ms: f64,
 }
@@ -3173,7 +3356,7 @@ impl Detector {
         self.inner.provider().to_string()
     }
 
-
+    /// Runs the model on a packed RGB frame.
     #[napi]
     pub fn detect(&mut self, rgb: Uint8Array, width: u32, height: u32) -> Result<DetectRun> {
         let t0 = std::time::Instant::now();
@@ -3205,8 +3388,8 @@ impl Detector {
     }
 }
 
-
-
+/// The WD image tagger for the library: loads on the calling thread and runs synchronously on
+/// the CPU, so the host keeps it on a worker. Stills are packed BGR at `WdTagger.inputSize()` square.
 #[napi]
 pub struct WdTagger {
     inner: bp_detect::Tagger,
@@ -3220,13 +3403,13 @@ impl WdTagger {
         Ok(WdTagger { inner })
     }
 
-
+    /// Side of the square input, in pixels.
     #[napi]
     pub fn input_size() -> u32 {
         bp_detect::tagger::INPUT as u32
     }
 
-
+    /// One batch: per still, the probability of every tag in the model's tag order.
     #[napi]
     pub fn tag(&mut self, stills: Vec<Uint8Array>) -> Result<Vec<Float32Array>> {
         let views: Vec<&[u8]> = stills.iter().map(|s| s.as_ref()).collect();
@@ -3243,8 +3426,8 @@ fn track_sample_js(s: bp_core::Sample) -> TrackSample {
     }
 }
 
-
-
+/// The tracker on its own, for harnesses that feed decoded files: no engine, no devices, no
+/// lag. `push` returns the frame's sample, or null while there is nothing to compare against.
 #[napi]
 pub struct Tracker {
     inner: bp_core::RawTracker,
@@ -3290,11 +3473,11 @@ impl Tracker {
         }))
     }
 
-
-
-
-
-
+    /// The last pushed frame's flow field: 192 grid points (16 by 12 across the region,
+    /// row-major) of `u, v, dx, dy, err, textured` flattened, so 1152 values. `u, v` are the
+    /// point's position in frame pixels, `dx, dy` its displacement since the previous frame,
+    /// `err` the Lucas-Kanade residual and `textured` 1 where the point has structure.
+    /// Displacements are zero on the first frame and on the first frame after a cut.
     #[napi]
     pub fn field(&self) -> Float32Array {
         let mut out = Vec::with_capacity(self.inner.field().len() * 6);
@@ -3304,8 +3487,8 @@ impl Tracker {
         Float32Array::new(out)
     }
 
-
-
+    /// The last pushed frame's six raw component signals in `stroke, sway, surge, roll, pitch,
+    /// twist` order, before sensitivity, the jump clamp and the integrator chains.
     #[napi]
     pub fn signals(&self) -> Float32Array {
         Float32Array::new(self.inner.signals().iter().map(|&v| v as f32).collect())
@@ -3316,7 +3499,7 @@ impl Tracker {
         self.inner.set_options(options.to_core())
     }
 
-
+    /// `idle`, `locating` or `tracking`.
     #[napi]
     pub fn phase(&self) -> String {
         self.inner.phase().as_str().to_string()
@@ -3375,18 +3558,18 @@ fn script_info_js(s: bp_core::ScriptInfo) -> ScriptInfo {
     }
 }
 
-
+/// The axis table: id, name and rest value, in pipeline order.
 #[napi(object)]
 pub struct AxisInfo {
     pub id: String,
     pub name: String,
     pub kind: String,
-
+    /// `tcode` or `estim`.
     pub namespace: String,
     pub default_value: f64,
 }
 
-
+/// The engine's package version, for keying results that depend on how it generates.
 #[napi]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
@@ -3464,7 +3647,7 @@ fn tick_opts(o: Option<TickOptions>) -> bp_devices::TickOptions {
 
 #[napi]
 impl TickLoop {
-
+    /// Streams TCode to a serial port at a fixed rate.
     #[napi(factory)]
     pub fn open(path: String, baud: u32, options: Option<TickOptions>) -> Result<TickLoop> {
         Ok(TickLoop {
@@ -3472,7 +3655,7 @@ impl TickLoop {
         })
     }
 
-
+    /// Same loop against a pty pair, for machines without a device attached.
     #[napi(factory)]
     pub fn loopback(options: Option<TickOptions>) -> Result<TickLoop> {
         Ok(TickLoop {
@@ -3507,7 +3690,7 @@ pub fn list_ports() -> Vec<String> {
     bp_devices::list_ports()
 }
 
-
+/// What a serial port answered to `D0` and `D1`.
 #[napi(object)]
 pub struct ProbedPort {
     pub path: String,
@@ -3546,8 +3729,8 @@ impl Task for ProbeTask {
     }
 }
 
-
-
+/// Opens each port, asks `D0` and `D1`, and resolves with the answers after `waitMs`.
+/// Ports an output already holds will report an error; skip those.
 #[napi(ts_return_type = "Promise<Array<ProbedPort>>")]
 pub fn probe_serial(paths: Vec<String>, wait_ms: Option<u32>) -> AsyncTask<ProbeTask> {
     AsyncTask::new(ProbeTask {
@@ -3556,7 +3739,7 @@ pub fn probe_serial(paths: Vec<String>, wait_ms: Option<u32>) -> AsyncTask<Probe
     })
 }
 
-
+/// A device seen by `bleScan`. `kind` is `tcode`, `coyote` or `other`.
 #[napi(object)]
 pub struct BleDevice {
     pub name: String,
@@ -3588,14 +3771,14 @@ impl Task for BleScan {
     }
 }
 
-
-
+/// Scanning through the embedded Buttplug server: on while the wizard's Bluetooth panel is
+/// open. Starts the server on first use; devices it connects appear in `toyDevices`.
 #[napi]
 pub fn toy_scan(on: bool) {
     bp_devices::toy_hub().set_wizard_scanning(on)
 }
 
-
+/// Devices the embedded Buttplug server has connected, and its error when it could not start.
 #[napi]
 pub fn toy_devices() -> ToyScanState {
     let hub = bp_devices::toy_hub();
@@ -3624,7 +3807,7 @@ pub fn toy_devices() -> ToyScanState {
     }
 }
 
-
+/// Scans for BLE devices for `seconds` (1 to 60), for the device wizard.
 #[napi(ts_return_type = "Promise<BleDevice[]>")]
 pub fn ble_scan(seconds: u32) -> AsyncTask<BleScan> {
     AsyncTask::new(BleScan {
@@ -3635,13 +3818,13 @@ pub fn ble_scan(seconds: u32) -> AsyncTask<BleScan> {
 #[napi(object)]
 pub struct VideoPlayerOptions {
     pub hwdec: Option<String>,
-
+    /// Extra mpv options applied before init, as for `Engine`.
     pub mpv_options: Option<HashMap<String, String>>,
 }
 
-
-
-
+/// A bare video player: mpv and a render thread, no scripts, devices or audio. For a second
+/// decode of the open file beside the engine's own, so two upscalers can be seen at once.
+/// Frames come out exactly as the engine's do, into three host buffers of the output size.
 #[napi]
 pub struct VideoPlayer {
     inner: bp_player::Player,
@@ -3662,7 +3845,7 @@ impl VideoPlayer {
             hwdec: None,
             mpv_options: None,
         });
-
+        // No audio track is decoded: the engine's player carries the sound and the clock.
         let mut mpv_options = vec![("audio".to_string(), "no".to_string())];
         mpv_options.extend(o.mpv_options.into_iter().flatten());
         let inner = bp_player::Player::new(
@@ -3686,7 +3869,7 @@ impl VideoPlayer {
         Ok(VideoPlayer { inner, buffers })
     }
 
-
+    /// Loads `path`, starting at `startSeconds` when given. Asynchronous, as in `Engine`.
     #[napi]
     pub fn load(&self, path: String, start_seconds: Option<f64>) -> Result<()> {
         self.inner.load(&path, start_seconds).map_err(err)
@@ -3732,7 +3915,7 @@ impl VideoPlayer {
         self.inner.video_size().1
     }
 
-
+    /// As `Engine.setEnhance`, on this decode alone.
     #[napi]
     pub fn set_enhance(&self, options: EnhanceOptions) -> Result<()> {
         let upscaler = bp_player::Upscaler::parse(&options.upscaler)
@@ -3760,7 +3943,7 @@ impl VideoPlayer {
         self.inner.bgra()
     }
 
-
+    /// As `Engine.resize`.
     #[napi]
     pub fn resize(&mut self, width: u32, height: u32, buffers: Vec<Uint8Array>) -> Result<()> {
         let ext = external(width, height, &buffers)?;
@@ -3769,7 +3952,7 @@ impl VideoPlayer {
         Ok(())
     }
 
-
+    /// Index into the buffers of the newest unread frame, or -1.
     #[napi]
     pub fn acquire(&self) -> i32 {
         self.inner.acquire().map(|i| i as i32).unwrap_or(-1)
@@ -3786,25 +3969,25 @@ impl VideoPlayer {
     }
 }
 
+// --- Editor ----------------------------------------------------------------------------------
 
-
-
-
+/// A range to analyse for the editor. `region` is a box for this range alone, in 0..1 of the
+/// frame; absent follows the tracker's region source.
 #[napi(object)]
 pub struct AnalyseOptions {
     pub start_ms: f64,
     pub end_ms: f64,
     pub region: Option<TrackRegion>,
-
+    /// Run the movement model too, when loaded.
     pub model: Option<bool>,
-
+    /// Run the Hero note watcher too, with the zone and colour rules as set (`setHeroOptions`).
     pub hero: Option<bool>,
-
+    /// Keep a thumbnail every this many ms, `thumbWidth` (default 96) pixels wide.
     pub thumbs_every_ms: Option<f64>,
     pub thumb_width: Option<u32>,
 }
 
-
+/// A range analysis's progress: `idle`, `running`, `done`, `cancelled` or `error`.
 #[napi(object)]
 pub struct RangeState {
     pub status: String,
@@ -3823,7 +4006,7 @@ pub struct RangeBox {
     pub h: f64,
 }
 
-
+/// One axis's keyframes: times in ms and positions 0..1.
 #[napi(object)]
 pub struct AxisKeyframes {
     pub axis: String,
@@ -3831,7 +4014,7 @@ pub struct AxisKeyframes {
     pub pos: Float64Array,
 }
 
-
+/// A packed RGB thumbnail.
 #[napi(object)]
 pub struct RangeThumb {
     pub time_ms: f64,
@@ -3840,8 +4023,8 @@ pub struct RangeThumb {
     pub rgb: Uint8Array,
 }
 
-
-
+/// What a range analysis found. `motion` holds six values per entry of `times`, in the
+/// tracker's component order (stroke, sway, surge, roll, pitch, twist), each about 0..1.
 #[napi(object)]
 pub struct RangeAnalysis {
     pub start_ms: f64,
@@ -3851,9 +4034,9 @@ pub struct RangeAnalysis {
     pub motion: Float64Array,
     pub cuts: Vec<f64>,
     pub boxes: Vec<RangeBox>,
-
+    /// The movement model's keyframes per axis, when asked for and loaded.
     pub model: Vec<AxisKeyframes>,
-
+    /// The Hero watcher's keyframes per axis, when asked for and a zone is set.
     pub hero: Vec<AxisKeyframes>,
     pub thumbs: Vec<RangeThumb>,
 }
@@ -3932,8 +4115,8 @@ impl Task for AnalyseRange {
     }
 }
 
-
-
+/// One script beside a media file with its keyframes, for the editor: times in ms,
+/// positions 0..1, and the file's other `metadata` fields as a JSON object string.
 #[napi(object)]
 pub struct EditorScript {
     pub axis: String,
@@ -3949,6 +4132,7 @@ pub struct EditorScript {
 
 pub struct ReadScripts {
     path: String,
+    script_folders: Vec<String>,
 }
 
 impl Task for ReadScripts {
@@ -3956,7 +4140,7 @@ impl Task for ReadScripts {
     type JsValue = Vec<EditorScript>;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        Ok(bp_script::find_scripts(std::path::Path::new(&self.path)))
+        Ok(bp_script::find_scripts_with_folders(std::path::Path::new(&self.path), &self.script_folders))
     }
 
     fn resolve(&mut self, _env: Env, scripts: Self::Output) -> Result<Self::JsValue> {
@@ -3994,16 +4178,16 @@ impl Task for ReadScripts {
     }
 }
 
-
-
+/// Every script beside a media file with its keyframes, variants included, for the editor.
+/// Reads and parses on a worker thread.
 #[napi(ts_return_type = "Promise<Array<EditorScript>>")]
-pub fn read_scripts(path: String) -> AsyncTask<ReadScripts> {
-    AsyncTask::new(ReadScripts { path })
+pub fn read_scripts(path: String, script_folders: Option<Vec<String>>) -> AsyncTask<ReadScripts> {
+    AsyncTask::new(ReadScripts { path, script_folders: script_folders.unwrap_or_default() })
 }
 
-
-
-
+/// One script as the editor holds it, for writing: times in ms, positions 0..1, the OFS
+/// chapters and bookmarks, the other metadata fields as a JSON object string, and the media
+/// length for `metadata.duration`.
 #[napi(object)]
 pub struct ScriptInput {
     pub at: Float64Array,
@@ -4076,13 +4260,13 @@ fn script_from_input(input: &ScriptInput) -> Result<bp_script::Script> {
     Ok(script)
 }
 
-
+/// The funscript JSON for one script, through the engine's one writer.
 #[napi]
 pub fn funscript_json(script: ScriptInput) -> Result<String> {
     Ok(script_from_input(&script)?.to_json_with(script.duration_seconds))
 }
 
-
+/// An EroScripts 1.1 bundle: `root` (the stroke) with the other axes under `axes`.
 #[napi]
 pub fn funscript_bundle(root: ScriptInput, axes: Vec<AxisKeyframes>) -> Result<String> {
     let script = script_from_input(&root)?;
@@ -4095,8 +4279,8 @@ pub fn funscript_bundle(root: ScriptInput, axes: Vec<AxisKeyframes>) -> Result<S
     Ok(script.to_bundle_json(&refs, root.duration_seconds))
 }
 
-
-
+/// Ramer-Douglas-Peucker over keyframes (times in ms, positions 0..1): the indices kept,
+/// ascending. The one RDP beside the decoder's, so the editor carries no copy.
 #[napi]
 pub fn simplify_indices(at: Float64Array, pos: Float64Array, eps: f64) -> Result<Uint32Array> {
     if at.len() != pos.len() {

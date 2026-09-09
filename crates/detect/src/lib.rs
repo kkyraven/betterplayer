@@ -1,3 +1,8 @@
+//! Region detector: a YOLO body-part model run through ONNX Runtime on a small RGB frame, and
+//! the rule that turns its boxes into the tracker's region (genitals first, else a face,
+//! nearest the centre of the picture). Weights are never bundled: the host downloads a
+//! `ModelSpec` with its SHA-256 checked and hands the file's path to `Detector::load`.
+
 use std::path::Path;
 
 pub mod tagger;
@@ -9,16 +14,16 @@ use ort::session::{
 };
 use ort::value::TensorRef;
 
-
-
-
+/// A model the host may offer to download. Every one here is a YOLO fine-tune, and every one
+/// is treated as AGPL-3.0 (the base is, whatever the fine-tune declares), so the host must
+/// show the licence and ask before fetching.
 #[derive(Clone, Copy, Debug)]
 pub struct ModelSpec {
     pub id: &'static str,
     pub label: &'static str,
-
+    /// File name in the host's model folder.
     pub file: &'static str,
-
+    /// Square input size the model was exported at.
     pub input: u32,
     pub classes: &'static [&'static str],
     pub url: &'static str,
@@ -62,8 +67,8 @@ pub const HOTSCREEN: ModelSpec = ModelSpec {
     source_url: "https://huggingface.co/Perfectfox256/hotscreen-detection-models",
 };
 
-
-
+/// NudeNet's small detector. GitHub's release asset endpoint, since the human URL is
+/// login-walled; the host asks for `application/octet-stream`.
 pub const NUDENET: ModelSpec = ModelSpec {
     id: "nudenet",
     label: "NudeNet 320n",
@@ -105,10 +110,10 @@ pub fn model(id: &str) -> Option<&'static ModelSpec> {
 
 const CONF_THRESHOLD: f32 = 0.35;
 const IOU_THRESHOLD: f32 = 0.45;
-
+/// Ultralytics' letterbox padding grey.
 const PAD: f32 = 114.0 / 255.0;
 
-
+/// A rectangle in 0..1 of the frame, top-left origin.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rect {
     pub x: f64,
@@ -122,7 +127,7 @@ impl Rect {
         (self.x + self.w / 2.0, self.y + self.h / 2.0)
     }
 
-
+    /// Grown by `padding` of its own size on every side, kept inside the frame.
     pub fn padded(&self, padding: f64) -> Rect {
         let (dx, dy) = (self.w * padding, self.h * padding);
         let x = (self.x - dx).max(0.0);
@@ -138,9 +143,9 @@ pub struct Detection {
     pub rect: Rect,
 }
 
-
-
-
+/// What a detection is for the region rule, best first: genitals, then buttocks (near the
+/// same action), the two covered (still where the action is), then a face, then breasts
+/// (near the face), then covered breasts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Target {
     Genitals,
@@ -153,7 +158,7 @@ pub enum Target {
 }
 
 impl Target {
-
+    /// Class names are shared across the models (NudeNet's vocabulary, which HotScreen kept).
     pub fn of(class: &str) -> Option<Target> {
         let exposed = class.ends_with("EXPOSED");
         if (class.contains("GENITALIA") && exposed) || class == "ANUS_EXPOSED" {
@@ -174,8 +179,8 @@ impl Target {
     }
 }
 
-
-
+/// Groups of classes a user can pick to drive a parameter from how much of the picture they
+/// cover. Covered classes, armpits, belly and eyes are not offered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Genitals,
@@ -183,10 +188,10 @@ pub enum Kind {
     Buttocks,
     Faces,
     Feet,
-
+    /// Every exposed class.
     Skin,
-
-
+    // The covered counterparts, after the six a host indexes `coverage` by. Faces have none;
+    // male genitals and breasts are only ever exposed in both models.
     GenitalsCovered,
     BreastsCovered,
     ButtocksCovered,
@@ -247,11 +252,11 @@ impl Kind {
     }
 }
 
-
+/// Share of the frame that reads as full coverage.
 pub const FULL_COVERAGE: f64 = 0.4;
 
-
-
+/// How much of the frame each kind covers, 0..1: the summed box area of its classes over the
+/// frame, with `FULL_COVERAGE` of the frame as 1.
 pub fn coverage(dets: &[Detection]) -> [f64; Kind::COUNT] {
     let mut out = [0.0; Kind::COUNT];
     for (i, kind) in Kind::ALL.iter().enumerate() {
@@ -261,10 +266,10 @@ pub fn coverage(dets: &[Detection]) -> [f64; Kind::COUNT] {
     out
 }
 
-
-
-
-
+/// The box the tracker should follow. With no `kind`: the best `Target` in shot, but nothing
+/// worse than `floor` (the target last followed, while it is still assumed there). With one:
+/// that kind only. Among those, the one nearest the centre of the picture (more than one
+/// person in shot: the middle one), larger on a tie.
 pub fn choose(dets: &[Detection], kind: Option<Kind>, floor: Option<Target>) -> Option<Detection> {
     let mut best: Option<(Target, f64, Detection)> = None;
     for d in dets {
@@ -289,8 +294,8 @@ pub fn choose(dets: &[Detection], kind: Option<Kind>, floor: Option<Target>) -> 
     best.map(|(_, _, d)| d)
 }
 
-
-
+/// One loaded model. Construct once (loading compiles the graph; CoreML takes seconds the
+/// first time), then `detect` from one thread.
 pub struct Detector {
     session: Session,
     input_name: String,
@@ -300,8 +305,8 @@ pub struct Detector {
 }
 
 impl Detector {
-
-
+    /// Loads `path`, a file the host has already downloaded and verified against `spec`.
+    /// `cache_dir` holds the compiled CoreML graph so later loads are quick.
     pub fn load(spec: &'static ModelSpec, path: &Path, cache_dir: Option<&Path>) -> Result<Detector, String> {
         let (builder, provider) = register_provider(session_builder()?, cache_dir)?;
         let session = builder.commit_from_file(path).map_err(|e| e.to_string())?;
@@ -313,13 +318,13 @@ impl Detector {
         self.spec
     }
 
-
+    /// `coreml` or `cpu`.
     pub fn provider(&self) -> &'static str {
         self.provider
     }
 
-
-
+    /// Runs the model on a packed RGB frame and returns every box past the confidence
+    /// threshold after class-wise suppression, in 0..1 of the frame.
     pub fn detect(&mut self, rgb: &[u8], width: usize, height: usize) -> Result<Vec<Detection>, String> {
         if width == 0 || height == 0 || rgb.len() < width * height * 3 {
             return Err(format!("frame is {} bytes, expected {}x{}x3", rgb.len(), width, height));
@@ -346,10 +351,10 @@ impl Detector {
     }
 }
 
-
-
-
-
+/// The session options every provider starts from: full graph optimisation, two threads, no
+/// spinning. Each option is set exactly once here and nowhere else: ONNX Runtime logs a warning
+/// when a session config key is set twice, and before its environment exists that log call
+/// throws inside a `noexcept` C API and aborts the process.
 fn session_builder() -> Result<SessionBuilder, String> {
     Session::builder()
         .and_then(|b| b.with_optimization_level(GraphOptimizationLevel::Level3))
@@ -373,9 +378,9 @@ fn register_provider(mut builder: SessionBuilder, cache_dir: Option<&Path>) -> R
     Ok((builder, provider))
 }
 
-
-
-
+/// Windows: DirectML on the first DXGI adapter, which is the GPU Windows renders with. ONNX
+/// Runtime wants the memory pattern off with it (execution is sequential by default); the
+/// session falls back to the CPU when the device is refused.
 #[cfg(windows)]
 fn register_provider(builder: SessionBuilder, _cache_dir: Option<&Path>) -> Result<(SessionBuilder, &'static str), String> {
     use ort::execution_providers::ExecutionProvider;
@@ -387,7 +392,7 @@ fn register_provider(builder: SessionBuilder, _cache_dir: Option<&Path>) -> Resu
     let mut builder = builder.with_memory_pattern(false).map_err(|e| e.to_string())?;
     match ep.register(&mut builder) {
         Ok(()) => Ok((builder, "directml")),
-
+        // The pattern optimisation is only worth turning back on for the CPU path.
         Err(_) => Ok((builder.with_memory_pattern(true).map_err(|e| e.to_string())?, "cpu")),
     }
 }
@@ -397,7 +402,7 @@ fn register_provider(builder: SessionBuilder, _cache_dir: Option<&Path>) -> Resu
     Ok((builder, "cpu"))
 }
 
-
+/// How the frame was placed in the square model input, so boxes map back.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Fit {
     scale: f32,
@@ -411,8 +416,8 @@ impl Fit {
     }
 }
 
-
-
+/// Scales the frame to fit `size` square, centred on grey padding, bilinear, into a planar RGB
+/// tensor of 0..1 floats.
 fn letterbox(rgb: &[u8], width: usize, height: usize, size: usize, out: &mut Vec<f32>) -> Fit {
     let scale = (size as f32 / width as f32).min(size as f32 / height as f32);
     let out_w = ((width as f32 * scale).round() as usize).clamp(1, size);
@@ -444,7 +449,7 @@ fn letterbox(rgb: &[u8], width: usize, height: usize, size: usize, out: &mut Vec
     Fit { scale, pad_x: pad_x as f32, pad_y: pad_y as f32 }
 }
 
-
+/// One decoded box in model-input pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Raw {
     class: usize,
@@ -467,8 +472,8 @@ impl Raw {
     }
 }
 
-
-
+/// A YOLOv8-style head, `[1, 4 + classes, N]` (stock export) or `[1, N, 4 + classes]`:
+/// each anchor is centre, size and one score per class.
 fn decode(data: &[f32], shape: &[i64], classes: usize, threshold: f32) -> Vec<Raw> {
     let attrs = 4 + classes;
     let (n, attr_major) = match shape {
@@ -502,7 +507,7 @@ fn decode(data: &[f32], shape: &[i64], classes: usize, threshold: f32) -> Vec<Ra
     out
 }
 
-
+/// Keeps the strongest box of every overlapping same-class cluster.
 fn nms(mut dets: Vec<Raw>, iou: f32) -> Vec<Raw> {
     dets.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
     let mut keep: Vec<Raw> = Vec::with_capacity(dets.len());
@@ -560,15 +565,15 @@ mod tests {
         assert_eq!(choose(&dets, Some(Kind::Faces), None).unwrap().class, "FEMALE_FACE", "a picked kind ignores the rule");
         assert_eq!(choose(&dets, Some(Kind::Feet), None), None, "nothing of that kind in shot");
         assert!(choose(&dets[3..4], None, None).is_none());
-
+        // Without genitals: buttocks before a face, a face before breasts.
         assert_eq!(choose(&dets[3..], None, None).unwrap().class, "BUTTOCKS_EXPOSED");
         assert_eq!(choose(&[dets[0], dets[5]], None, None).unwrap().class, "FEMALE_FACE");
-
+        // Covered classes come after the exposed ones near the same action.
         let covered = [det("FEMALE_GENITALIA_COVERED", 0.8, 0.4, 0.4, 0.2, 0.2), det("BUTTOCKS_COVERED", 0.8, 0.4, 0.4, 0.2, 0.2)];
         assert_eq!(choose(&covered, None, None).unwrap().class, "FEMALE_GENITALIA_COVERED");
         assert_eq!(choose(&[covered[0], dets[0]], None, None).unwrap().class, "FEMALE_GENITALIA_COVERED", "covered genitals beat a face");
         assert_eq!(choose(&[covered[0], dets[4]], None, None).unwrap().class, "BUTTOCKS_EXPOSED");
-
+        // The floor keeps a worse target from taking over while the held one is assumed there.
         assert_eq!(choose(&dets[3..], None, Some(Target::Genitals)), None);
         assert_eq!(choose(&[det("FEMALE_BREAST_COVERED", 0.8, 0.4, 0.4, 0.2, 0.2)], None, Some(Target::Face)), None, "covered breasts wait for a held face");
         assert_eq!(choose(&dets[3..], None, Some(Target::Buttocks)).unwrap().class, "BUTTOCKS_EXPOSED");
@@ -593,7 +598,7 @@ mod tests {
     fn letterbox_centres_a_wide_frame_and_maps_back() {
         let (w, h) = (64usize, 32usize);
         let mut rgb = vec![0u8; w * h * 3];
-
+        // A white pixel at (40, 10).
         for c in 0..3 {
             rgb[(10 * w + 40) * 3 + c] = 255;
         }
@@ -601,7 +606,7 @@ mod tests {
         let fit = letterbox(&rgb, w, h, 32, &mut out);
         assert_eq!(out.len(), 3 * 32 * 32);
         assert!((fit.scale - 0.5).abs() < 1e-6 && fit.pad_x == 0.0 && fit.pad_y == 8.0);
-
+        // Padding rows are grey, the picture rows are not all grey.
         assert!((out[0] - PAD).abs() < 1e-6);
         let bright = (0..32 * 32).map(|i| out[i]).fold(0.0f32, f32::max);
         assert!(bright > 0.2, "the white pixel should survive the downscale: {bright}");
@@ -611,7 +616,7 @@ mod tests {
 
     #[test]
     fn decode_reads_both_layouts_and_nms_merges() {
-
+        // Two classes, three anchors: two overlapping class-1 boxes and one weak one.
         let rows = [[100.0, 100.0, 40.0, 40.0, 0.1, 0.9], [102.0, 101.0, 40.0, 40.0, 0.1, 0.8], [50.0, 50.0, 10.0, 10.0, 0.2, 0.1]];
         let anchor_major: Vec<f32> = rows.iter().flatten().copied().collect();
         let mut attr_major = vec![0.0f32; 6 * 3];
@@ -630,13 +635,13 @@ mod tests {
         assert!(decode(&anchor_major, &[1, 3, 7], 2, 0.5).is_empty(), "a shape that matches no layout decodes to nothing");
     }
 
-
-
+    /// Runs a real model when `BP_MODEL_DIR` points at a folder holding it. Not a CI test:
+    /// the weights are downloaded on demand and never bundled.
     #[test]
     fn real_model_finds_something_in_a_frame() {
         let Ok(dir) = std::env::var("BP_MODEL_DIR") else { return };
         let Ok(frame) = std::env::var("BP_TEST_FRAME") else { return };
-
+        // `frame` is a raw RGB file named `<name>_<w>x<h>.rgb`.
         let stem = std::path::Path::new(&frame).file_stem().unwrap().to_string_lossy().to_string();
         let dims = stem.rsplit('_').next().unwrap();
         let (w, h) = dims.split_once('x').unwrap();

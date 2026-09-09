@@ -1,3 +1,10 @@
+//! Howl (Android, drives a DG-Lab Coyote or an audio estim box) through its remote API, the
+//! way its Kodi add-on does: the media's scripts go to the phone once as a funscript (or the
+//! `.hwl` beside the media), and then only play, seek and stop follow the media clock. Howl
+//! plays the script itself with its own positional algorithm and corrects the network latency
+//! with its own "Remote latency" setting. Every request runs on a worker thread; the tick
+//! thread only queues commands.
+
 use std::fmt::Write as _;
 use std::io;
 use std::path::PathBuf;
@@ -13,23 +20,23 @@ use ureq::Agent;
 
 use crate::output::{Media, TickContext};
 
-
+/// Howl's REST port.
 pub const PORT: u16 = 4695;
 const TIMEOUT: Duration = Duration::from_secs(5);
-
+/// A position error this large is a seek, not drift.
 const SEEK_MS: f64 = 1000.0;
-
+/// How often `status` is asked for while connected: liveness, and the numbers the UI shows.
 const STATUS_EVERY: Duration = Duration::from_secs(5);
-
+/// The wizard's test script: one slow sine, this long.
 const TEST_MS: f64 = 5000.0;
-
+/// The axes Howl reads from a multi-axis funscript besides `L0`.
 const EXTRA_AXES: [Axis; 5] = [Axis::L1, Axis::L2, Axis::R0, Axis::R1, Axis::R2];
 
-
+/// What Howl reports with every reply, for the device detail.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HowlStatus {
     pub playing: bool,
-
+    /// Howl's playhead in seconds.
     pub position: f64,
     pub title: String,
     pub power_a: u8,
@@ -37,8 +44,8 @@ pub struct HowlStatus {
     pub mute: bool,
 }
 
-
-
+/// What Howl is handed to play. HWL bytes are read on the worker, so nothing large sits in
+/// memory between loads.
 #[derive(Clone, Debug)]
 enum Source {
     Funscript { title: String, json: String },
@@ -55,14 +62,14 @@ enum Cmd {
 }
 
 enum Reply {
-
+    /// Howl has the source and can be played. Carries the status like everything else.
     Ready(HowlStatus),
     Status(HowlStatus),
     Error(String),
 }
 
-
-
+/// A connected Howl. Holds the command channel to the HTTP worker plus the playback state the
+/// tick compares against.
 pub struct HowlLink {
     cmd: Sender<Cmd>,
     reply: Receiver<Reply>,
@@ -70,18 +77,18 @@ pub struct HowlLink {
     source: Option<Source>,
     ready: bool,
     playing: bool,
-
+    /// Media time and wall clock at the last play, so a seek is visible as a jump from here.
     play_ms: f64,
     play_at: Instant,
     last_status: Instant,
     status_every: Duration,
-
+    /// While the wizard's test script plays; the real source is loaded again when it ends.
     test_until: Option<Instant>,
 }
 
 impl HowlLink {
-
-
+    /// Asks for `status`, which proves the address and the key. Blocks; call it off the tick
+    /// thread.
     pub fn connect(host: &str, key: &str) -> io::Result<HowlLink> {
         Self::connect_to(format!("http://{host}:{PORT}/"), key)
     }
@@ -123,7 +130,7 @@ impl HowlLink {
         })
     }
 
-
+    /// Drains the worker's replies. An error puts the output into its usual retry cycle.
     pub fn poll(&mut self) -> Result<(), String> {
         loop {
             match self.reply.try_recv() {
@@ -140,9 +147,9 @@ impl HowlLink {
         }
     }
 
-
-
-
+    /// Hands the media to Howl: the `.hwl` beside it when there is one (Howl's own format,
+    /// preferred as its Kodi add-on does), else the scripts as one multi-axis funscript.
+    /// Nothing to play stops Howl and leaves it idle.
     pub fn set_source(&mut self, scripts: &[(Axis, Arc<Script>)], media: &Media) {
         self.ready = false;
         if self.playing {
@@ -164,8 +171,8 @@ impl HowlLink {
         }
     }
 
-
-
+    /// Plays a five second sine on the phone so the wizard's test does something. The media's
+    /// source is loaded again once it has played out.
     pub fn test(&mut self) {
         self.ready = false;
         self.playing = false;
@@ -173,8 +180,8 @@ impl HowlLink {
         self.send(Cmd::Test);
     }
 
-
-
+    /// One tick of the playback state machine: start, stop, seek. Never blocks. Howl has no
+    /// playback rate, so a rate other than 1x shows up as drift and re-seeks.
     pub fn tick(&mut self, ctx: &TickContext) {
         if self.last_status.elapsed() >= self.status_every {
             self.last_status = Instant::now();
@@ -218,7 +225,7 @@ impl HowlLink {
         self.play_at = Instant::now();
     }
 
-
+    /// Where Howl should be now, from the last play or seek, at 1x.
     fn expected_ms(&self) -> f64 {
         self.play_ms + self.play_at.elapsed().as_secs_f64() * 1000.0
     }
@@ -229,14 +236,14 @@ impl HowlLink {
 }
 
 impl Drop for HowlLink {
-
+    /// Asks Howl to stop and lets the worker finish on its own, so no thread waits.
     fn drop(&mut self) {
         self.send(Cmd::Stop);
     }
 }
 
-
-
+/// The HTTP thread: one request at a time, in the order the tick queued them. Ends when the
+/// link is dropped and the command channel closes.
 fn worker(api: Api, cmd: Receiver<Cmd>, reply: Sender<Reply>) {
     for c in cmd {
         let done = match c {
@@ -272,7 +279,7 @@ fn worker(api: Api, cmd: Receiver<Cmd>, reply: Sender<Reply>) {
     }
 }
 
-
+/// Endpoint and body for a source. `loop` is off both ways: Howl's HWL default is on.
 fn load_body(source: &Source) -> Result<(&'static str, Value), String> {
     Ok(match source {
         Source::Funscript { title, json } => (
@@ -289,13 +296,13 @@ fn load_body(source: &Source) -> Result<(&'static str, Value), String> {
     })
 }
 
-
+/// Whole milliseconds as Howl's seconds.
 fn seconds(media_ms: f64) -> f64 {
     media_ms.round() / 1000.0
 }
 
-
-
+/// One HTTP conversation with the phone: every endpoint is a POST with a JSON body and the key
+/// as a bearer token.
 struct Api {
     agent: Agent,
     base: String,
@@ -322,7 +329,7 @@ impl Api {
     }
 }
 
-
+/// A 401 is the key; any other failure carries Howl's message when it sent one.
 fn parse_reply(path: &str, code: u16, body: &str) -> Result<Value, String> {
     if code == 401 {
         return Err("Howl rejected the key".into());
@@ -370,8 +377,8 @@ fn parse_status(v: &Value) -> HowlStatus {
     }
 }
 
-
-
+/// The scripts as one funscript for Howl: `L0` as the top-level actions and the other axes it
+/// reads under `axes`. `None` without a stroke, which Howl requires.
 fn howl_json(scripts: &[(Axis, Arc<Script>)]) -> Option<String> {
     let find = |axis: Axis| {
         scripts
@@ -402,7 +409,7 @@ fn howl_json(scripts: &[(Axis, Arc<Script>)]) -> Option<String> {
     Some(s)
 }
 
-
+/// Integer ms and 0..100 positions, the funscript convention.
 fn write_actions(s: &mut String, script: &Script) {
     s.push('[');
     for (i, a) in script.actions.iter().enumerate() {
@@ -415,7 +422,7 @@ fn write_actions(s: &mut String, script: &Script) {
     s.push(']');
 }
 
-
+/// A slow sine, two and a half seconds a stroke, ten points a second.
 fn test_json() -> String {
     let actions: Vec<Action> = (0..=(TEST_MS / 100.0) as usize)
         .map(|i| {
@@ -456,8 +463,8 @@ mod tests {
         body: Value,
     }
 
-
-
+    /// A stand-in for the phone: records every request and answers as Howl does, with a 401
+    /// for a wrong key.
     struct Mock {
         base: String,
         seen: Arc<Mutex<Vec<Req>>>,
@@ -519,7 +526,7 @@ mod tests {
         }
     }
 
-
+    /// One keep-alive connection: requests in, Howl's status out, until the mock stops.
     fn handle(stream: TcpStream, seen: Arc<Mutex<Vec<Req>>>, stop: Arc<AtomicBool>) {
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let mut stream = stream;
@@ -661,8 +668,8 @@ mod tests {
         }
     }
 
-
-
+    /// Ticks and polls as the engine does until the mock has seen `n` requests to `path`.
+    /// A `media_ms` of `None` follows Howl's own position, so waiting is never a seek.
     fn run(
         link: &mut HowlLink,
         mock: &Mock,
@@ -683,8 +690,8 @@ mod tests {
         panic!("waited for {n} x {path}, saw {:?}", mock.paths());
     }
 
-
-
+    /// Polls until the worker's reply has been read; `run` returns when the mock saw the
+    /// request, which can be before the reply came back.
     fn settle(link: &mut HowlLink, done: impl Fn(&HowlLink) -> bool) {
         for _ in 0..400 {
             link.poll().unwrap();
@@ -744,7 +751,7 @@ mod tests {
         assert_eq!(mock.last("start_player").body["from"].as_f64(), Some(4.0));
         settle(&mut link, |l| l.status.playing);
 
-
+        // A jump seeks; playing on from where Howl is does not.
         run(&mut link, &mock, "seek", 1, Some(60_000.0), false);
         assert_eq!(mock.last("seek").body["position"].as_f64(), Some(60.0));
         link.tick(&ctx(link.expected_ms() + 50.0, false));

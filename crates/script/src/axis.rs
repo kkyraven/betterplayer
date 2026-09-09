@@ -1,3 +1,8 @@
+//! Axis table from PLAN §4. Ids are TCode ids so device output, funscript suffix matching
+//! and restim compatibility share one vocabulary. Estim axes are a second namespace so a
+//! stroker profile and a restim profile can both be active; on the wire a restim output
+//! writes alpha, beta and volume as `L0`, `L1` and `V0`.
+
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -13,26 +18,28 @@ pub enum Axis {
     A0,
     A1,
     A2,
-
+    /// Estim alpha, position on the electrode disc.
     EA,
-
+    /// Estim beta.
     EB,
-
+    /// Estim volume, multiplied with restim's master.
     EV,
-
+    /// Carrier frequency.
     C0,
-
+    /// Pulse frequency.
     P0,
-
+    /// Pulse width.
     P1,
-
+    /// Pulse interval jitter.
     P2,
-
+    /// Pulse rise time.
     P3,
     E1,
     E2,
     E3,
     E4,
+    /// Dedicated shock script, never emitted as TCode.
+    S0,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,19 +53,20 @@ pub enum Kind {
     EstimParam,
 }
 
-
+/// Which device family an axis belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Namespace {
     Tcode,
     Estim,
+    Shock,
 }
 
 impl Axis {
-    pub const ALL: [Axis; 23] = [
+    pub const ALL: [Axis; 24] = [
         Axis::L0, Axis::L1, Axis::L2, Axis::R0, Axis::R1, Axis::R2,
         Axis::V0, Axis::V1, Axis::A0, Axis::A1, Axis::A2,
         Axis::EA, Axis::EB, Axis::EV, Axis::C0, Axis::P0, Axis::P1, Axis::P2, Axis::P3,
-        Axis::E1, Axis::E2, Axis::E3, Axis::E4,
+        Axis::E1, Axis::E2, Axis::E3, Axis::E4, Axis::S0,
     ];
     pub const COUNT: usize = Self::ALL.len();
 
@@ -70,7 +78,7 @@ impl Axis {
         Self::ALL.get(i).copied()
     }
 
-
+    /// Internal id, `L0` or `EA`.
     pub fn id(self) -> &'static str {
         match self {
             Axis::L0 => "L0", Axis::L1 => "L1", Axis::L2 => "L2",
@@ -80,6 +88,7 @@ impl Axis {
             Axis::EA => "EA", Axis::EB => "EB", Axis::EV => "EV",
             Axis::C0 => "C0", Axis::P0 => "P0", Axis::P1 => "P1", Axis::P2 => "P2", Axis::P3 => "P3",
             Axis::E1 => "E1", Axis::E2 => "E2", Axis::E3 => "E3", Axis::E4 => "E4",
+            Axis::S0 => "S0",
         }
     }
 
@@ -92,6 +101,7 @@ impl Axis {
             Axis::EA => "Alpha", Axis::EB => "Beta", Axis::EV => "Volume",
             Axis::C0 => "Carrier", Axis::P0 => "Pulse rate", Axis::P1 => "Pulse width", Axis::P2 => "Pulse jitter", Axis::P3 => "Pulse rise",
             Axis::E1 => "Electrode 1", Axis::E2 => "Electrode 2", Axis::E3 => "Electrode 3", Axis::E4 => "Electrode 4",
+            Axis::S0 => "Shock",
         }
     }
 
@@ -99,7 +109,7 @@ impl Axis {
         match self {
             Axis::L0 | Axis::L1 | Axis::L2 => Kind::Position,
             Axis::R0 | Axis::R1 | Axis::R2 => Kind::Rotation,
-            Axis::V0 | Axis::V1 => Kind::Intensity,
+            Axis::V0 | Axis::V1 | Axis::S0 => Kind::Intensity,
             Axis::A0 | Axis::A1 | Axis::A2 => Kind::Aux,
             Axis::EA | Axis::EB => Kind::EstimPosition,
             Axis::EV | Axis::E1 | Axis::E2 | Axis::E3 | Axis::E4 => Kind::EstimIntensity,
@@ -108,6 +118,7 @@ impl Axis {
     }
 
     pub fn namespace(self) -> Namespace {
+        if self == Axis::S0 { return Namespace::Shock; }
         match self.kind() {
             Kind::Position | Kind::Rotation | Kind::Intensity | Kind::Aux => Namespace::Tcode,
             Kind::EstimPosition | Kind::EstimIntensity | Kind::EstimParam => Namespace::Estim,
@@ -118,8 +129,8 @@ impl Axis {
         self.namespace() == Namespace::Estim
     }
 
-
-
+    /// Rest value, 0..1. Position, rotation and estim position rest in the middle, pulse
+    /// parameters in the middle of restim's range, intensities at zero.
     pub fn default_value(self) -> f64 {
         match self.kind() {
             Kind::Position | Kind::Rotation | Kind::EstimPosition | Kind::EstimParam => 0.5,
@@ -127,7 +138,7 @@ impl Axis {
         }
     }
 
-
+    /// Funscript file suffixes that select this axis, lowercase. `L0` also takes no suffix.
     pub fn suffixes(self) -> &'static [&'static str] {
         match self {
             Axis::L0 => &["stroke", "l0", "up", "raw"],
@@ -153,10 +164,11 @@ impl Axis {
             Axis::E2 => &["e2"],
             Axis::E3 => &["e3"],
             Axis::E4 => &["e4"],
+            Axis::S0 => &["shock", "s0"],
         }
     }
 
-
+    /// Axis for a funscript suffix or bundle id, case-insensitive. Empty selects `L0`.
     pub fn from_suffix(s: &str) -> Option<Axis> {
         let s = s.trim().to_ascii_lowercase();
         if s.is_empty() {

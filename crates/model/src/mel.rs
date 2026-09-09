@@ -1,3 +1,9 @@
+//! Log-mel spectrogram of a mono 22 050 Hz track at 50 Hz, exactly as `ml/data/features_audio.py`
+//! writes `a1.npz`: a 1 024 point STFT with a periodic Hann window and a hop of 441 samples,
+//! centred with reflect padding, power spectrum, 80 HTK mel triangles from 0 Hz to Nyquist with
+//! no area normalisation, `log(x + 1e-6)`, then the track's scalar mean and standard deviation
+//! removed.
+
 use std::f64::consts::PI;
 
 pub const RATE: usize = 22_050;
@@ -15,8 +21,8 @@ fn mel_to_hz(m: f64) -> f64 {
     700.0 * (10f64.powf(m / 2595.0) - 1.0)
 }
 
-
-
+/// torchaudio's `melscale_fbanks(513, 0, 11025, 80, 22050, norm=None, mel_scale="htk")`:
+/// `[bins][bands]` weights.
 fn filterbank() -> Vec<[f64; BANDS]> {
     let all_freqs: Vec<f64> = (0..BINS).map(|k| k as f64 * (RATE as f64 / 2.0) / (BINS - 1) as f64).collect();
     let (m_min, m_max) = (hz_to_mel(0.0), hz_to_mel(RATE as f64 / 2.0));
@@ -32,14 +38,14 @@ fn filterbank() -> Vec<[f64; BANDS]> {
     fb
 }
 
-
+/// Normalised log-mel rows, one per 20 ms hop, for the whole track. Empty for no samples.
 pub fn log_mel(samples: &[f32]) -> Vec<[f32; BANDS]> {
     if samples.is_empty() {
         return Vec::new();
     }
     let frames = 1 + samples.len() / HOP;
     let half = N_FFT / 2;
-
+    // Reflect padding by `half` either side, as torch's `center=True` does.
     let at = |i: isize| -> f64 {
         let n = samples.len() as isize;
         let i = if i < 0 { -i } else if i >= n { 2 * (n - 1) - i } else { i };
@@ -72,7 +78,7 @@ pub fn log_mel(samples: &[f32]) -> Vec<[f32; BANDS]> {
     }
     let n = (rows.len() * BANDS) as f64;
     let mean = rows.iter().flatten().sum::<f64>() / n;
-
+    // torch's `std` is the unbiased one.
     let var = rows.iter().flatten().map(|v| (v - mean) * (v - mean)).sum::<f64>() / (n - 1.0).max(1.0);
     let std = if var > 0.0 { var.sqrt() } else { 1.0 };
     rows.into_iter().map(|r| std::array::from_fn(|b| ((r[b] - mean) / std) as f32)).collect()
@@ -89,7 +95,7 @@ mod tests {
         rows: Vec<Vec<f32>>,
     }
 
-
+    /// The same two second signal `ml/fixtures.py` builds, so no audio file is needed.
     pub(crate) fn synthetic(seconds: f64) -> Vec<f32> {
         let n = (seconds * RATE as f64) as usize;
         let mut seed: u32 = 12345;
