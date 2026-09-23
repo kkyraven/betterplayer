@@ -5,9 +5,11 @@ Business Source License 1.1
 Parameters
 
 Licensor:             KinkyRaven
-Licensed Work:        Better Player, the app/ directory
+Licensed Work:        Better Player: app/, the build scripts in scripts/, the run-*
+                      scripts and RELEASE_NOTES.md
                       The Licensed Work is (c) 2026 KinkyRaven
-Additional Use Grant: None
+Additional Use Grant: You may use the Licensed Work for personal, non-commercial
+                      purposes.
 Change Date:          2030-09-23
 Change License:       GNU General Public License v3.0 or later
 
