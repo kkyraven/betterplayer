@@ -1,0 +1,9 @@
+.glass {
+  background: var(--glass);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 1px solid var(--line);
+}
+.glass-strong {
+  background: var(--glass-strong);
+}

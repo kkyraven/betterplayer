@@ -1,0 +1,22 @@
+.stepper {
+  display: inline-flex;
+  align-items: center;
+  background: var(--glass-light);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 2px;
+  height: 32px;
+}
+.stepper button {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
+  color: var(--text-2);
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.stepper button:hover { background: rgba(var(--ink), 0.1); color: var(--text); }
+.stepper button:disabled { color: var(--text-3); background: none; cursor: default; }
+.stepper button svg { width: 13px; height: 13px; }
+.stepper-v { min-width: 42px; text-align: center; font: 500 12px var(--mono); color: var(--text); font-variant-numeric: tabular-nums; }

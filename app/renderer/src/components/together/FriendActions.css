@@ -1,0 +1,8 @@
+.friend-actions-menu { z-index: 150; min-width: 200px; max-height: var(--radix-dropdown-menu-content-available-height); overflow-y: auto; padding: 4px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--popover); backdrop-filter: var(--blur-strong); box-shadow: var(--shadow); }
+.friend-actions-menu [role='menuitem'] { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 6px; font-size: 13px; cursor: pointer; outline: none; }
+.friend-actions-menu [role='menuitem'][data-highlighted] { background: var(--glass-light); }
+.friend-actions-menu [role='menuitem'][data-disabled] { color: var(--text-3); cursor: default; }
+.friend-actions-menu svg { width: 16px; height: 16px; flex: none; }
+.friend-actions-menu [role='separator'] { height: 1px; margin: 4px; background: var(--line); }
+.friend-actions-menu > div:not([role]) { padding: 6px 10px; font-size: 11px; color: var(--text-2); }
+.friend-actions-menu .danger { color: var(--danger); }

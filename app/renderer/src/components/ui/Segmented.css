@@ -1,0 +1,23 @@
+.seg {
+  display: inline-flex;
+  background: var(--glass-light);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 2px;
+  height: 32px;
+}
+.seg button {
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 7px;
+  color: var(--text-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.seg button:hover { color: var(--text); }
+.seg button.on { background: var(--segment-selected); color: var(--text); box-shadow: var(--segment-shadow); }
+.seg button:disabled { color: var(--text-3); cursor: default; }
+.seg button:disabled.on { background: none; box-shadow: none; }

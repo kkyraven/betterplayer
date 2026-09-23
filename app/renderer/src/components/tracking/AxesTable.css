@@ -1,0 +1,16 @@
+.axes-table { display: grid; gap: 2px; }
+.axes-table .axrow { display: grid; grid-template-columns: 34px 96px 168px 1fr 92px 100px 34px; align-items: center; gap: 10px; height: 36px; padding: 0 4px; border-radius: 8px; }
+.axes-table .axrow.head { height: 24px; font: 600 10.5px var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-3); }
+.axes-table .axrow.off .name, .axes-table .axrow.off .axis { opacity: 0.55; }
+.axes-table .axrow .name { display: flex; flex-direction: column; line-height: 1.15; font-size: 13px; font-weight: 500; }
+.axes-table .axrow .name .comp { font: 500 10.5px var(--mono); color: var(--text-3); min-height: 12px; }
+.axes-table .axrow .axis { justify-self: start; font: 600 10.5px/1 var(--mono); letter-spacing: 0.02em; padding: 3px 5px; border-radius: 5px; background: var(--well); border: 1px solid rgba(var(--ink), 0.14); }
+.axes-table .axrow .select { width: 100%; }
+.axes-table .axrow.head .srchead { display: flex; align-items: center; gap: 8px; }
+.axes-table .axrow.head .all { height: 18px; padding: 0 6px; border-radius: 5px; font: 600 9.5px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-2); background: rgba(var(--ink), 0.07); border: 1px solid rgba(var(--ink), 0.14); cursor: pointer; }
+.axes-table .axrow.head .all:hover { color: var(--text-1); background: rgba(var(--ink), 0.13); }
+.axes-table .axrow .sl.dim { opacity: 0.35; }
+.axes-table .axrow .stepper { height: 28px; justify-self: start; }
+.axes-table .axrow .stepper button { width: 22px; height: 22px; }
+.axes-table .axrow .stepper .stepper-v { min-width: 40px; }
+.axes-table .axrow .stepper + .stepper .stepper-v { min-width: 48px; }

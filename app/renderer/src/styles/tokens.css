@@ -1,0 +1,111 @@
+:root {
+  color-scheme: dark;
+  --bg: #0a0c10;
+  --bg-2: #10131a;
+  --accent: #b7a3ff;
+  --accent-rgb: 183, 163, 255;
+  --accent-ink: #15102a;
+  --accent-soft: rgba(var(--accent-rgb), 0.16);
+  --wash-1: rgba(120, 90, 200, 0.16);
+  --wash-2: rgba(60, 120, 200, 0.14);
+  --ink: 255, 255, 255;
+  --glass: color-mix(in oklab, var(--bg-2) 62%, transparent);
+  --glass-strong: color-mix(in oklab, var(--bg) 80%, transparent);
+  --glass-float: color-mix(in oklab, var(--bg-2) 72%, transparent);
+  --popover: color-mix(in oklab, var(--bg-2) 86%, transparent);
+  --glass-light: rgba(var(--ink), 0.06);
+  --line: rgba(var(--ink), 0.08);
+  --line-2: rgba(var(--ink), 0.14);
+  --well: rgba(0, 0, 0, 0.28);
+  --segment-selected: rgba(255, 255, 255, 0.1);
+  --select-arrow: var(--select-arrow-dark);
+  --segment-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --text: #eef0f4;
+  --text-2: rgba(238, 240, 244, 0.66);
+  --text-3: rgba(238, 240, 244, 0.4);
+  --ok: #5ee0a0;
+  --warn: #ffb547;
+  --danger: #ff6b6b;
+  --r: 10px;
+  --r-lg: 14px;
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --blur: blur(16px) saturate(140%);
+  --blur-strong: blur(24px) saturate(150%);
+  --shadow: 0 12px 40px rgba(0, 0, 0, 0.45), 0 1px 0 rgba(255, 255, 255, 0.05) inset;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --t-fast: 120ms;
+  --t-ui: 200ms;
+}
+
+[data-theme='light'] {
+  color-scheme: light;
+  --ink: 0, 0, 0;
+  --glass: color-mix(in oklab, var(--bg-2) 72%, transparent);
+  --glass-strong: color-mix(in oklab, var(--bg-2) 84%, transparent);
+  --glass-float: color-mix(in oklab, var(--bg-2) 78%, transparent);
+  --popover: color-mix(in oklab, var(--bg-2) 90%, transparent);
+  --glass-light: rgba(var(--ink), 0.05);
+  --well: rgba(255, 255, 255, 0.6);
+  --segment-selected: #fff;
+  --select-arrow: var(--select-arrow-light);
+  --segment-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 0 0 1px rgba(0, 0, 0, 0.04);
+  --text: #16181d;
+  --text-2: rgba(22, 24, 29, 0.66);
+  --text-3: rgba(22, 24, 29, 0.42);
+  --ok: #09693e;
+  --warn: #805000;
+  --danger: #b32626;
+  --shadow: 0 12px 40px rgba(20, 20, 40, 0.14), 0 1px 0 rgba(255, 255, 255, 0.6) inset;
+}
+
+.stage:not([data-empty]), .ed, .tv[data-tab='nowplaying'] {
+  color-scheme: dark;
+  color: var(--text);
+  --bg: var(--media-bg, #0a0c10);
+  --bg-2: var(--media-bg-2, #10131a);
+  --accent: var(--media-accent, #b7a3ff);
+  --accent-rgb: var(--media-accent-rgb, 183, 163, 255);
+  --accent-ink: #15102a;
+  --accent-soft: rgba(var(--accent-rgb), 0.16);
+  --segment-selected: rgba(255, 255, 255, 0.1);
+  --select-arrow: var(--select-arrow-dark);
+  --segment-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --ink: 255, 255, 255;
+  --text: #eef0f4;
+  --text-2: rgba(238, 240, 244, 0.8);
+  --text-3: rgba(238, 240, 244, 0.6);
+  --ok: #5ee0a0;
+  --warn: #ffb547;
+  --danger: #ff6b6b;
+  --glass: color-mix(in oklab, var(--bg-2) 62%, transparent);
+  --glass-strong: color-mix(in oklab, var(--bg) 80%, transparent);
+  --glass-float: color-mix(in oklab, var(--bg-2) 72%, transparent);
+  --popover: color-mix(in oklab, var(--bg-2) 86%, transparent);
+  --glass-light: rgba(var(--ink), 0.06);
+  --line: rgba(var(--ink), 0.08);
+  --line-2: rgba(var(--ink), 0.14);
+  --well: rgba(0, 0, 0, 0.28);
+  --shadow: 0 12px 40px rgba(0, 0, 0, 0.45), 0 1px 0 rgba(255, 255, 255, 0.05) inset;
+}
+
+[data-reduce-transparency],
+[data-reduce-transparency] :is(.stage:not([data-empty]), .ed, .tv[data-tab='nowplaying']) {
+  --glass: var(--bg-2);
+  --glass-strong: var(--bg);
+  --glass-float: var(--bg-2);
+  --popover: color-mix(in oklab, var(--bg-2), var(--text) 4%);
+  --blur: none;
+  --blur-strong: none;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :root, .stage:not([data-empty]), .ed, .tv[data-tab='nowplaying'] {
+    --glass: var(--bg-2);
+    --glass-strong: var(--bg);
+    --glass-float: var(--bg-2);
+    --popover: color-mix(in oklab, var(--bg-2), var(--text) 4%);
+    --blur: none;
+    --blur-strong: none;
+  }
+}

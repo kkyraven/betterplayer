@@ -1,0 +1,17 @@
+.pace { display: block; width: 100%; }
+.pace .pace-line { stroke: var(--accent); stroke-width: 1.5px; fill: none; stroke-linejoin: round; }
+.pace .pace-line.dashed { stroke: var(--text-3); stroke-dasharray: 3 4; }
+
+.phase-strip { display: block; width: 100%; height: 8px; overflow: visible; }
+.phase-strip .tone-high { fill: var(--ok); }
+.phase-strip .tone-mid { fill: var(--warn); }
+.phase-strip .tone-low { fill: var(--danger); }
+.phase-strip .tone-none { fill: rgba(var(--ink), 0.18); }
+.phase-strip .phase-head { stroke: rgb(var(--ink)); stroke-width: 2px; }
+
+.phase-pill { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px; border-radius: 11px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.phase-pill::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.phase-pill.tone-high { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
+.phase-pill.tone-mid { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+.phase-pill.tone-low { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.phase-pill.tone-none { color: var(--text-2); background: var(--glass-light); }

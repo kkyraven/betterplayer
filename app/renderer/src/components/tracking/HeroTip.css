@@ -1,0 +1,4 @@
+.hero-tip { position: absolute; z-index: 3; top: 58px; left: 16px; display: flex; align-items: flex-start; gap: 6px; width: 340px; max-width: calc(100% - 32px); padding: 10px 8px 10px 14px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--glass-float); backdrop-filter: var(--blur-strong); -webkit-backdrop-filter: var(--blur-strong); box-shadow: var(--shadow); font-size: 12.5px; line-height: 1.45; color: var(--text-2); }
+.hero-tip p { flex: 1; margin: 0; }
+.hero-tip .sig { display: block; margin-top: 6px; color: var(--text-3); }
+.hero-tip .icon-btn { flex: none; margin-top: -2px; }

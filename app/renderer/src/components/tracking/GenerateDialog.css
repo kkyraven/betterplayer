@@ -1,0 +1,13 @@
+.gen .gen-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.gen h3 { margin: 0; font-size: 15px; }
+.gen p { margin: 0 0 16px; color: var(--text-2); font-size: 13px; line-height: 1.45; }
+.gen p.err { color: var(--danger, #ff7a7a); margin: 12px 0 0; overflow-wrap: anywhere; }
+.gen .gen-file { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.gen .gen-axes { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 13px; }
+.gen .gen-axes th, .gen .gen-axes td { padding: 9px 0; border-bottom: 1px solid var(--line); }
+.gen .gen-axes th { text-align: left; font-weight: 400; }
+.gen .gen-axes td { text-align: right; color: var(--text-2); }
+.gen .bar { position: relative; height: 4px; border-radius: 2px; background: var(--line-2); overflow: hidden; }
+.gen .bar i { position: absolute; inset: 0; transform-origin: left; background: var(--accent); border-radius: 2px; }
+.gen .gen-progress-detail { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; color: var(--text-2); font-size: 12px; font-variant-numeric: tabular-nums; }
+.gen .acts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin-top: 24px; }

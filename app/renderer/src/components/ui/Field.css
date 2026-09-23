@@ -1,0 +1,20 @@
+.field { display: grid; gap: 5px; }
+.field-label { font-size: 12px; font-weight: 500; color: var(--text-2); }
+.field-hint { font-size: 11.5px; color: var(--text-3); }
+.input {
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 9px;
+  background: var(--well);
+  border: 1px solid var(--line);
+  color: var(--text);
+  outline: 0;
+  width: 100%;
+  min-width: 0;
+  transition: border-color var(--t-fast) var(--ease);
+}
+.input::placeholder { color: var(--text-3); }
+.input:focus { border-color: var(--line-2); }
+.input.mono { font-family: var(--mono); font-size: 12px; }
+select.input { appearance: none; padding-right: 26px; background-image: linear-gradient(45deg, transparent 50%, var(--text-3) 50%), linear-gradient(135deg, var(--text-3) 50%, transparent 50%); background-position: calc(100% - 15px) 14px, calc(100% - 10px) 14px; background-size: 5px 5px; background-repeat: no-repeat; }
+select.input option { background: var(--bg-2); }

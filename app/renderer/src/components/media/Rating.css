@@ -1,0 +1,10 @@
+.stars { display: inline-flex; gap: 1px; color: var(--warn); }
+.stars svg { width: 11px; height: 11px; fill: currentColor; stroke: currentColor; }
+.stars svg.off { color: rgba(var(--ink), 0.18); fill: transparent; }
+.stars-edit { gap: 3px; }
+.stars-edit button { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 5px; color: var(--warn); }
+.stars-edit button svg { width: 15px; height: 15px; fill: currentColor; }
+.stars-edit button.off { color: rgba(var(--ink), 0.18); }
+.stars-edit button.off svg { fill: transparent; }
+.stars-edit button:hover { color: var(--warn); }
+.stars-edit button:active { transform: scale(0.97); }

@@ -1,0 +1,27 @@
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 9px;
+  background: var(--glass-light);
+  color: var(--text);
+  font-weight: 500;
+  font-size: 13px;
+  white-space: nowrap;
+  transition: background var(--t-fast) var(--ease), transform 80ms var(--ease);
+}
+.btn:hover { background: rgba(var(--ink), 0.09); }
+.btn:active { transform: scale(0.97); }
+.btn:disabled { opacity: 0.45; pointer-events: none; }
+.btn svg { width: 14px; height: 14px; flex: none; }
+
+.btn-primary { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.btn-primary:hover { background: color-mix(in oklab, var(--accent), var(--text) 12%); }
+
+.btn-ghost { background: transparent; color: var(--text-2); }
+.btn-ghost:hover { background: var(--glass-light); color: var(--text); }
+
+.btn-icon { width: 32px; padding: 0; justify-content: center; }
+.btn-danger { color: var(--danger); }

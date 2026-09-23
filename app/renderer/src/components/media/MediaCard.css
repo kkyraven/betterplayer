@@ -1,0 +1,54 @@
+.card { position: relative; border-radius: var(--r); outline: 0; display: grid; gap: 8px; user-select: none; -webkit-user-select: none; }
+.card .sel { position: absolute; top: 8px; left: 8px; z-index: 3; width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid rgba(255, 255, 255, 0.7); background: rgba(0, 0, 0, 0.45); display: grid; place-items: center; color: var(--accent-ink); }
+.card .sel svg { width: 12px; height: 12px; stroke-width: 3; }
+.card.picked .sel { background: var(--accent); border-color: var(--accent); }
+.card.selecting .thumb .tl { left: 34px; }
+.card.selecting { touch-action: none; }
+.card.picked .thumb { box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px var(--accent-soft); }
+.card .thumb {
+  position: relative; aspect-ratio: 16 / 9; border-radius: var(--r); overflow: hidden;
+  background: var(--bg-2);
+  transition: box-shadow var(--t-fast) var(--ease);
+}
+.card .thumb .poster { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.card .thumb .strip { position: absolute; inset: 0; background-size: auto 100%; background-repeat: no-repeat; }
+.card .thumb .tl { position: absolute; top: 8px; left: 8px; z-index: 2; }
+.card .thumb .tr { position: absolute; top: 8px; right: 8px; z-index: 2; display: flex; align-items: center; gap: 6px; }
+.card .badge-pin { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 5px; background: rgba(0, 0, 0, 0.5); color: var(--media-accent, #b7a3ff); border: 1px solid rgba(255, 255, 255, 0.1); }
+.card .badge-pin svg { width: 12px; height: 12px; }
+.card .card-menu { display: flex; gap: 4px; }
+.card .card-menu > * { opacity: 0; transition: opacity var(--t-fast) var(--ease); }
+.card .card-menu .icon-btn { background: rgba(0, 0, 0, 0.55); color: #eef0f4; }
+.card .card-menu .fav.on { color: #ff6b6b; }
+.card:hover .card-menu > *, .card:focus-within .card-menu > *, .card .card-menu:has([data-state='open']) > *, .card .card-menu > .fav.on { opacity: 1; }
+.card .card-play {
+  position: absolute; left: 50%; top: 50%; translate: -50% -50%; z-index: 3;
+  border-radius: 50%; background: rgba(0, 0, 0, 0.55); color: #eef0f4;
+  opacity: 0; transition: opacity var(--t-fast) var(--ease), background var(--t-fast) var(--ease), color var(--t-fast) var(--ease), transform 80ms var(--ease);
+}
+.card .card-play svg { fill: currentColor; margin-left: 2px; }
+.card .card-play:hover { background: var(--accent); color: var(--accent-ink); }
+.card:hover .card-play, .card:focus-within .card-play { opacity: 1; }
+@media (hover: none) { .card .card-play { display: none; } }
+.card.hidden .thumb { opacity: 0.55; }
+.card .thumb .br { position: absolute; bottom: 8px; right: 8px; z-index: 2; }
+.card .thumb .bl { position: absolute; bottom: 8px; left: 8px; z-index: 2; }
+.card .dur, .card .resume { font: 500 11px/1 var(--mono); padding: 4px 6px; border-radius: 5px; background: rgba(0, 0, 0, 0.55); color: #eef0f4; }
+.card .badge-res { font: 600 10px/1 var(--mono); padding: 3px 5px; border-radius: 5px; background: rgba(0, 0, 0, 0.5); color: #eef0f4; border: 1px solid rgba(255, 255, 255, 0.1); }
+.card .prog { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(255, 255, 255, 0.14); z-index: 3; }
+.card .prog i { display: block; height: 100%; background: var(--accent); }
+.card .heat-strip { opacity: 0.9; }
+.card .text { display: grid; gap: 2px; }
+.card .title { font-weight: 600; font-size: 13px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .meta { color: var(--text-3); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; gap: 6px; align-items: center; min-width: 0; }
+.card .meta .folder { overflow: hidden; text-overflow: ellipsis; }
+.card .meta .sep::before { content: '·'; }
+.card .meta .stars { margin-left: auto; }
+.card.selected .thumb { box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px var(--accent-soft); }
+.card:focus-visible { outline: 0; }
+.card:focus-visible .thumb { box-shadow: 0 0 0 2px var(--accent); }
+.card-compact { gap: 6px; }
+.card-compact .title { font-size: 12px; }
+.card-tenfoot { gap: 12px; }
+.card-tenfoot .title { font-size: 20px; }
+.card-tenfoot .meta { font-size: 16px; }

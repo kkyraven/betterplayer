@@ -1,0 +1,5 @@
+.axtoggles { display: flex; gap: 4px; flex-wrap: wrap; }
+.axtoggle { font: 600 10.5px/1 var(--mono); letter-spacing: 0.02em; padding: 4px 6px; border-radius: 5px; background: var(--well); border: 1px solid rgba(var(--ink), 0.14); color: var(--text-2); }
+.axtoggle:hover { color: var(--text); }
+.axtoggle.off { text-decoration: line-through; color: var(--danger); border-color: rgba(255, 107, 107, 0.4); }
+.axtoggle.on { color: var(--accent); border-color: rgba(var(--accent-rgb), 0.6); }

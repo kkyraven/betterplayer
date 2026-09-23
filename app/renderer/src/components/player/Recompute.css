@@ -1,0 +1,7 @@
+.recompute { position: absolute; inset: 0; z-index: 1; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, 0.45); }
+.recompute .rbox { display: grid; gap: 10px; justify-items: center; }
+.recompute p { margin: 0; color: #fff; font-size: 15px; font-weight: 500; white-space: nowrap; text-shadow: 0 1px 8px rgba(0, 0, 0, 0.6); font-variant-numeric: tabular-nums; }
+.recompute .rbar { display: block; width: 100%; height: 3px; background: rgba(255, 255, 255, 0.22); }
+.recompute .rbar i { display: block; height: 100%; width: 100%; transform-origin: left; background: #fff; transition: transform 250ms linear; }
+.recompute button { color: rgba(255, 255, 255, 0.7); font-size: 12.5px; padding: 4px 8px; }
+.recompute button:hover { color: #fff; }

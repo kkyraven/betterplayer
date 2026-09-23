@@ -1,0 +1,56 @@
+.tg-panel { position: absolute; right: 16px; bottom: 16px; z-index: 120; width: 300px; padding: 12px 14px; border-radius: 14px; background: var(--glass-strong); backdrop-filter: var(--blur-strong); -webkit-backdrop-filter: var(--blur-strong); border: 1px solid var(--line-2); box-shadow: var(--shadow); display: grid; gap: 10px; }
+.tg-panel .hd { display: flex; align-items: center; gap: 8px; }
+.tg-panel .hd svg { width: 16px; height: 16px; color: var(--text-2); flex: none; }
+.tg-panel .hd b { flex: 1; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tg-panel .hd .btn { height: 26px; padding: 0 9px; font-size: 12px; }
+.tg-panel .st { font-size: 12px; color: var(--text-2); display: flex; align-items: center; gap: 6px; }
+.tg-panel .transport { display: flex; align-items: center; justify-content: center; gap: 4px; }
+.tg-panel .time { font: 500 12px var(--mono); color: var(--text-2); text-align: center; font-variant-numeric: tabular-nums; }
+.tg-panel .time .t3 { color: var(--text-3); }
+.tg-panel .row { display: grid; grid-template-columns: 70px 1fr; align-items: center; gap: 10px; font-size: 12px; color: var(--text-2); }
+.tg-panel .live { display: grid; gap: 4px; }
+.tg-panel .live .k { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-2); }
+.tg-panel .live .k b { color: var(--accent); font: 500 12px var(--mono); }
+.tg-panel .live .track { position: relative; }
+.tg-panel .live .mark { position: absolute; top: 2px; width: 2px; height: 12px; background: var(--ok); transform: translateX(-50%); pointer-events: none; }
+.tg-panel .live .vol { width: 100%; margin: 0; }
+.tg-panel .note { font-size: 12px; color: var(--text-3); }
+
+.tg-invite { display: grid; gap: 12px; padding: 18px 18px 14px; }
+.tg-invite h2 { margin: 0; font-size: 15px; }
+.tg-invite p { margin: 0; font-size: 12.5px; color: var(--text-2); line-height: 1.45; }
+.tg-invite .acts { display: flex; justify-content: flex-end; gap: 6px; }
+
+.tg-group { width: min(320px, calc(100% - 32px)); max-height: calc(100% - 32px); overflow-y: auto; }
+.tg-count { color: var(--text-3); font-weight: 400; padding-left: 6px; }
+.tg-members { max-height: 280px; overflow-y: auto; }
+.tg-member { display: flex; align-items: center; gap: 9px; min-height: 46px; }
+.tg-member > span:nth-child(2) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.tg-member small { color: var(--text-2); font-size: 10px; max-width: 115px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tg-member small.warn { color: var(--warn); }
+.tg-sharing { display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--line); padding-top: 12px; font-size: 12px; }
+.tg-sharing small, .tg-file small { display: block; font-size: 10px; color: var(--text-3); margin-top: 3px; }
+.tg-group-actions { display: flex; justify-content: space-between; gap: 8px; }
+.tg-group-actions > :last-child { margin-left: auto; }
+.tg-group .btn { font-size: 11px; }
+.tg-download { background: var(--glass-light); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+.tg-file { display: flex; align-items: center; gap: 9px; font-size: 12px; }
+.tg-file svg { width: 16px; color: var(--accent); flex: none; }
+.tg-file > div { min-width: 0; overflow-wrap: anywhere; }
+.tg-download > small { font-size: 10px; color: var(--text-2); }
+.tg-download progress { appearance: none; width: 100%; height: 4px; display: block; margin: 12px 0 6px; border: 0; border-radius: 3px; }
+.tg-download progress::-webkit-progress-bar { background: var(--line-2); border-radius: 3px; }
+.tg-download progress::-webkit-progress-value { background: var(--accent); border-radius: 3px; }
+.tg-download-actions { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; gap: 8px; }
+.tg-invite-list { max-height: min(380px, 50vh); overflow-y: auto; }
+.tg-friend-choice { display: flex; align-items: center; gap: 9px; min-height: 48px; font-size: 12px; }
+.tg-friend-choice > span:nth-last-child(2) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tg-friend-choice small { color: var(--text-3); font-size: 10px; }
+.tg-friend-choice input { accent-color: var(--accent); }
+.tg-friend-choice:has(input:disabled) { opacity: .5; }
+.tg-tabs { display: flex; gap: 6px; }
+.tg-tabs .btn { flex: 1; }
+.tg-tabs .btn[aria-pressed="true"] { background: var(--glass-light); color: var(--accent); border-color: var(--accent); }
+.tg-sharing { gap: 10px; }
+.tg-sharing > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tg-sharing > .btn { flex: none; }

@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/player", "crates/devices", "crates/script", "crates/axes", "crates/tracking", "crates/detect", "crates/beat", "crates/model", "crates/hero", "crates/core", "crates/napi"]
+
+[workspace.package]
+edition = "2024"
+version = "0.0.1"
+publish = false
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+bp-player = { path = "crates/player" }
+bp-devices = { path = "crates/devices" }
+bp-script = { path = "crates/script" }
+bp-axes = { path = "crates/axes" }
+bp-tracking = { path = "crates/tracking" }
+bp-detect = { path = "crates/detect" }
+bp-beat = { path = "crates/beat" }
+bp-model = { path = "crates/model" }
+bp-hero = { path = "crates/hero" }
+bp-core = { path = "crates/core" }
+
+[profile.release]
+debug = 1
+lto = "thin"
+codegen-units = 1

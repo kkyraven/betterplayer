@@ -1,0 +1,40 @@
+.dviz {
+  position: absolute; right: 24px; top: 50%; transform: translateY(-50%);
+  display: grid; gap: 14px; justify-items: center; width: 120px;
+  opacity: 0.85; filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.55));
+}
+
+.dviz-stroker { width: 120px; height: 150px; overflow: visible; }
+.dviz-stroker .base { fill: rgba(255, 255, 255, 0.08); stroke: rgba(255, 255, 255, 0.25); }
+.dviz-stroker .rail { stroke: rgba(255, 255, 255, 0.18); stroke-dasharray: 2 4; }
+.dviz-stroker .body { fill: rgba(var(--accent-rgb), 0.28); stroke: var(--accent); stroke-width: 1.5; }
+.dviz-stroker .band { fill: rgba(255, 255, 255, 0.35); }
+.dviz-stroker .top { fill: rgba(var(--accent-rgb), 0.55); stroke: var(--accent); stroke-width: 1.5; }
+.dviz-stroker .vibe path { fill: none; stroke: #fff; stroke-width: 2; stroke-linecap: round; }
+.dviz-stroker .vibe text { font: 600 9px var(--mono); fill: #fff; text-anchor: middle; }
+
+.dviz-electrodes { display: flex; gap: 8px; }
+.eb { display: grid; gap: 4px; justify-items: center; }
+.eb i { width: 12px; height: 48px; border-radius: 4px; background: rgba(255, 255, 255, 0.12); position: relative; overflow: hidden; }
+.eb i::after { content: ''; position: absolute; inset: 0; transform-origin: bottom; transform: scaleY(var(--p, 0)); background: var(--accent); border-radius: 4px; }
+.eb b { font: 600 10px var(--mono); color: var(--text); }
+
+.dviz-radial { width: 84px; height: 84px; }
+.dviz-radial .ring { fill: rgba(255, 255, 255, 0.05); stroke: rgba(255, 255, 255, 0.25); }
+.dviz-radial .axis { stroke: rgba(255, 255, 255, 0.12); }
+.dviz-radial .pole { fill: rgba(255, 255, 255, 0.4); }
+.dviz-radial .dot { fill: var(--accent); }
+
+.dviz-close { position: absolute; right: 0; top: -24px; width: 24px; height: 24px; display: grid; place-items: center; border: 0; border-radius: 5px; color: var(--text-2); background: rgba(10, 12, 16, 0.45); cursor: pointer; }
+.dviz-close:hover, .dviz-close:focus-visible { color: var(--text); background: rgba(10, 12, 16, 0.8); }
+.dviz-close { pointer-events: auto; }
+.dviz-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.dviz-restim { display: grid; gap: 14px; justify-items: center; width: 120px; }
+.dviz-sent { width: 120px; display: grid; gap: 9px; border-top: 1px solid rgba(255, 255, 255, 0.2); padding-top: 12px; font: 10px var(--mono); }
+.dviz-sent-row { display: grid; grid-template-columns: 18px 1fr 28px; gap: 7px; align-items: center; }
+.dviz-sent-row > span:first-child { color: var(--text-2); }
+.dviz-sent-row b { text-align: right; font-weight: 500; font-variant-numeric: tabular-nums; }
+.dviz-meter { height: 3px; border-radius: 2px; background: rgba(255, 255, 255, 0.12); overflow: hidden; }
+.dviz-meter i { display: block; height: 100%; background: var(--accent); transform-origin: left; }
+.dviz [hidden] { display: none; }
+.dviz-electrodes:not(:has(.eb:not([hidden]))), .dviz-sent:not(:has(.dviz-sent-row:not([hidden]))) { display: none; }

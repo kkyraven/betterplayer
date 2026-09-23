@@ -1,0 +1,18 @@
+.icon-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: var(--text-2);
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease), transform 80ms var(--ease);
+}
+.icon-btn:hover { background: var(--glass-light); color: var(--text); }
+.icon-btn:active { transform: scale(0.97); }
+.icon-btn:disabled { opacity: 0.45; pointer-events: none; }
+.icon-btn svg { width: 18px; height: 18px; }
+.icon-btn-sm { width: 26px; height: 26px; }
+.icon-btn-sm svg { width: 14px; height: 14px; }
+.icon-btn-lg { width: 40px; height: 40px; color: var(--text); }
+.icon-btn-lg svg { width: 22px; height: 22px; }
+.icon-btn.on { background: var(--accent-soft); color: var(--text); }

@@ -1,0 +1,4 @@
+.numf { display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--well); transition: border-color var(--t-fast) var(--ease); }
+.numf:focus-within { border-color: var(--line-2); }
+.numf input { background: none; border: 0; outline: 0; text-align: right; font: 500 12px var(--mono); color: var(--text); font-variant-numeric: tabular-nums; min-width: 0; }
+.numf em { font-style: normal; font-size: 11px; color: var(--text-3); white-space: nowrap; }

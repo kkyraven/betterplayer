@@ -1,0 +1,18 @@
+.audio-art { position: absolute; inset: 0; z-index: 1; overflow: hidden; background: var(--bg-2); }
+.audio-art .bg { position: absolute; inset: -60px; background-size: cover; background-position: center; filter: blur(56px) saturate(150%); transform: scale(1.1); }
+.audio-art .bg.none { background: radial-gradient(70% 60% at 30% 30%, rgba(var(--accent-rgb), 0.28), transparent 60%), radial-gradient(60% 50% at 76% 76%, rgba(60, 120, 200, 0.22), transparent 60%), var(--bg-2); filter: none; }
+.audio-art .tint { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(6, 7, 10, 0.42), rgba(6, 7, 10, 0.58)); }
+.audio-art .body { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 28px; padding: 64px 32px 100px; }
+.audio-art .cover { flex: none; width: min(34vh, 260px); aspect-ratio: 1; border-radius: 12px; background-size: cover; background-position: center; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.08) inset; }
+.audio-art .cover.none { display: grid; place-items: center; background: linear-gradient(160deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.03)); color: var(--text-3); }
+.audio-art .cover.none svg { width: 34%; height: 34%; stroke-width: 1.25; }
+.audio-art .text { display: grid; gap: 6px; min-width: 0; max-width: 40vw; }
+.audio-art .text h1 { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.01em; text-shadow: 0 1px 10px rgba(0, 0, 0, 0.4); overflow-wrap: anywhere; }
+.audio-art .text p { margin: 0; }
+.audio-art .text .artist { font-size: 14px; color: var(--text-2); }
+.audio-art .text .album { margin-top: 6px; font-size: 13px; color: var(--text-3); }
+.audio-art .cover, .audio-art .bg { transition: opacity var(--t-ui) var(--ease); }
+@starting-style { .audio-art .cover, .audio-art .bg { opacity: 0; } }
+.audio-art[data-compact] .body { padding: 0; gap: 0; }
+.audio-art[data-compact] .cover { width: auto; height: 100%; border-radius: 0; box-shadow: none; }
+.audio-art[data-compact] .cover.none svg { width: 45%; height: 45%; }

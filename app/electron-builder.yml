@@ -1,0 +1,126 @@
+appId: com.kinkyraven.betterplayer
+productName: Better Player
+copyright: Copyright © 2026 kinkyraven
+directories:
+  output: dist
+  buildResources: build
+files:
+  - out/**
+  - package.json
+extraResources:
+  - from: resources/engine
+    to: engine
+  - from: models
+    to: models
+  - from: build/icon.png
+    to: icon.png
+npmRebuild: false
+fileAssociations:
+  - name: Video
+    role: Viewer
+    mimeType: video/mp4
+    ext: [mp4, m4v, mkv, mk3d, webm, mov, avi, divx, wmv, asf, ts, m2ts, mts, mpg, mpeg, m2v, vob, flv, f4v, 3gp, 3g2, ogv, ogm, mxf, dv, rm, rmvb, wtv, ivf, h264, "264", hevc, h265, "265"]
+  - name: Audio
+    role: Viewer
+    mimeType: audio/mpeg
+    ext: [mp3, mp2, aac, ac3, dts, m4a, flac, wav, w64, aiff, aif, au, caf, ogg, oga, opus, mka, wma, wv, tta]
+publish:
+  provider: generic
+  url: https://download.kinkyraven.com
+
+mac:
+  icon: build/icon.icns
+  target:
+    - target: dmg
+      arch: [arm64]
+    - target: zip
+      arch: [arm64]
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  notarize: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  category: public.app-category.video
+  artifactName: betterplayer-mac-${version}.${ext}
+  extendInfo:
+    NSBluetoothAlwaysUsageDescription: Better Player connects to Bluetooth devices.
+    NSAudioCaptureUsageDescription: Better Player uses game audio to track the beat.
+
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: betterplayer-windows-${version}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  shortcutName: Better Player
+
+linux:
+  icon: build/icon.png
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+    - target: rpm
+      arch: [x64]
+    - target: flatpak
+      arch: [x64]
+  category: AudioVideo
+  executableName: betterplayer
+  mimeTypes:
+    - video/mp4
+    - video/x-matroska
+    - video/webm
+    - video/quicktime
+    - video/x-msvideo
+    - video/x-ms-wmv
+    - video/x-ms-asf
+    - video/mp2t
+    - video/mpeg
+    - video/x-flv
+    - video/3gpp
+    - video/ogg
+    - application/mxf
+    - audio/mpeg
+    - audio/aac
+    - audio/ac3
+    - audio/mp4
+    - audio/flac
+    - audio/wav
+    - audio/x-aiff
+    - audio/ogg
+    - audio/opus
+    - audio/x-matroska
+    - audio/x-ms-wma
+    - audio/x-wavpack
+  artifactName: betterplayer-linux-${version}.${ext}
+deb:
+  depends: [libc6 (>= 2.39), libegl1, libgl1, libvulkan1, libgbm1, libdrm2, libva2, libva-drm2, libva-x11-2, libva-wayland2, libgtk-3-0, libnss3, libasound2t64, libxss1, libxtst6, fontconfig, fonts-dejavu-core, xdg-utils]
+rpm:
+  depends: [glibc >= 2.39, libglvnd-egl, libglvnd-glx, vulkan-loader, mesa-libgbm, libdrm, libva, gtk3, nss, alsa-lib, libXScrnSaver, libXtst, fontconfig, dejavu-sans-fonts, xdg-utils]
+flatpak:
+  runtime: org.freedesktop.Platform
+  sdk: org.freedesktop.Sdk
+  base: org.electronjs.Electron2.BaseApp
+  runtimeVersion: "25.08"
+  baseVersion: "25.08"
+  branch: stable
+  useWaylandFlags: true
+  finishArgs:
+    - --share=ipc
+    - --socket=wayland
+    - --socket=fallback-x11
+    - --device=dri
+    - --socket=pulseaudio
+    - --share=network
+    - --talk-name=org.freedesktop.Notifications
+    - --filesystem=home
+    - --filesystem=/media
+    - --filesystem=/run/media
+    - --filesystem=/mnt
+    - --device=all
+    - --system-talk-name=org.bluez

@@ -1,0 +1,33 @@
+.admin-error { color: var(--danger); margin-bottom: 16px; }
+.admin-tiles { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+.admin-tile { display: grid; gap: 2px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--r); background: var(--glass-light); }
+.admin-tile-l { font-size: 12px; color: var(--text-2); }
+.admin-tile-v { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.admin-tile-s { font-size: 12px; color: var(--text-3); }
+
+.admin-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.admin-card { min-width: 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--r); background: var(--glass-light); }
+.admin-card.wide { grid-column: 1 / -1; }
+.admin-card header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+.admin-card h2 { margin: 0; font-size: 13px; font-weight: 600; color: var(--text-2); flex: 1; }
+.admin-card-v { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.admin-empty { padding: 20px 0; text-align: center; color: var(--text-3); font-size: 13px; }
+
+.admin-chart { display: block; width: 100%; height: auto; }
+.admin-chart .grid { stroke: var(--line); stroke-width: 1; }
+.admin-chart .axis { fill: var(--text-3); font-size: 10px; }
+.admin-chart .line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.admin-chart .area { fill: var(--accent); opacity: 0.12; }
+.admin-chart .bar { fill: var(--accent); opacity: 0.7; }
+.admin-chart .bar.on { opacity: 1; }
+.admin-chart .cross { stroke: var(--line-2); stroke-width: 1; }
+.admin-chart .dot { fill: var(--accent); stroke: var(--bg); stroke-width: 2; }
+
+.admin-bars { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.admin-bars li { display: grid; grid-template-columns: 180px 1fr 90px; align-items: center; gap: 10px; font-size: 13px; }
+.admin-bars .k { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.admin-bars .k.mono { font: 12px var(--mono); }
+.admin-bars .track { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; }
+.admin-bars .fill { display: block; height: 100%; border-radius: 4px; background: var(--accent); }
+.admin-bars .n { text-align: right; font-variant-numeric: tabular-nums; }
+.admin-bars .faint { color: var(--text-3); }

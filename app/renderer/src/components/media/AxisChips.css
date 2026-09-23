@@ -1,0 +1,12 @@
+.axes { display: inline-flex; gap: 3px; }
+.axis {
+  font: 600 10.5px/1 var(--mono);
+  letter-spacing: 0.02em;
+  padding: 3px 5px;
+  border-radius: 5px;
+  background: var(--well);
+  border: 1px solid var(--line-2);
+  color: var(--text);
+}
+.axis-none { color: var(--text-3); background: var(--well); border-style: dashed; font-weight: 500; }
+.thumb .axis, .lib-sheet .hero .axis { background: rgba(0, 0, 0, 0.55); border-color: rgba(255, 255, 255, 0.14); color: #eef0f4; }

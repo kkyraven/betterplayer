@@ -1,0 +1,4 @@
+.media-search-match { color: var(--text-2); font-size: 11px; line-height: 18px; height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.media-search-match > span { color: var(--text-3); }
+.media-search-match mark { color: var(--accent); background: var(--accent-soft); border-radius: 2px; }
+.card .media-search-match { margin-top: 4px; }

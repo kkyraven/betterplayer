@@ -1,0 +1,43 @@
+.tv-scrim { position: absolute; inset: 0; background: rgba(6, 8, 12, 0.55); z-index: 10; }
+
+.tv-sheet {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 520px; padding: 44px 40px; z-index: 11; display: grid; grid-template-rows: auto 1fr; gap: 16px;
+  background: var(--glass-float); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border-left: 1px solid var(--line-2); box-shadow: var(--shadow);
+}
+.tv-sheet h2 { font-size: 24px; margin: 0; }
+.tv-sheet-body { display: grid; gap: 6px; align-content: start; overflow: auto; margin: 0 -8px; padding: 0 8px; scrollbar-width: none; }
+.tv-sheet-body::-webkit-scrollbar { display: none; }
+
+.tv-dialog {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 460px; padding: 28px; border-radius: 22px; z-index: 11; display: grid; gap: 10px;
+  background: var(--glass-float); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border: 1px solid var(--line-2); box-shadow: var(--shadow);
+}
+.tv-dialog h2 { font-size: 22px; margin: 0 0 10px; }
+.tv-dialog button { height: 64px; padding: 0 22px; border-radius: 16px; display: flex; align-items: center; gap: 16px; font-size: 20px; font-weight: 600; color: var(--text-2); background: var(--glass-light); border: 1px solid var(--line); text-align: left; }
+.tv-dialog button svg { width: 24px; height: 24px; }
+.tv .tv-dialog button:focus { outline: 3px solid var(--accent); outline-offset: 2px; color: var(--text); border-radius: 16px; }
+.tv .tv-dialog button.danger:focus { outline-color: var(--danger); }
+
+.tvrow { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 20px; min-height: 64px; padding: 10px 20px; border-radius: 14px; color: var(--text-2); outline: 0; }
+.tvrow .l { display: grid; gap: 3px; min-width: 0; }
+.tvrow .l b { font-size: 19px; font-weight: 600; color: var(--text); }
+.tvrow .l small { font-size: 14px; color: var(--text-3); }
+.tvrow .v { display: flex; align-items: center; gap: 14px; font-size: 19px; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.tvrow .v svg { width: 22px; height: 22px; color: var(--text-3); }
+.tvrow .v .sw { width: 52px; height: 30px; border-radius: 15px; background: rgba(var(--ink), 0.14); position: relative; transition: background var(--t-fast) var(--ease); }
+.tvrow .v .sw::after { content: ''; position: absolute; top: 3px; left: 3px; width: 24px; height: 24px; border-radius: 50%; background: var(--text-2); transition: left var(--t-fast) var(--ease), background var(--t-fast) var(--ease); }
+.tvrow .v .sw.on { background: var(--accent); }
+.tvrow .v .sw.on::after { left: 25px; background: var(--accent-ink); }
+.tvrow .v .act { height: 40px; padding: 0 16px; border-radius: 10px; display: inline-flex; align-items: center; gap: 8px; font-size: 16px; background: var(--glass-light); border: 1px solid var(--line); }
+.tvrow .v .act svg { width: 18px; height: 18px; color: inherit; }
+.tv .tvrow:focus { background: var(--glass-light); outline: 3px solid var(--accent); outline-offset: 0; border-radius: 14px; }
+.tvrow:focus .v svg { color: var(--text); }
+.tvrow.dim { opacity: 0.45; }
+.tv-rows-eyebrow { font-size: 13px; margin: 18px 0 6px 20px; display: block; }
+
+.tv-toast {
+  position: absolute; top: 120px; left: 50%; transform: translateX(-50%); z-index: 12; padding: 12px 20px; border-radius: 14px; font-size: 18px; font-weight: 600; pointer-events: none;
+  background: var(--glass-float); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border: 1px solid var(--line-2); box-shadow: var(--shadow);
+  opacity: 0; transition: opacity 400ms var(--ease);
+}
+.tv-toast.on { opacity: 1; transition-duration: 80ms; }

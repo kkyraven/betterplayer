@@ -1,0 +1,53 @@
+.wiz { display: grid; gap: 18px; }
+.wiz > * { min-width: 0; }
+.wiz .steps { display: flex; gap: 8px; }
+.wiz .step { display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 12px 0 6px; border-radius: 14px; font-size: 12.5px; color: var(--text-3); border: 1px solid transparent; }
+.wiz .step .n { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; font: 600 11px var(--mono); background: rgba(var(--ink), 0.08); color: var(--text-2); }
+.wiz .step .n svg { width: 11px; height: 11px; stroke-width: 3; }
+.wiz .step.done .n { background: var(--ok); color: var(--accent-ink); }
+.wiz .step.on { color: var(--text); background: var(--glass-light); border-color: var(--line); }
+.wiz .step.on .n { background: var(--accent); color: var(--accent-ink); }
+.wiz h1 { font-size: 24px; }
+.wiz p { margin: 4px 0 0; color: var(--text-2); }
+
+.wiz .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.wiz .tile {
+  display: grid;
+  grid-template-columns: 36px 1fr;
+  gap: 2px 12px;
+  align-items: center;
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: rgba(var(--ink), 0.03);
+  text-align: left;
+  transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease), transform 80ms var(--ease);
+}
+.wiz .tile:hover { background: var(--glass-light); }
+.wiz .tile:active { transform: scale(0.98); }
+.wiz .tile .ic { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--glass-light); color: var(--text-2); grid-row: span 2; }
+.wiz .tile .ic svg { width: 18px; height: 18px; }
+.wiz .tile b { font-weight: 600; }
+.wiz .tile > span:last-child { color: var(--text-3); font-size: 12px; }
+.wiz .tile.on { border-color: rgba(var(--accent-rgb), 0.5); background: var(--accent-soft); }
+.wiz .tile.on .ic { background: var(--accent); color: var(--accent-ink); }
+
+.wiz .panel .prow { gap: 10px; }
+.wiz .panel .prow .lbl { max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wiz .panel .prow .sub { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wiz .panel .prow .spacer { flex: 0 0 0; }
+.wiz .panel .prow .pill-status { flex: none; white-space: nowrap; }
+.wiz .panel .prow .input.url { width: 260px; height: 28px; font-size: 12px; }
+.wiz .panel .prow .input.port-pick { width: 190px; }
+.wiz .panel .prow .input.baud { width: 84px; }
+.wiz .panel.net .prow { padding: 12px 14px; align-items: flex-end; }
+.wiz .panel.net .seg { flex: none; margin-bottom: 0; align-self: flex-end; }
+.wiz .panel.net .field { flex: 1; }
+.wiz .panel.net .field .input.port { width: 90px; }
+.wiz .panel.net .field:has(.port) { flex: none; }
+.wiz .panel.net .field-hint { display: none; }
+.wiz .ft { display: flex; align-items: center; gap: 8px; padding-top: 6px; }
+.wiz .ft .spacer { flex: 1; }
+
+.wiz .shock-setup .prow { padding-block: 10px; flex-wrap: wrap; }
+.wiz .shock-setup .field { flex: 1; min-width: 0; }

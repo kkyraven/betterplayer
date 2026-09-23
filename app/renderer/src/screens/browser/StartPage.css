@@ -1,0 +1,24 @@
+.bstart { height: 100%; min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
+.bstart-centre { flex: 1; min-height: 100px; display: flex; align-items: center; justify-content: center; padding: 24px; }
+.bstart-search { display: flex; align-items: center; gap: 15px; width: min(610px, 80%); height: 65px; padding: 0 4px; border-bottom: 1px solid var(--line-2); }
+.bstart-search:focus-within { border-color: var(--accent); }
+.bstart-search > svg { color: var(--accent); }
+.bstart-search input { flex: 1; min-width: 0; background: none; border: 0; outline: none; font-size: 22px; color: var(--text); }
+.bstart-search input::placeholder { color: var(--text-2); }
+.bstart-search button { width: 36px; height: 36px; flex: none; display: grid; place-items: center; color: var(--accent); border-radius: 6px; cursor: pointer; }
+.bstart-search button:disabled { color: var(--text-3); cursor: default; }
+.bstart-search button:not(:disabled):hover { background: var(--accent-soft); }
+.bstart-search button:not(:disabled):active { transform: scale(.96); }
+.bstart-visits { flex: none; width: min(1050px, 90%); margin: 0 auto 38px; overflow-x: auto; scrollbar-width: thin; }
+.bstart-visit-row { display: flex; justify-content: center; gap: 24px; width: max-content; min-width: 100%; padding: 8px 4px; }
+.bstart-visit { display: flex; flex-direction: column; align-items: center; gap: 12px; width: 88px; padding: 10px 0; color: var(--text-2); font-size: 12px; cursor: pointer; background: none; border: 0; }
+.bstart-site-icon { flex: none; object-fit: contain; }
+.bstart-visit > span { width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.bstart-visit:hover { color: var(--text); }
+.bstart-visit:active { transform: translateY(1px); }
+@media (max-width: 600px) {
+  .bstart-search { width: 100%; gap: 12px; }
+  .bstart-search input { font-size: 19px; }
+  .bstart-visits { margin-bottom: 20px; }
+  .bstart-visit-row { gap: 12px; }
+}

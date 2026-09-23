@@ -1,0 +1,10 @@
+.swatches { display: flex; gap: 8px; }
+.swatch { width: 22px; height: 22px; border-radius: 50%; background: var(--c); position: relative; box-shadow: 0 0 0 1px rgba(var(--ink), 0.12) inset; transition: transform var(--t-fast) var(--ease); }
+.swatch:hover { transform: scale(1.1); }
+.swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.swatch[aria-checked='true'] { box-shadow: 0 0 0 2px var(--bg-2), 0 0 0 4px var(--c); }
+.swatch[aria-checked='true']::after { content: ''; position: absolute; inset: 7px; border-radius: 50%; background: var(--bg-2); }
+.swatch.none { background: transparent; box-shadow: 0 0 0 1.5px var(--line-2) inset; }
+.swatch.none::before { content: ''; position: absolute; left: 4px; right: 4px; top: 50%; height: 1.5px; background: var(--line-2); transform: rotate(-45deg); }
+.swatch.none[aria-checked='true'] { box-shadow: 0 0 0 1.5px var(--line-2) inset, 0 0 0 2px var(--bg-2), 0 0 0 4px var(--text-3); }
+.swatch.none[aria-checked='true']::after { display: none; }

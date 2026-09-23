@@ -1,0 +1,40 @@
+:is(.sheet, .menu, .win-menu, .track-menu, .axes-pop, .varmenu, .bbookmark-menu) {
+  transform-origin: var(--radix-dropdown-menu-content-transform-origin, var(--radix-popover-content-transform-origin, top));
+}
+:is(.sheet, .menu, .win-menu, .track-menu, .axes-pop, .varmenu, .bbookmark-menu)[data-state='open'] {
+  animation: surface-in 160ms var(--ease);
+}
+@keyframes surface-in {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+
+.disclosure-content {
+  display: grid;
+  gap: inherit;
+  align-content: start;
+  min-height: 0;
+  interpolate-size: allow-keywords;
+  height: auto;
+  overflow: hidden;
+  transition: height var(--t-ui) var(--ease), opacity var(--t-ui) var(--ease);
+}
+@starting-style {
+  .disclosure-content { height: 0; opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  @keyframes surface-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  .disclosure-content { transition: opacity var(--t-ui) var(--ease); }
+  @starting-style { .disclosure-content { height: auto; } }
+  .lib-sidebar, .lib-sidebar-gap { transition: none; }
+}
+
+:root[data-input='keyboard'] :is(.sheet, .menu, .win-menu, .track-menu, .axes-pop, .varmenu, .bbookmark-menu)[data-state='open'] {
+  animation: none;
+}
+:root[data-input='keyboard'] :is(.select-bar, .psheet, .disclosure-content, .setup .step, .lib-sidebar, .lib-sidebar-gap) {
+  transition: none;
+}

@@ -1,0 +1,55 @@
+.setup {
+  margin: 0 -24px;
+  padding: 0 24px 12px;
+  background: var(--glass-light);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border-bottom: 1px solid var(--line);
+}
+.setup-hd { display: flex; align-items: center; height: 40px; }
+.setup-close { margin-left: auto; }
+.setup-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px 24px; }
+.setup-steps > .step {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  margin: 0 -12px;
+  padding: 12px;
+  transition: opacity var(--t-ui) var(--ease) var(--d, 0s), transform var(--t-ui) var(--ease) var(--d, 0s), background var(--t-fast) var(--ease);
+}
+.setup-steps > .step:nth-child(2) { --d: 40ms; }
+.setup-steps > .step:nth-child(3) { --d: 80ms; }
+@starting-style { .setup .step { opacity: 0; transform: translateY(6px); } }
+@media (prefers-reduced-motion: reduce) { @starting-style { .setup .step { transform: none; } } }
+.setup-steps > .step .num {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(var(--ink), 0.08);
+  color: var(--text-2);
+}
+.setup-steps > .step .num svg { width: 13px; height: 13px; }
+.setup-steps > .step .txt { flex: 1; min-width: 0; display: grid; }
+.setup-steps > .step .txt b { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.setup-steps > .step .txt .sub { font-size: 12px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.setup-steps > .step.next {
+  margin: 0 -12px -12px;
+  padding: 12px 12px 24px;
+  border-radius: 8px 8px 0 0;
+  background: var(--accent-soft);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+}
+.setup-steps > .step.next .num { background: var(--accent); color: var(--accent-ink); }
+.setup-steps > .step.dim { opacity: 0.55; }
+.setup-steps > .step.dim .num { color: var(--ok); }
+@media (max-width: 1260px) {
+  .setup-steps { grid-template-columns: 1fr; row-gap: 0; }
+  .setup-steps > .step.next { margin: 0 -12px; padding: 12px; border-radius: 8px; }
+}

@@ -1,0 +1,75 @@
+.bwrap { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; position: relative; }
+.bchrome { background: var(--glass-strong); border-bottom: 1px solid var(--line); flex: none; }
+.bpage { flex: 1; min-height: 0; background: var(--bg); }
+
+.tabs { display: flex; align-items: flex-end; gap: 4px; padding: 8px 12px 0; }
+.tab { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 6px 0 12px; border-radius: 9px 9px 0 0; color: var(--text-3); font-size: 12.5px; max-width: 260px; min-width: 0; }
+.tab svg, .tab img { width: 12px; height: 12px; flex: none; }
+.tab-loading { animation: tab-loading-rotate 1s linear infinite; }
+@keyframes tab-loading-rotate { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .tab-loading { animation: none; } }
+.tab > span { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tab:hover { color: var(--text-2); }
+.tab.on { background: rgba(var(--ink), 0.06); color: var(--text); box-shadow: 0 0 0 1px var(--line) inset; }
+.tab-close { width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; color: var(--text-3); flex: none; }
+.tab-close:hover { background: var(--glass-light); color: var(--text); }
+.tab-audio { width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; color: var(--text-3); flex: none; }
+.tab-audio.muted { color: var(--text-2); }
+.tab-audio:hover { background: var(--glass-light); color: var(--text); }
+.tabs .icon-btn { margin-bottom: 2px; }
+
+.addr { display: flex; align-items: center; gap: 4px; padding: 6px 12px 8px; }
+.url { flex: 1; display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 6px 0 12px; border-radius: 9px; background: var(--well); border: 1px solid var(--line); font-size: 13px; margin: 0 6px; min-width: 0; transition: border-color var(--t-fast) var(--ease); }
+.url:focus-within { border-color: var(--line-2); }
+.url > svg { width: 12px; height: 12px; color: var(--text-3); flex: none; }
+.url input { flex: 1; min-width: 0; background: none; border: 0; outline: 0; color: var(--text); font-size: 13px; }
+.url input::placeholder { color: var(--text-3); }
+.chip { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 8px; border-radius: 7px; font-size: 11px; color: var(--text-2); background: var(--glass-light); border: 1px solid var(--line); white-space: nowrap; }
+.chip svg { width: 11px; height: 11px; }
+.addr .btn.on { color: var(--accent); }
+
+.bchrome[hidden] { display: none; }
+.bpage { position: relative; overflow: hidden; }
+.bpreview { width: 100%; height: 100%; object-fit: fill; display: block; }
+.breveal { position: absolute; top: 0; left: 0; right: 0; height: 8px; z-index: 10; }
+.bfullscreen .bchrome { padding-top: 8px; }
+.bfullscreen:has(.bchrome[hidden]) .bpage { margin-top: 8px; }
+:root[data-platform='win32'] .bfullscreen .tabs { margin-right: var(--caption-inset); }
+.bwrap .tabs { overflow-x: auto; scrollbar-width: thin; }
+.bwrap .tab { flex: 0 0 190px; cursor: default; user-select: none; touch-action: none; }
+.tabs.dragging .tab { transition: transform 150ms var(--ease); }
+.tabs .tab.dragged { position: relative; z-index: 1; transition: none; }
+.bwrap .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.addr .icon-btn.on { color: var(--accent); }
+.badblock { display: flex; align-items: center; gap: 6px; padding: 6px; color: var(--text-3); font-size: 12px; white-space: nowrap; border-radius: 6px; }
+.badblock[aria-pressed='true'] { color: var(--accent); }
+.badblock:hover { background: var(--glass-light); }
+.badblock svg { width: 16px; height: 16px; }
+.badblock[data-state='open'] { background: var(--glass-light); }
+.badblock-menu { z-index: 50; display: grid; gap: 6px; width: 260px; max-width: calc(100vw - 24px); padding: 12px; background: var(--popover); border: 1px solid var(--line-2); border-radius: 9px; box-shadow: var(--shadow); font-size: 12px; }
+.badblock-menu strong { color: var(--text); font-weight: 600; }
+.badblock-menu p { margin: 0; color: var(--text-2); }
+.badblock-menu .btn { justify-self: start; margin-top: 4px; }
+.badblock-login { justify-self: start; margin-top: 2px; padding: 0; color: var(--text-3); font-size: 11px; }
+.badblock-login:hover { color: var(--text); text-decoration: underline; }
+.bbookmarks { display: flex; gap: 4px; align-items: center; overflow-x: auto; scrollbar-width: thin; padding: 0 12px 5px; }
+.bsite { display: flex; align-items: center; gap: 7px; padding: 6px 9px; color: var(--text-2); font-size: 12px; white-space: nowrap; border-radius: 6px; flex: none; }
+.bsite > svg:last-child { width: 12px; height: 12px; }
+.bsite:hover, .bsite[data-state='open'] { background: var(--glass-light); color: var(--text); }
+.bbookmark-menu { z-index: 50; width: 280px; max-width: calc(100vw - 24px); max-height: min(380px, var(--radix-popover-content-available-height)); overflow-y: auto; padding: 5px; background: var(--popover); border: 1px solid var(--line-2); border-radius: 9px; box-shadow: var(--shadow); }
+.bbookmark { display: flex; align-items: center; gap: 4px; border-radius: 5px; }
+.bbookmark:hover { background: var(--glass-light); }
+.bbookmark a { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; padding: 9px; color: var(--text); font-size: 12px; text-decoration: none; }
+.bbookmark a span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bbookmark > button { display: grid; place-items: center; width: 28px; height: 28px; flex: none; color: var(--text-3); border-radius: 5px; }
+.bbookmark > button:hover { color: var(--text); background: var(--glass-light); }
+.bbookmark > button svg { width: 13px; height: 13px; }
+.bwrap button:focus-visible, .bbookmark-menu :focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (max-width: 1100px) { .badblock span { display: none; } }
+
+.faptap ol { display: grid; gap: 10px; margin: 0; padding-left: 20px; font-size: 13px; }
+.faptap li { display: grid; gap: 3px; }
+.faptap li::marker { color: var(--text-3); }
+.faptap li .faint { font-size: 12px; }
+.faptap li .err { color: var(--danger); }
+.faptap code { justify-self: start; padding: 2px 6px; border-radius: 5px; background: var(--well); border: 1px solid var(--line); font-size: 12px; user-select: all; }

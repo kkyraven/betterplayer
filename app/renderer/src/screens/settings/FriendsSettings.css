@@ -1,0 +1,33 @@
+.set-account.set-friends { gap: 0; }
+.friends-roster { min-height: 164px; }
+.friends-empty { min-height: 164px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--text-2); font-size: 13px; }
+.friends-empty svg { width: 26px; height: 26px; color: var(--text-3); stroke-width: 1.5; }
+.friend-avatar { display: grid; place-items: center; width: 32px; height: 32px; flex: none; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 500; }
+.set-friends .friend-row { display: flex; align-items: center; padding: 16px 0; gap: 10px; }
+.friends-roster .friend-row + .friend-row { border-top: 1px solid var(--line); }
+.set-friends .fr-n { flex: 1; overflow-wrap: anywhere; }
+.set-friends .fr-n .lbl { display: flex; align-items: center; gap: 7px; }
+.set-friends .fr-n .sub { color: var(--text-2); margin-top: 4px; font: 11px var(--mono); }
+.friends-add { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; padding: 20px 0 0; border-top: 1px solid var(--line); }
+.set-friends .friends-add .field { min-width: 0; max-width: none; }
+.friends-add .input, .friends-add .btn { height: 40px; }
+.friends-add .input { width: 100%; min-width: 0; }
+.friends-add > .error { grid-column: 1 / -1; margin: 0; overflow-wrap: anywhere; }
+.account-panel[data-page='friends'] { padding-bottom: 0; max-width: var(--radix-popover-content-available-width); }
+.account-panel[data-page='friends'] .account-heading { border-bottom: 1px solid var(--line); margin-inline: -8px; padding-inline: 20px; }
+.account-panel .set-account.set-friends { padding: 0; }
+.account-panel .set-friends .friends-roster { padding-inline: 16px; }
+.account-panel .set-account.set-friends .friend-row { flex-wrap: nowrap; padding: 16px 0; }
+.account-panel .friends-add { position: sticky; bottom: 0; margin-inline: -8px; padding: 20px 24px; background: var(--bg-2); }
+.account-panel .set-friends > .eyebrow { margin: 16px 16px 8px; }
+.account-panel .set-friends > .panel { margin: 0 16px 12px; }
+.account-panel .set-friends > .error { margin: 12px 16px; }
+
+.account-panel .set-account.set-friends .friends-add .field { min-width: 0; }
+.friends-add .input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.account-panel .set-account.set-friends > .panel .friend-row { padding-inline: 12px; }
+
+.friends-add-heading { grid-column: 1 / -1; display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; }
+.friends-own-code { color: var(--text-2); font-size: 11px; text-align: right; overflow-wrap: anywhere; border-radius: 3px; }
+.friends-own-code:hover { color: var(--accent); }

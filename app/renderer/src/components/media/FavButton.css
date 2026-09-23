@@ -1,0 +1,3 @@
+.fav.on { color: var(--danger); }
+.fav.on svg { fill: currentColor; }
+.fav.on:hover { color: var(--danger); }

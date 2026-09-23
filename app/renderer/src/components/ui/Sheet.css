@@ -1,0 +1,13 @@
+.sheet {
+  z-index: 30;
+  background: var(--popover);
+  backdrop-filter: var(--blur-strong);
+  -webkit-backdrop-filter: var(--blur-strong);
+  border: 1px solid var(--line-2);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 14px 16px 16px;
+  outline: 0;
+}
+.sheet-hd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.sheet-body { display: grid; gap: 12px; }
