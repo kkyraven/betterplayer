@@ -13,8 +13,8 @@ const seconds = (v: unknown) => {
   return Number.isFinite(n) && n > 0 ? n : 0
 }
 
-export async function probe(path: string): Promise<ProbeResult> {
-  const out = await runTool('ffprobe', ['-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', path], 20_000)
+export async function probe(path: string, signal?: AbortSignal): Promise<ProbeResult> {
+  const out = await runTool('ffprobe', ['-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', path], 20_000, signal)
   const json: unknown = JSON.parse(out)
   const streams = isObject(json) && Array.isArray(json.streams) ? json.streams : []
   const format = isObject(json) && isObject(json.format) ? json.format : {}

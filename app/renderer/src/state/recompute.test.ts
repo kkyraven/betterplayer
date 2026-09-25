@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { OutputState } from 'bp-engine'
+import type { OutputState, ScriptInfo } from 'bp-engine'
+import { defaultSettings } from '@shared/settings'
 import { defaultTrackAxes, defaultTrackingDefaults } from '@shared/tracking'
 
 const ipc = vi.hoisted(() => ({ invoke: vi.fn<(channel: string, ...args: unknown[]) => Promise<unknown>>() }))
@@ -11,6 +12,12 @@ const eng = vi.hoisted(() => ({
   beatState: vi.fn(() => ({ status: 'ready', fullStatus: 'ready', bpm: 120 })),
   play: vi.fn(),
   pause: vi.fn(),
+  setTrackOptions: vi.fn(),
+  setBeatOptions: vi.fn(),
+  setDetectOptions: vi.fn(),
+  setDetector: vi.fn(),
+  setModel: vi.fn(),
+  modelState: vi.fn(() => ({ status: 'none' })),
 }))
 vi.mock('@/ipc', () => ({ invoke: ipc.invoke, on: () => () => {} }))
 vi.mock('@/engine/client', () => ({ engine: eng, version: () => '0.0.1', applyEnhance: vi.fn(), warm: vi.fn(), models: () => [], axes: () => ['L0', 'L1', 'L2', 'R0', 'R1', 'R2'].map((id) => ({ id })) }))
@@ -20,6 +27,7 @@ import { settingsHash, waitForAudio } from './generated'
 import { useDevices } from './devices'
 import { usePlayer } from './player'
 import { useRecompute } from './recompute'
+import { useSettings } from './settings'
 import { useTracking } from './tracking'
 
 let PATH = ''
@@ -44,7 +52,8 @@ beforeEach(() => {
   eng.generateCancel.mockReset()
   eng.generateState.mockReturnValue({ status: 'idle', timeMs: 0, durationMs: 0 })
   PATH = `/videos/clip-${++n}.mp4`
-  usePlayer.setState({ path: PATH, snapshot: { ...usePlayer.getState().snapshot, loaded: true, paused: false } })
+  usePlayer.setState({ path: PATH, scripts: [], snapshot: { ...usePlayer.getState().snapshot, loaded: true, paused: false } })
+  useSettings.setState({ settings: null })
   useTracking.setState({ source: 'player', key: PATH, axes: defaultTrackAxes(), sensitivity: 1, present })
   useDevices.setState({ outputs: [], states: {} })
 })
@@ -131,6 +140,27 @@ describe('recompute', () => {
     useTracking.setState({ axes: { ...defaultTrackAxes(), R0: { ...defaultTrackAxes().R0, source: 'video' } } })
     await useRecompute.getState().check()
     expect(eng.generate).toHaveBeenCalledTimes(2)
+  })
+
+  it('leaves a file whose stroke is its own script alone when Settings say so', async () => {
+    connect()
+    usePlayer.setState({ scripts: [{ axis: 'L0', selected: true } as ScriptInfo] })
+    useTracking.setState({ axes: { ...defaultTrackAxes(), L0: { ...defaultTrackAxes().L0, source: 'off' } } })
+    useSettings.setState({ settings: { ...defaultSettings(), tracking: { ...defaultTrackingDefaults(), generateForScripted: false } } })
+    await useRecompute.getState().check()
+    expect(eng.generate).not.toHaveBeenCalled()
+    expect(useRecompute.getState().busy).toBe(false)
+    useSettings.setState({ settings: defaultSettings() })
+    await useRecompute.getState().check()
+    expect(eng.generate).toHaveBeenCalledTimes(1)
+  })
+
+  it('still runs with the setting off when the stroke is tracked', async () => {
+    connect()
+    usePlayer.setState({ scripts: [{ axis: 'L0', selected: true } as ScriptInfo] })
+    useSettings.setState({ settings: { ...defaultSettings(), tracking: { ...defaultTrackingDefaults(), generateForScripted: false } } })
+    await useRecompute.getState().check()
+    expect(eng.generate).toHaveBeenCalledTimes(1)
   })
 })
 

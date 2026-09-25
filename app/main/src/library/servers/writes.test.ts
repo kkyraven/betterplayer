@@ -127,7 +127,7 @@ describe('remote edits', () => {
     old.exec('DROP TABLE search_vocab; DROP TABLE search_fts; DROP TABLE search_pending; DROP TABLE media_performers; DROP TABLE performers; DROP TABLE media_details')
     old.exec('DROP TABLE remote_assets; DROP TABLE imported_groups; ALTER TABLE media DROP COLUMN strip_stamp')
     old.exec('ALTER TABLE media DROP COLUMN favourite; DROP TABLE saved_sessions; ALTER TABLE sessions DROP COLUMN name; ALTER TABLE sessions DROP COLUMN favourite; ALTER TABLE sessions DROP COLUMN ended_at; ALTER TABLE sessions DROP COLUMN status; ALTER TABLE sessions DROP COLUMN run_json')
-    old.exec('DROP TABLE remote_writes; PRAGMA user_version = 13')
+    old.exec('DROP TABLE remote_asset_jobs; DROP TABLE remote_writes; PRAGMA user_version = 13')
     old.close()
     const migrated = new LibraryDb(path)
     try {

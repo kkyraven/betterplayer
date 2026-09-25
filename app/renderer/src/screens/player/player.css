@@ -82,6 +82,10 @@
 .scrubber .preview .pt { aspect-ratio: 16 / 9; background-size: auto 100%; background-repeat: no-repeat; background-color: var(--bg-2); }
 .scrubber .preview .pl { display: flex; justify-content: space-between; padding: 5px 8px; font: 500 11px var(--mono); color: var(--text-2); }
 .scrubber .hovertime { position: absolute; bottom: 24px; transform: translateX(-50%); padding: 3px 7px; border-radius: 6px; background: var(--glass-strong); font: 500 11px var(--mono); color: var(--text); white-space: nowrap; pointer-events: none; }
+.scrubber .pl { display: flex; gap: 8px; align-items: baseline; }
+.scrubber .pl > span:first-child { flex-shrink: 0; }
+.scrubber .pl .faint { min-width: 0; overflow-wrap: anywhere; white-space: normal; }
+.scrubber .hovertime .pl { max-width: 240px; }
 
 .psheet {
   position: absolute; top: 60px; right: 16px; bottom: 110px; width: 340px;

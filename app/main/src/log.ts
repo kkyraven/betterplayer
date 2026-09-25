@@ -4,8 +4,8 @@ import { join } from 'node:path'
 
 export function logEvent(record: Record<string, unknown>) {
   const line = JSON.stringify({ time: new Date().toISOString(), version: app.getVersion(), ...record })
-  process.stderr.write(`${line}\n`)
   try {
+    process.stderr.write(`${line}\n`)
     const dir = join(app.getPath('userData'), 'logs')
     mkdirSync(dir, { recursive: true })
     appendFileSync(join(dir, 'process-errors.log'), `${line}\n`)

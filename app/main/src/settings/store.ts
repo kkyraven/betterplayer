@@ -521,6 +521,7 @@ function readCurrent(data: Json): Settings {
       models: readModels(tracking.models, str(tracking.model)),
       defaultPace: Math.max(0, Math.min(1, num(tracking.defaultPace, PACE_DEFAULT))),
       motionDefault: bool(tracking.motionDefault, true),
+      generateForScripted: bool(tracking.generateForScripted, true),
       regionSource: oneOf(tracking.regionSource, ['auto', 'centre'] as const, 'auto'),
       detectEveryMs: Math.max(100, num(tracking.detectEveryMs, DETECT_EVERY_DEFAULT_MS)),
       regionPadding: Math.max(0, Math.min(2, num(tracking.regionPadding, REGION_PADDING_DEFAULT))),
@@ -556,7 +557,8 @@ export function migrate(raw: unknown): Settings {
 function readJson(file: string): unknown {
   if (!existsSync(file)) return null
   try {
-    return JSON.parse(readFileSync(file, 'utf8'))
+    const text = readFileSync(file, 'utf8')
+    return JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text)
   } catch {
     return null
   }

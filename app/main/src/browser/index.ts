@@ -155,7 +155,7 @@ export class BrowserTabs {
     const dir = join(app.getPath('userData'), 'adblock')
     try {
       await mkdir(dir, { recursive: true })
-      const blocker = await ElectronBlocker.fromPrebuiltAdsAndTracking(fetch, {
+      const blocker = await ElectronBlocker.fromPrebuiltAdsAndTracking((url) => fetch(url, { signal: AbortSignal.timeout(15_000) }), {
         path: join(dir, 'engine.bin'),
         read: (path) => readFile(path).then((b) => new Uint8Array(b)),
         write: (path, buffer) => writeFile(path, buffer),

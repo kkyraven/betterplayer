@@ -11,6 +11,7 @@ import { HereSphereAdapter } from './heresphere'
 import { StashAdapter } from './stash'
 import { ServerSync, type SyncState } from './sync'
 import { ASSET_RECHECK_MS } from './images'
+import { ASSET_RETRY_MS } from './assets'
 
 const ENGINE = resolve(__dirname, '../../../../../engine/index.js')
 const FUNSCRIPT = '{"actions":[{"at":0,"pos":0},{"at":1000,"pos":100}]}'
@@ -140,6 +141,8 @@ function stashMock() {
     updatedAt: '2024-01-01T00:00:00Z',
     rating100: 80,
     failAsset: '',
+    holdAsset: '',
+    held: null as ServerResponse | null,
     onAsset: () => {},
     script: FUNSCRIPT,
     poster: JPEG_BYTES,
@@ -167,6 +170,7 @@ function stashMock() {
     handle(req: Req, res: ServerResponse) {
       if (req.headers.apikey !== 'k') return status(res, 401)
       if (req.path.startsWith('/scene/5/')) mock.onAsset()
+      if (mock.holdAsset && req.path === `/scene/5/${mock.holdAsset}`) { mock.held = res; return }
       if (mock.failAsset && req.path === `/scene/5/${mock.failAsset}`) return status(res, 503)
       if (req.path === '/scene/5/funscript') return bytes(res, Buffer.from(mock.script), 'application/json')
       if (req.path === '/scene/5/preview') return mock.preview ? bytes(res, mock.preview, 'video/mp4') : status(res, 404)
@@ -216,6 +220,7 @@ describe('ServerSync', () => {
   const run = async (root: ServerRoot) => {
     const state: SyncState = { done: 0, total: 0 }
     const gone = await sync.sync(root, state)
+    await sync.assets.drain()
     return { gone, state }
   }
   const projectionOf = (path: string) => {
@@ -233,6 +238,7 @@ describe('ServerSync', () => {
   })
 
   afterEach(async () => {
+    sync.close()
     vi.restoreAllMocks()
     await Promise.all(servers.splice(0).map((s) => s.close()))
     db.close()
@@ -524,12 +530,17 @@ describe('ServerSync', () => {
       mock.failAsset = asset
       await run(root)
       const row = rowFor(root)
-      expect(db.stamp(row.path)?.remoteStamp).toBe('')
+      expect(db.stamp(row.path)?.remoteStamp).toBe(mock.updatedAt)
       expect(db.root(root.id)?.error).toContain('Could not download')
       expect(server.hits('/scene/5/funscript')).toBe(1)
       expect(server.hits('/scene/5/screenshot')).toBe(1)
 
       mock.failAsset = ''
+      sync.close()
+      sync = new ServerSync(db, new ScriptScanner(ENGINE), remoteDir(), posterFile, (id) => join(tmp, 'strips', `${id}.jpg`), { progress: () => {}, changed: () => {} })
+      await run(root)
+      expect(server.hits(`/scene/5/${asset}`)).toBe(1)
+      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + ASSET_RETRY_MS[0]! + 1)
       await run(root)
       expect(db.stamp(row.path)?.remoteStamp).toBe(mock.updatedAt)
       expect(db.root(root.id)?.error).toBe('')
@@ -538,7 +549,7 @@ describe('ServerSync', () => {
       expect(server.hits('/scene/5/funscript')).toBe(asset === 'funscript' ? 2 : 1)
       expect(server.hits('/scene/5/screenshot')).toBe(asset === 'screenshot' ? 2 : 1)
       await run(root)
-      expect(mock.counts).toEqual({ list: 3, full: 2 })
+      expect(mock.counts).toEqual({ list: 4, full: 1 })
     })
 
     it.each([false, true])('keeps an edit acknowledged during sync, pending at start: %s', async (pendingAtStart) => {
@@ -563,10 +574,59 @@ describe('ServerSync', () => {
       expect(rowFor(root)).toMatchObject({ rating: 5, tags: ['local edit'] })
     })
 
+    it('finishes metadata while a poster is stalled and does not rewrite metadata on daily image checks', async () => {
+      const { mock, root } = await start()
+      mock.holdAsset = 'screenshot'
+      const state = { done: 0, total: 0 }
+      await sync.sync(root, state)
+      expect(state).toEqual({ done: 1, total: 1 })
+      const row = rowFor(root)
+      expect(db.stamp(row.path)?.remoteStamp).toBe(mock.updatedAt)
+      const assets = sync.assets.drain()
+      await vi.waitFor(() => expect(mock.held).not.toBeNull())
+      expect(sync.assets.pending()).toBeGreaterThan(0)
+      expect(db.mediaRow(row.id)?.title).toBe('Stash Scene')
+      mock.holdAsset = ''
+      bytes(mock.held!, JPEG_BYTES, 'image/jpeg')
+      await assets
+      const metadata = vi.spyOn(db, 'setMetadata')
+      const tags = vi.spyOn(db, 'setTags')
+      const upsert = vi.spyOn(db, 'upsertMedia')
+      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + ASSET_RECHECK_MS + 1)
+      await run(root)
+      expect(mock.counts.full).toBe(1)
+      expect(metadata).not.toHaveBeenCalled()
+      expect(tags).not.toHaveBeenCalled()
+      expect(upsert).not.toHaveBeenCalled()
+    })
+
+    it('keeps an image completion that arrives between metadata preparation and commit', async () => {
+      const { mock, root } = await start()
+      await run(root)
+      const row = rowFor(root)
+      db.setThumbState(row.id, 'thumb', 'failed')
+      mock.updatedAt = '2024-05-01T00:00:00Z'
+      const stamp = db.stamp.bind(db)
+      let completed = false
+      vi.spyOn(db, 'stamp').mockImplementation((path) => {
+        const before = stamp(path)
+        if (!completed && path === row.path) {
+          completed = true
+          db.setThumbState(row.id, 'thumb', 'ready')
+        }
+        return before
+      })
+      await sync.sync(root, { done: 0, total: 0 })
+      expect(completed).toBe(true)
+      expect(db.stamp(row.path)?.thumb).toBe('ready')
+      await sync.assets.drain()
+    })
+
     it('repairs downloads an older version incorrectly marked synced', async () => {
       const { mock, root } = await start()
       await run(root)
       const row = rowFor(root)
+      db['db'].exec('DELETE FROM remote_asset_jobs')
       db.setScriptsStamp(row.id, '')
       db.setCoverStamp(row.id, `${mock.base}/scene/5/screenshot`)
       db.setThumbState(row.id, 'thumb', 'failed')
@@ -590,12 +650,15 @@ describe('ServerSync', () => {
       await run(root)
       expect(await readFile(scriptFile, 'utf8')).toBe(FUNSCRIPT)
       expect(db.scripts(row.id).map((s) => s.axis)).toEqual(['L0'])
-      expect(db.stamp(row.path)?.remoteStamp).toBe('')
+      expect(db.stamp(row.path)?.remoteStamp).toBe(mock.updatedAt)
       expect(await readFile(posterFile(row.id))).toEqual(mock.poster)
 
       mock.failAsset = ''
+      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + ASSET_RETRY_MS[0]! + 1)
       await run(root)
       expect(await readFile(scriptFile, 'utf8')).toBe(mock.script)
+      expect(db.scripts(row.id)[0]?.durationMs).toBe(2000)
+      expect(rowFor(root).heat).toHaveLength(60)
       expect(await readFile(posterFile(row.id))).toEqual(mock.poster)
       expect(db.stamp(row.path)?.remoteStamp).toBe(mock.updatedAt)
     })
@@ -654,9 +717,10 @@ describe('ServerSync', () => {
       await run(root)
       expect(await readFile(stripFile)).toEqual(oldStrip)
       expect(rowFor(root).strip).not.toBeNull()
-      expect(db.stamp(before.path)?.remoteStamp).toBe('')
+      expect(db.stamp(before.path)?.remoteStamp).toBe(mock.updatedAt)
       const thumbHits = server.hits('/scene/5/screenshot')
       mock.preview = readFileSync(join(__dirname, 'fixtures/preview.mp4'))
+      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + ASSET_RETRY_MS[0]! + 1)
       await run(root)
       expect(server.hits('/scene/5/screenshot')).toBe(thumbHits)
       expect(db.root(root.id)?.error).toBe('')

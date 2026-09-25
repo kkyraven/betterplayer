@@ -1,3 +1,4 @@
+import { recordMetric } from './servers/diagnostics'
 import { open, readdir, stat } from 'node:fs/promises'
 import { basename, dirname, extname, join, relative, sep } from 'node:path'
 import { isVideoPath } from '@shared/ipc'
@@ -72,6 +73,10 @@ export interface JobSink {
 
 export class Scanner {
   readonly state: ScanState = { scanning: false, done: 0, total: 0 }
+  private closed = false
+  private readonly abort = new AbortController()
+  close() { this.closed = true; this.queued = null; this.abort.abort() }
+
   private queued: number | 'all' | null = null
   private matchOtherFolders = true
   private inventory: Promise<ScriptInventory> | null = null
@@ -84,7 +89,7 @@ export class Scanner {
   }
 
   async scriptFolders(path: string): Promise<string[]> {
-    if (!this.matchOtherFolders || /^[a-z][a-z\d+.-]*:\/\//i.test(path)) return []
+    if (this.closed || !this.matchOtherFolders || /^[a-z][a-z\d+.-]*:\/\//i.test(path)) return []
     const inventory = await this.getInventory()
     return this.matchOtherFolders ? inventory.folders.forMedia(path) : []
   }
@@ -117,6 +122,7 @@ export class Scanner {
   ) {}
 
   scan(rootId?: number) {
+    if (this.closed) return
     const want = rootId ?? 'all'
     if (this.state.scanning) {
       this.queued = this.queued === null || this.queued === want ? want : 'all'
@@ -128,8 +134,9 @@ export class Scanner {
   private async loop(want: number | 'all') {
     this.state.scanning = true
     let next: number | 'all' | null = want
-    while (next !== null) {
+    while (next !== null && !this.closed) {
       const inventory = this.matchOtherFolders ? await this.getInventory(true) : null
+      if (this.closed) return
       const requested = next === 'all' ? null : this.db.root(next)
       const roots = next === 'all' ? this.db.roots()
         : this.matchOtherFolders && requested?.kind === 'folder' ? this.db.roots().filter((root) => root.kind === 'folder')
@@ -138,6 +145,7 @@ export class Scanner {
       this.state.total = 0
       this.hooks.progress()
       for (const root of roots) {
+        if (this.closed) return
         try {
           if (root.kind === 'folder') await this.scanRoot(root.id, root.path, inventory)
           else await this.syncServer(root.id)
@@ -150,24 +158,25 @@ export class Scanner {
     }
     this.state.scanning = false
     this.hooks.progress()
-    this.hooks.changed()
   }
 
   private async syncServer(rootId: number) {
     const server = this.db.server(rootId)
     if (!server) return
     const gone = await this.servers.sync(server, this.state)
-    if (gone.length > 0) await this.jobs.remove(gone)
+    if (!this.closed && gone.length > 0) await this.jobs.remove(gone)
   }
 
   private async scanRoot(rootId: number, rootPath: string, inventory: ScriptInventory | null) {
     const started = Date.now()
     const rootStat = await stat(rootPath).catch(() => null)
+    if (this.closed) return
     if (!rootStat?.isDirectory()) {
       process.stderr.write(`scan ${rootPath}: not readable, skipped\n`)
       return
     }
     const walk = inventory?.walks.get(rootId) ?? await this.walk(rootPath, new Set(this.db.excludedFolders(rootId)))
+    if (this.closed) return
     this.state.total += walk.files.length
     this.hooks.progress()
 
@@ -186,13 +195,15 @@ export class Scanner {
     const batch = new WriteBatch(this.db, () => {
       dirty = true
       for (const job of jobs.splice(0)) this.jobs.enqueue(job)
-    })
+    }, () => !this.closed)
 
     const siblingStats = new Map<string, Promise<string>>()
     const work: Work[] = []
     for (const file of walk.files) {
+      if (this.closed) return
       try {
         const info = await stat(file)
+        if (this.closed) return
         const size = info.size
         const mtime = Math.round(info.mtimeMs)
         const existing = this.db.stamp(file)
@@ -202,6 +213,7 @@ export class Scanner {
         if (inventory) for (const dir of folders) stamps.push(`${dir}:${await scriptsStamp(join(dir, basename(file)), inventory.siblings, siblingStats)}`)
         const stamp = stamps.join('|')
         const cover = await coverFor(file, walk.siblings, siblingStats)
+        if (this.closed) return
         if (unchanged && stamp === existing.scriptsStamp && cover.stamp === existing.coverStamp) {
           this.jobs.enqueue({
             id: existing.id,
@@ -224,7 +236,7 @@ export class Scanner {
 
     let cursor = 0
     const lane = async () => {
-      while (cursor < work.length) {
+      while (cursor < work.length && !this.closed) {
         const item = work[cursor++]
         if (!item) break
         try {
@@ -232,6 +244,7 @@ export class Scanner {
         } catch (e) {
           warn(`skipped ${item.file}`, e)
         }
+        if (this.closed) return
         this.state.done++
         this.hooks.progress()
         changedTick()
@@ -239,7 +252,8 @@ export class Scanner {
       }
     }
     await Promise.all(Array.from({ length: PROBE_LANES }, lane))
-    batch.flush()
+    await batch.flush()
+    if (this.closed) return
 
     if (walk.incomplete) process.stderr.write(`scan ${rootPath}: a folder could not be read, nothing removed\n`)
     else {
@@ -251,6 +265,7 @@ export class Scanner {
         await this.jobs.remove(gone.map((m) => m.id))
       }
     }
+    if (this.closed) return
     this.db.setRootScanned(rootId, Date.now())
     if (dirty) {
       counts.changed++
@@ -266,15 +281,18 @@ export class Scanner {
     let media = { durationMs: existing?.durationMs ?? 0, width: 0, height: 0, codec: '' }
     if (!unchanged) {
       counts.probed++
-      media = await probe(file).catch((e) => {
+      media = await probe(file, this.abort.signal).catch((e) => {
+        if (this.closed) return { durationMs: 0, width: 0, height: 0, codec: '' }
         warn(`ffprobe failed for ${file}`, e)
         return { durationMs: 0, width: 0, height: 0, codec: '' }
       })
     }
+    if (this.closed) return
     counts.rescanned++
     const scripts = await this.scripts.scriptsFor(file, item.folders)
+    if (this.closed) return
     const title = basename(file, extname(file))
-    batch.add(() => {
+    await batch.add(() => {
       let id: number
       if (unchanged && existing) id = existing.id
       else {
@@ -310,7 +328,7 @@ export class Scanner {
   private async walk(root: string, excluded: Set<string>): Promise<Walk> {
     const out: Walk = { files: [], siblings: new Map(), incomplete: false }
     const stack = [root]
-    for (let dir = stack.pop(); dir !== undefined; dir = stack.pop()) {
+    for (let dir = stack.pop(); dir !== undefined && !this.closed; dir = stack.pop()) {
       let entries
       try {
         entries = await readdir(dir, { withFileTypes: true })
@@ -343,31 +361,36 @@ export class Scanner {
 
 export class WriteBatch {
   private writes: (() => void)[] = []
+  private flushing: Promise<void> | null = null
 
-  constructor(
-    private readonly db: LibraryDb,
-    private readonly committed: () => void,
-  ) {}
+  constructor(private readonly db: LibraryDb, private readonly committed: () => void, private readonly active = () => true) {}
 
-  add(write: () => void) {
+  async add(write: () => void) {
+    if (!this.active()) return
     this.writes.push(write)
-    if (this.writes.length >= WRITES_PER_TX) this.flush()
+    if (this.writes.length >= WRITES_PER_TX) await this.flush()
   }
 
-  flush() {
-    if (this.writes.length === 0) return
-    const writes = this.writes
+  async flush(): Promise<void> {
+    if (this.flushing) return this.flushing
+    this.flushing = this.commit().finally(() => { this.flushing = null })
+    return this.flushing
+  }
+
+  private async commit() {
+    while (this.writes.length && this.active()) {
+      const started = performance.now()
+      this.db.transaction(() => {
+        do {
+          const write = this.writes.shift()!
+          try { write() } catch (error) { warn('library write failed', error) }
+        } while (this.writes.length && performance.now() - started < 8)
+      })
+      recordMetric('database', performance.now() - started)
+      this.committed()
+      await yieldTurn()
+    }
     this.writes = []
-    this.db.transaction(() => {
-      for (const write of writes) {
-        try {
-          write()
-        } catch (e) {
-          warn('library write failed', e)
-        }
-      }
-    })
-    this.committed()
   }
 }
 

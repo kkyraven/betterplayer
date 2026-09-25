@@ -4,6 +4,7 @@ copyright: Copyright © 2026 kinkyraven
 directories:
   output: dist
   buildResources: build
+beforePack: build/beforePack.mjs
 files:
   - out/**
   - package.json
@@ -51,12 +52,17 @@ win:
   target:
     - target: nsis
       arch: [x64]
+    - target: portable
+      arch: [x64]
   artifactName: betterplayer-windows-${version}.${ext}
 nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
   shortcutName: Better Player
+portable:
+  artifactName: betterplayer-portable-windows-${version}.exe
+  unpackDirName: true
 
 linux:
   icon: build/icon.png

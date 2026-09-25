@@ -1,12 +1,13 @@
-import { app, BrowserWindow, crashReporter, nativeTheme, protocol } from 'electron'
-import { existsSync, statSync, writeFileSync } from 'node:fs'
+import { app, BrowserWindow, crashReporter, dialog, nativeTheme, protocol, screen } from 'electron'
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { delimiter, join, resolve } from 'node:path'
 import { isMediaPath } from '@shared/ipc'
 import { Account } from './account'
-import { syncLanguage } from './i18n'
+import { syncLanguage, t } from './i18n'
 import { registerIpc, send } from './ipc'
 import { Library } from './library'
 import { logEvent } from './log'
+import { portableDataDir } from './portable'
 import { RemoteClient } from './remote/client'
 import { RemoteServer } from './remote/server'
 import { ACCOUNT_URL_DEFAULT } from '@shared/account'
@@ -30,7 +31,7 @@ const win32 = process.platform === 'win32'
 function findYtdlp(): string | null {
   const home = app.getPath('home')
   const extra = win32
-    ? [join(process.env.LOCALAPPDATA ?? join(home, 'AppData', 'Local'), 'Microsoft', 'WinGet', 'Links'), join(home, 'scoop', 'shims'), join(process.env.ProgramData ?? 'C:\ProgramData', 'chocolatey', 'bin')]
+    ? [join(process.env.LOCALAPPDATA ?? join(home, 'AppData', 'Local'), 'Microsoft', 'WinGet', 'Links'), join(home, 'scoop', 'shims'), join(process.env.ProgramData ?? 'C:\\ProgramData', 'chocolatey', 'bin')]
     : [join(home, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin']
   const dirs = [...(process.env.PATH ?? '').split(delimiter), ...extra]
   for (const d of dirs) {
@@ -52,8 +53,26 @@ const mediaArg = (args: string[], cwd: string) => {
 }
 let launchFile = mediaArg(argv, process.cwd())
 const screenshot = flag('screenshot')
-const dataDir = flag('data')
-if (dataDir) app.setPath('userData', resolve(dataDir))
+function writableDir(dir: string): boolean {
+  const probe = join(dir, '.writable')
+  try {
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(probe, '')
+    rmSync(probe, { force: true })
+    return true
+  } catch (error) {
+    logEvent({ processType: 'main', reason: 'error', message: `cannot write in ${dir}: ${String(error)}` })
+    return false
+  }
+}
+
+const dataDir = flag('data') ?? portableDataDir()
+let readOnlyDataDir: string | null = null
+if (dataDir) {
+  const dir = resolve(dataDir)
+  if (writableDir(dir)) app.setPath('userData', dir)
+  else readOnlyDataDir = dir
+}
 
 crashReporter.start({ uploadToServer: false })
 function logProcessExit(processType: string, details: { reason: string; exitCode: number }) {
@@ -66,13 +85,14 @@ const RELOAD_WINDOW_MS = 30_000
 
 function createWindow(store: SettingsStore, library: Library, remote: RemoteServer, client: RemoteClient, account: Account, updater: Updater) {
   const [sizeW, sizeH] = (flag('size') ?? '1440x900').split('x').map(Number)
+  const workArea = screen.getPrimaryDisplay().workAreaSize
   const colours = syncNativeTheme(store)
   const win = new BrowserWindow({
-    width: sizeW || 1440,
-    height: sizeH || 900,
+    width: Math.min(sizeW || 1440, workArea.width),
+    height: Math.min(sizeH || 900, workArea.height),
     ...(argv.includes('--fullscreen') ? { fullscreen: true } : {}),
-    minWidth: 960,
-    minHeight: 600,
+    minWidth: Math.min(960, workArea.width),
+    minHeight: Math.min(600, workArea.height),
     show: false,
     icon: iconPath,
     backgroundColor: colours.background,
@@ -94,16 +114,23 @@ function createWindow(store: SettingsStore, library: Library, remote: RemoteServ
   let reloadedAt = 0
   win.webContents.on('render-process-gone', (_event, details) => {
     logProcessExit('renderer', details)
-    if (details.reason === 'clean-exit' || win.isDestroyed() || Date.now() - reloadedAt < RELOAD_WINDOW_MS) return
+    if (details.reason === 'clean-exit' || win.isDestroyed()) return
+    if (Date.now() - reloadedAt < RELOAD_WINDOW_MS) {
+      dialog.showErrorBox(t('app.recover.message'), `${details.reason} (${details.exitCode})`)
+      app.exit(1)
+      return
+    }
     reloadedAt = Date.now()
     win.webContents.reload()
   })
   win.once('ready-to-show', () => win.show())
-  if (!app.isPackaged) {
-    win.webContents.on('console-message', (e) => {
-      process.stderr.write(`renderer ${e.level}: ${e.message} (${e.sourceId}:${e.lineNumber})\n`)
-    })
-  }
+  setTimeout(() => {
+    if (!win.isDestroyed() && !win.isVisible()) win.show()
+  }, 10_000).unref()
+  win.webContents.on('console-message', (e) => {
+    if (e.level !== 'warning' && e.level !== 'error') return
+    logEvent({ processType: 'renderer', reason: 'console', level: e.level, message: e.message, source: `${e.sourceId}:${e.lineNumber}` })
+  })
   if (screenshot) {
     setTimeout(async () => {
       const [mx, my] = (flag('mouse') ?? '700,400').split(',').map(Number)
@@ -129,7 +156,7 @@ function createWindow(store: SettingsStore, library: Library, remote: RemoteServ
 
   const devUrl = process.env.ELECTRON_RENDERER_URL
   if (!app.isPackaged && devUrl) void win.loadURL(devUrl)
-  else void win.loadFile(join(__dirname, '../renderer/index.html'))
+  else void win.loadFile(join(__dirname, '../renderer/index.html')).catch((error: unknown) => logEvent({ processType: 'renderer', reason: 'load-failed', message: String(error) }))
   return win
 }
 
@@ -174,9 +201,14 @@ if (!app.requestSingleInstanceLock()) {
   void app.whenReady().then(() => {
     if (!app.isPackaged) app.dock?.setIcon(iconPath)
     const userData = app.getPath('userData')
+    logEvent({ processType: 'main', reason: 'start', os: process.getSystemVersion(), arch: process.arch, packaged: app.isPackaged, userData })
     const store = new SettingsStore(join(userData, 'settings.json'))
     settings = store
     void syncLanguage(store)
+      .then(() => {
+        if (readOnlyDataDir) dialog.showErrorBox(t('main.portable.readOnly.title', { dir: readOnlyDataDir }), t('main.portable.readOnly.message'))
+      })
+      .catch((error: unknown) => logEvent({ processType: 'main', reason: 'error', message: `syncLanguage: ${String(error)}` }))
     const lib = new Library({ dataDir: userData, enginePath, modelsDir: join(userData, 'models') })
     library = lib
     const source = new RemoteClient(join(userData, 'remote-scripts'))
@@ -210,6 +242,9 @@ if (!app.requestSingleInstanceLock()) {
     win.on('closed', () => {
       win = null
     })
+  }).catch((error: unknown) => {
+    dialog.showErrorBox(t('app.recover.message'), String(error))
+    app.exit(1)
   })
 
   app.on('window-all-closed', () => app.quit())

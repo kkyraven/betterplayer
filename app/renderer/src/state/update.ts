@@ -13,7 +13,7 @@ interface UpdateStore {
 
 export function updateText(state: UpdateState): string {
   switch (state.status) {
-    case 'off': return t('update.status.off')
+    case 'off': return t(state.portable ? 'update.status.portable' : 'update.status.off')
     case 'idle': return ''
     case 'checking': return t('update.status.checking')
     case 'upToDate': return t('update.status.upToDate')

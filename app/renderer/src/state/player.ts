@@ -16,6 +16,7 @@ import { defaultAxisSettings, type AxisSettings, type DlssSettings, type FrameGe
 import { applyEnhance, engine, warm } from '@/engine/client'
 import * as live from './live'
 import { invoke } from '@/ipc'
+import { nextBookmarkTime } from '@/lib/bookmarks'
 import { fileTitle } from '@/lib/format'
 import { isFree, useAccount } from './account'
 import { t } from './i18n'
@@ -113,6 +114,7 @@ interface PlayerState {
   seekBy: (seconds: number) => void
   setMark: () => void
   goToMark: () => void
+  stepBookmark: (direction: -1 | 1) => void
   adjustAmplitude: (delta: number) => void
   resetAmplitude: () => void
   setRate: (rate: number) => void
@@ -445,6 +447,13 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       told({ kind: 'seek', timeMs: target * 1000 })
     },
     seekBy: (seconds) => get().seek(live.get().timeMs / 1000 + seconds),
+    stepBookmark: (direction) => {
+      const { scripts, snapshot } = get()
+      if (!snapshot.loaded) return
+      const bookmarks = scripts.filter((script) => script.selected).flatMap((script) => script.bookmarks)
+      const target = nextBookmarkTime(bookmarks, live.get().timeMs, direction, snapshot.durationMs)
+      if (target !== undefined) get().seek(target / 1000)
+    },
     setMark: () => {
       if (get().snapshot.loaded) set({ mark: live.get().timeMs / 1000 })
     },

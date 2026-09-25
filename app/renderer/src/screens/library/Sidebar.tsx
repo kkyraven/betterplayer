@@ -38,7 +38,7 @@ import {
   Waves,
   Zap,
 } from 'lucide-react'
-import { createContext, useContext, useEffect, useState, type CSSProperties, type FormEvent, type ReactNode, type DragEventHandler } from 'react'
+import { memo, createContext, useContext, useEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode, type DragEventHandler } from 'react'
 import type { MessageKey } from '@shared/i18n'
 import { CORE_SECTIONS, SECTIONS, type FolderNode, type MediaQuery, type Section, type Tag as TagRow } from '@shared/library'
 import { IconButton } from '@/components/ui/IconButton'
@@ -107,7 +107,6 @@ export function Sidebar() {
   const filters = useLibrary((s) => s.filters)
   const setFilters = useLibrary((s) => s.setFilters)
   const openTag = useLibrary((s) => s.openTag)
-  const progress = useLibrary((s) => s.progress)
   const setSection = useLibrary((s) => s.setSection)
   const setPlaylist = useLibrary((s) => s.setPlaylist)
   const addRoot = useLibrary((s) => s.addRoot)
@@ -154,6 +153,25 @@ export function Sidebar() {
   }
 
   const [playlistsOpen, setPlaylistsOpen] = useState(false)
+  const [renaming, setRenaming] = useState<{ id: number; name: string } | null>(null)
+  const [savingName, setSavingName] = useState(false)
+  const renameInput = useRef<HTMLInputElement>(null)
+  const pendingRename = useRef<{ id: number; name: string } | null>(null)
+  const submitRename = async (event: FormEvent) => {
+    event.preventDefault()
+    if (!renaming || savingName || !renaming.name.trim()) return
+    setSavingName(true)
+    try {
+      await invoke('library:renamePlaylist', renaming.id, renaming.name.trim())
+      setRenaming(null)
+      await useLibrary.getState().refresh()
+    } catch (error) {
+      renameInput.current?.setCustomValidity(ipcMessage(error))
+      renameInput.current?.reportValidity()
+    } finally {
+      setSavingName(false)
+    }
+  }
   const [playlistDrag, setPlaylistDrag] = useState<number | null>(null)
   const [playlistOver, setPlaylistOver] = useState<{ id: number; after: boolean } | null>(null)
   const playlistKey = (id: number) => sidebarKey(source, id)
@@ -174,7 +192,7 @@ export function Sidebar() {
     const position = visiblePlaylists.findIndex((entry) => entry.id === p.id)
     return <DropRow key={p.id} contextMenu as="div" target={{ kind: 'playlist', id: p.id }}
       className={cx('sb-item', 'sb-playlist', playlistId === p.id && 'on', hidden && 'ghost', playlistOver?.id === p.id && (playlistOver.after ? 'sb-insert-after' : 'sb-insert-before'))}
-      draggable={!hidden}
+      draggable={!hidden && renaming?.id !== p.id}
       onDragStart={(event) => {
         event.dataTransfer.setData('application/x-betterplayer-sidebar-playlist', String(p.id))
         event.dataTransfer.effectAllowed = 'move'
@@ -202,8 +220,36 @@ export function Sidebar() {
         setPlaylistOver(null)
       }}
       onDragEnd={() => { setPlaylistDrag(null); setPlaylistOver(null) }}>
-      <button type="button" className="sb-fill" onClick={() => setPlaylist(p.id)}><ListVideo /><span className="sb-name">{p.name}</span><span className="n">{p.count}</span></button>
-      <SidebarMenu name={p.name}>
+      {renaming?.id === p.id ? (
+        <form className="sb-fill sb-rename" onSubmit={(event) => void submitRename(event)}>
+          <ListVideo />
+          <input ref={renameInput} autoFocus className="input" aria-label={t('library.sidebar.playlistName')}
+            value={renaming.name} readOnly={savingName}
+            onFocus={(event) => event.currentTarget.select()}
+            onChange={(event) => {
+              event.currentTarget.setCustomValidity('')
+              setRenaming({ id: p.id, name: event.currentTarget.value })
+            }}
+            onBlur={() => { if (!savingName) setRenaming(null) }}
+            onKeyDown={(event) => {
+              event.stopPropagation()
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                if (!savingName) setRenaming(null)
+              }
+              if (event.key === 'Enter' && event.nativeEvent.isComposing) event.preventDefault()
+            }} />
+          <span className="n">{p.count}</span>
+        </form>
+      ) : (
+        <button type="button" className="sb-fill" onClick={() => setPlaylist(p.id)}><ListVideo /><span className="sb-name" onDoubleClick={() => { if (!savingName) setRenaming({ id: p.id, name: p.name }) }}>{p.name}</span><span className="n">{p.count}</span></button>
+      )}
+      <SidebarMenu name={p.name} onClose={() => {
+        if (pendingRename.current?.id !== p.id) return
+        setRenaming(pendingRename.current)
+        pendingRename.current = null
+      }}>
+        <DropdownMenu.Item className="item" disabled={savingName} onSelect={() => { pendingRename.current = { id: p.id, name: p.name } }}><Pencil />{t('common.rename')}</DropdownMenu.Item>
         <OrderActions hidden={hidden} first={position === 0} last={position === visiblePlaylists.length - 1}
           onPin={() => movePlaylist(p.id, 0)} onMove={(delta) => movePlaylist(p.id, position + delta)} onToggle={() => togglePlaylist(p.id)} />
         <DropdownMenu.Separator className="sep" />
@@ -380,7 +426,16 @@ export function Sidebar() {
           )}
           <ServerDialog open={addingServer} onOpenChange={setAddingServer} />
         </div>
-        {(progress.scanning || progress.thumbsPending > 0 || progress.tagsPending > 0) && (
+        <SidebarProgress />
+      </aside>
+    </>
+  )
+}
+
+function SidebarProgress() {
+  const t = useT()
+  const progress = useLibrary((s) => s.progress)
+  return <>        {(progress.scanning || progress.thumbsPending > 0 || progress.tagsPending > 0) && (
           <div className="sb-foot">
             <div className="sb-foot-row">
               <span>{progress.scanning ? t('library.sidebar.scanning') : progress.thumbsPending > 0 ? t('library.sidebar.thumbnails') : t('library.sidebar.tagging')}</span>
@@ -390,13 +445,10 @@ export function Sidebar() {
               <i style={{ width: progress.scanning && progress.total > 0 ? `${(progress.done / progress.total) * 100}%` : '100%' }} />
             </div>
           </div>
-        )}
-      </aside>
-    </>
-  )
+        )}</>
 }
 
-function FolderRow({ node, depth, server, pinnedCopy = false }: { node: FolderNode; depth: number; server: boolean; pinnedCopy?: boolean }) {
+const FolderRow = memo(function FolderRow({ node, depth, server, pinnedCopy = false }: { node: FolderNode; depth: number; server: boolean; pinnedCopy?: boolean }) {
   const t = useT()
   const folder = useLibrary((s) => s.folder)
   const setFolder = useLibrary((s) => s.setFolder)
@@ -438,7 +490,7 @@ function FolderRow({ node, depth, server, pinnedCopy = false }: { node: FolderNo
       {open && node.children.map((c) => <FolderRow key={`${c.rootId}:${c.folder}`} node={c} depth={depth + 1} server={server} />)}
     </>
   )
-}
+})
 
 function DropRow({
   as,
@@ -495,7 +547,7 @@ function DropRow({
   )
 }
 
-function SidebarMenu({ name, children }: { name: string; children: ReactNode }) {
+function SidebarMenu({ name, children, onClose }: { name: string; children: ReactNode | (() => ReactNode); onClose?: () => void }) {
   const t = useT()
   const menu = useContext(RowMenuContext)
   if (!menu) return null
@@ -504,7 +556,7 @@ function SidebarMenu({ name, children }: { name: string; children: ReactNode }) 
       onClick={(event) => menu.show(event.currentTarget.getBoundingClientRect(), event.currentTarget)}><Ellipsis /></IconButton>
     <DropdownMenu.Trigger asChild><span className="menu-anchor" tabIndex={-1} aria-hidden style={menu.rect ? { left: menu.rect.left, top: menu.rect.top, width: menu.rect.width, height: menu.rect.height } : undefined} /></DropdownMenu.Trigger>
     <DropdownMenu.Portal><DropdownMenu.Content className="menu" align="start" sideOffset={menu.rect?.width === 0 ? 0 : 4} collisionPadding={8}
-      onCloseAutoFocus={(event) => { event.preventDefault(); menu.anchor?.focus() }}>{children}</DropdownMenu.Content></DropdownMenu.Portal>
+      onCloseAutoFocus={(event) => { event.preventDefault(); menu.anchor?.focus(); onClose?.() }}>{menu.open ? typeof children === 'function' ? children() : children : null}</DropdownMenu.Content></DropdownMenu.Portal>
   </DropdownMenu.Root>
 }
 
@@ -575,6 +627,8 @@ function TagMenu({ name, count, pinned, onTogglePin }: { name: string; count: nu
 
 type Ask = 'tag' | 'playlist' | 'remove' | 'exclude'
 
+const EMPTY_TAGS: TagRow[] = []
+
 function FolderMenu({ node, server }: { node: FolderNode; server: boolean }) {
   const t = useT()
   const menu = useContext(RowMenuContext)
@@ -589,7 +643,9 @@ function FolderMenu({ node, server }: { node: FolderNode; server: boolean }) {
   useEffect(() => {
     if (menu?.open) setGroupResult('')
   }, [menu?.open])
-  const tags = useLibrary((s) => s.tags)
+  const [tagsOpen, setTagsOpen] = useState(false)
+  const [ask, setAsk] = useState<Ask | null>(null)
+  const tags = useLibrary((s) => tagsOpen || ask === 'tag' ? s.tags : EMPTY_TAGS)
   const playlists = useLibrary((s) => s.playlists)
   const tagFolder = useLibrary((s) => s.tagFolder)
   const addFolderToPlaylist = useLibrary((s) => s.addFolderToPlaylist)
@@ -597,27 +653,26 @@ function FolderMenu({ node, server }: { node: FolderNode; server: boolean }) {
   const removeRoot = useLibrary((s) => s.removeRoot)
   const excludeFolder = useLibrary((s) => s.excludeFolder)
   const includeFolder = useLibrary((s) => s.includeFolder)
-  const [ask, setAsk] = useState<Ask | null>(null)
   const folder: NonNullable<MediaQuery['folder']> = { rootId: node.rootId, folder: node.folder }
   const isRoot = node.folder === ''
   const videos = t('library.videos', { count: node.count })
   if (node.excluded) {
     return (
-      <SidebarMenu name={node.name}>
+      <SidebarMenu name={node.name}>{() => <>
         <DropdownMenu.Item className="item" onSelect={() => void includeFolder(folder)}>
           <Undo2 />
           {t('library.folder.includeInLibrary')}
         </DropdownMenu.Item>
-      </SidebarMenu>
+      </>}</SidebarMenu>
     )
   }
 
   return (
     <>
-      <SidebarMenu name={node.name}>
+      <SidebarMenu name={node.name}>{() => <>
         <DropdownMenu.Item className="item" onSelect={togglePin}>{pinned ? <PinOff /> : <Pin />}{t(pinned ? 'library.tag.unpin' : 'library.tag.pin')}</DropdownMenu.Item>
         <DropdownMenu.Separator className="sep" />
-        <DropdownMenu.Sub>
+        <DropdownMenu.Sub open={tagsOpen} onOpenChange={setTagsOpen}>
           <DropdownMenu.SubTrigger className="item">
             <Tag />
             {t('library.tag.add')}
@@ -625,7 +680,7 @@ function FolderMenu({ node, server }: { node: FolderNode; server: boolean }) {
           </DropdownMenu.SubTrigger>
           <DropdownMenu.Portal>
             <DropdownMenu.SubContent className="menu" sideOffset={6}>
-              {tags.map(({ name }) => (
+              {tagsOpen && tags.map(({ name }) => (
                 <DropdownMenu.Item key={name} className="item" onSelect={() => void tagFolder(folder, name)}>
                   {name}
                 </DropdownMenu.Item>
@@ -690,13 +745,13 @@ function FolderMenu({ node, server }: { node: FolderNode; server: boolean }) {
             {t('library.folder.excludeFromLibrary')}
           </DropdownMenu.Item>
         )}
-      </SidebarMenu>
+      </>}</SidebarMenu>
       <Prompt
         open={ask === 'tag'}
         onOpenChange={() => setAsk(null)}
         title={t('library.folder.tagTitle', { videos, name: node.name })}
         placeholder={t('library.tag.placeholder')}
-        suggestions={tags.map((tag) => tag.name)}
+        suggestions={ask === 'tag' ? tags.map((tag) => tag.name) : undefined}
         confirmLabel={t('library.tag.add')}
         onConfirm={(tag) => void tagFolder(folder, tag.toLowerCase())}
       />

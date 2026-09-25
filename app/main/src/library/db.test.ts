@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -66,6 +66,18 @@ describe('setServerTagging', () => {
     expect(db.stamp('https://stash.fictional/scene/2')?.tags).toBe('failed')
     expect(db.stamp('/fictional/a.mp4')?.tags).toBe('pending')
   })
+
+  it('resumes only the pending server rows at boot, leaving failed ones alone', () => {
+    const db = new LibraryDb(':memory:')
+    const root = db.addRoot('/fictional').id
+    const base = { rootId: root, folder: '', size: 1, mtime: 1, width: 1920, height: 1080, codec: 'hevc', projection: 'flat' as const }
+    db.upsertMedia({ ...base, path: '/fictional/a.mp4', title: 'a', durationMs: 60_000 }, 1)
+    const failed = db.upsertMedia({ ...base, path: 'https://stash.fictional/scene/1', title: 'b', durationMs: 60_000, remoteKey: '1' }, 1)
+    const pending = db.upsertMedia({ ...base, path: 'https://stash.fictional/scene/2', title: 'c', durationMs: 60_000, remoteKey: '2' }, 1)
+    db.setThumbState(failed, 'tags', 'failed')
+    expect(db.pendingServerTagRows()).toEqual([{ id: pending, rootId: root, path: 'https://stash.fictional/scene/2', durationMs: 60_000 }])
+    expect(db.stamp('https://stash.fictional/scene/1')?.tags).toBe('failed')
+  })
 })
 
 describe('generated scripts', () => {
@@ -107,7 +119,7 @@ describe('favourite migration', () => {
       db.setRemoteStamp(scene, 'stash-stamp')
       db.close()
       const old = new DatabaseSync(path)
-      old.exec('ALTER TABLE media DROP COLUMN favourite; PRAGMA user_version = 17')
+      old.exec('DROP TABLE remote_asset_jobs; ALTER TABLE remote_assets DROP COLUMN validators; ALTER TABLE media DROP COLUMN favourite; PRAGMA user_version = 17')
       old.close()
       const migrated = new LibraryDb(path)
       try {
@@ -119,4 +131,33 @@ describe('favourite migration', () => {
       } finally { migrated.close() }
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
+})
+
+
+it('adds asset jobs to v19 without invalidating successful stamps or cached files', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bp-assets-migration-'))
+  const path = join(dir, 'library.db')
+  try {
+    const db = new LibraryDb(path)
+    const rootId = db.addServer({ kind: 'stash', url: 'http://fixture', name: 'Fixture', username: '', secret: '' }).id
+    const media = { rootId, path: 'http://fixture/stream', remoteKey: '1', title: 'Fixture', folder: '', size: 1, mtime: 1, durationMs: 1000, width: 32, height: 18, codec: '', projection: 'flat' as const }
+    const id = db.upsertMedia(media, 1)
+    db.setRemoteStamp(id, 'metadata-version')
+    db.setScriptsStamp(id, 'script-version')
+    db.setRemoteAsset(id, 'thumb', '["one","http://fixture/poster"]', 'digest', 1234)
+    db.setThumbState(id, 'thumb', 'ready')
+    const before = db.stamp(media.path)
+    writeFileSync(join(dir, 'poster.jpg'), 'usable cache')
+    db.close()
+    const legacy = new DatabaseSync(path)
+    legacy.exec('DROP TABLE remote_asset_jobs; ALTER TABLE remote_assets DROP COLUMN validators; PRAGMA user_version = 19')
+    legacy.close()
+    const migrated = new LibraryDb(path)
+    try {
+      expect(migrated.stamp(media.path)).toEqual(before)
+      expect(migrated.remoteAsset(id, 'thumb')).toMatchObject({ checkedAt: 1234, digest: 'digest' })
+      expect(migrated.nextAssetAttempt()).toBeNull()
+      expect(readFileSync(join(dir, 'poster.jpg'), 'utf8')).toBe('usable cache')
+    } finally { migrated.close() }
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })

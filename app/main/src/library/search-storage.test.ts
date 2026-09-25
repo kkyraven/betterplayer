@@ -71,7 +71,7 @@ it('adds search storage to an existing version 14 database without losing metada
     expect(db.mediaRow(1)).toMatchObject({ title: 'Coast', rating: 5, tags: ['outdoor'] })
   } finally { db.close() }
   const check = new DatabaseSync(path)
-  expect(check.prepare('PRAGMA user_version').get()?.user_version).toBe(19)
+  expect(check.prepare('PRAGMA user_version').get()?.user_version).toBe(21)
   check.close()
 })
 

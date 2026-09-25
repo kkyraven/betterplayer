@@ -7,6 +7,15 @@ import './Recover.css'
 const RELOADED_AT = 'bp-recovered-at'
 const RELOAD_WINDOW_MS = 30_000
 
+export function RecoverScreen() {
+  return (
+    <div className="recover">
+      <p>{t('app.recover.message')}</p>
+      <Button onClick={() => location.reload()}>{t('app.recover.restart')}</Button>
+    </div>
+  )
+}
+
 export class Recover extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false }
 
@@ -25,11 +34,6 @@ export class Recover extends Component<{ children: ReactNode }, { failed: boolea
 
   render() {
     if (!this.state.failed) return this.props.children
-    return (
-      <div className="recover">
-        <p>{t('app.recover.message')}</p>
-        <Button onClick={() => location.reload()}>{t('app.recover.restart')}</Button>
-      </div>
-    )
+    return <RecoverScreen />
   }
 }

@@ -15,7 +15,7 @@ use ureq::Agent;
 use crate::output::TickContext;
 use crate::tcode::AxisClamp;
 
-const TIMEOUT: Duration = Duration::from_secs(5);
+const TIMEOUT: Duration = Duration::from_secs(8);
 const OFFSET_SAMPLES: usize = 30;
 const OFFSET_TRIM: usize = 3;
 const SEEK_MS: f64 = 1000.0;
@@ -43,6 +43,8 @@ impl Default for Endpoints {
         }
     }
 }
+
+const BETTERPLAYER_APP_ID: &str = "";
 
 enum Cmd {
     Setup {
@@ -105,21 +107,54 @@ impl HandyLink {
             .http_status_as_error(false)
             .build()
             .into();
-        let v3 = app_key.is_some();
-        if v3 && matches!(hosting, HandyHosting::Lan) {
-            return Err(io::Error::other(
-                "Handy API v3 requires cloud script hosting",
-            ));
-        }
-        let mut api = Api {
+        let app_key = app_key
+            .filter(|k| !k.is_empty())
+            .map(str::to_string)
+            .or_else(|| (!BETTERPLAYER_APP_ID.is_empty()).then(|| BETTERPLAYER_APP_ID.to_string()));
+        let probe = Api {
             agent,
-            base: if v3 { ep.v3.clone() } else { ep.v2.clone() },
+            base: ep.v2.clone(),
             key: key.to_string(),
-            token: None,
+            api_key: None,
             offset: 0.0,
-            v3,
+            v3: false,
         };
-        let device = api.handshake(app_key).map_err(io::Error::other)?;
+        let info = probe.probe().map_err(io::Error::other)?;
+        let fw_major = info
+            .get("fwVersion")
+            .or_else(|| info.get("fw_version"))
+            .and_then(Value::as_str)
+            .and_then(|v| v.split('.').next()?.parse::<u64>().ok());
+        let v3 = match fw_major {
+            Some(major) => major >= 4,
+            None => app_key.is_some(),
+        };
+        let (api, device) = if v3 {
+            let Some(app_key) = app_key else {
+                return Err(io::Error::other(
+                    "This handy runs FW4, connect using generic bluetooth option instead.",
+                ));
+            };
+            if matches!(hosting, HandyHosting::Lan) {
+                return Err(io::Error::other(
+                    "Handy API v3 requires cloud script hosting",
+                ));
+            }
+            let mut api = Api {
+                agent: probe.agent.clone(),
+                base: ep.v3.clone(),
+                key: key.to_string(),
+                api_key: Some(app_key),
+                offset: 0.0,
+                v3: true,
+            };
+            let device = api.handshake_v3().map_err(io::Error::other)?;
+            (api, device)
+        } else {
+            let mut api = probe;
+            let device = api.handshake_v2(&info).map_err(io::Error::other)?;
+            (api, device)
+        };
 
         let (cmd, cmd_rx) = channel();
         let (reply_tx, reply) = channel();
@@ -300,66 +335,41 @@ struct Api {
     agent: Agent,
     base: String,
     key: String,
-    token: Option<String>,
+    api_key: Option<String>,
     offset: f64,
     v3: bool,
 }
 
 impl Api {
-    fn handshake(&mut self, app_key: Option<&str>) -> Result<String, String> {
-        match app_key {
-            Some(app_key) => {
-                self.token = Some(self.issue_token(app_key)?);
-                let info = self.get("info")?;
-                if info.get("fw_status").and_then(Value::as_i64) == Some(2) {
-                    return Err(
-                        "firmware update required; update the Handy in the Handy app".into(),
-                    );
-                }
-                self.put("mode", json!({ "mode": 1 }))?;
-                self.offset = self.measure_offset()?;
-                let device = device_name(&info);
-                Ok(device)
-            }
-            None => {
-                if self
-                    .get("connected")?
-                    .get("connected")
-                    .and_then(Value::as_bool)
-                    != Some(true)
-                {
-                    return Err("the Handy is not online; check the connection key".into());
-                }
-                let info = self.get("info")?;
-                if info.get("fwStatus").and_then(Value::as_i64) == Some(1) {
-                    return Err(
-                        "firmware update required; update the Handy in the Handy app".into(),
-                    );
-                }
-                self.put("mode", json!({ "mode": 1 }))?;
-                self.offset = self.measure_offset()?;
-                Ok(device_name(&info))
-            }
+    fn probe(&self) -> Result<Value, String> {
+        if self
+            .get("connected")?
+            .get("connected")
+            .and_then(Value::as_bool)
+            != Some(true)
+        {
+            return Err("the Handy is not online; check the connection key".into());
         }
+        self.get("info")
     }
 
-    fn issue_token(&self, app_key: &str) -> Result<String, String> {
-        let path = "auth/token/issue";
-        let url = format!("{}{path}", self.base);
-        let res = self
-            .agent
-            .get(url)
-            .query("ttl", "86400")
-            .query("to", &self.key)
-            .header("X-Api-Key", app_key)
-            .call()
-            .map_err(|e| format!("{path}: {e}"))?;
-        let v = read_json(path, res)?;
-        v.get("result")
-            .and_then(|v| v.get("token"))
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .ok_or_else(|| format!("{path}: no token in the reply"))
+    fn handshake_v2(&mut self, info: &Value) -> Result<String, String> {
+        if info.get("fwStatus").and_then(Value::as_i64) == Some(1) {
+            return Err("firmware update required; update the Handy in the Handy app".into());
+        }
+        self.put("mode", json!({ "mode": 1 }))?;
+        self.offset = self.measure_offset()?;
+        Ok(device_name(info))
+    }
+
+    fn handshake_v3(&mut self) -> Result<String, String> {
+        let info = self.get("info")?;
+        if info.get("fw_status").and_then(Value::as_i64) == Some(2) {
+            return Err("firmware update required; update the Handy in the Handy app".into());
+        }
+        self.put("mode2", json!({ "mode": 1 }))?;
+        self.offset = self.measure_offset()?;
+        Ok(device_name(&info))
     }
 
     fn measure_offset(&self) -> Result<f64, String> {
@@ -422,8 +432,8 @@ impl Api {
             .agent
             .get(format!("{}{path}", self.base))
             .header("X-Connection-Key", &self.key);
-        if let Some(t) = &self.token {
-            req = req.header("Authorization", format!("Bearer {t}"));
+        if let Some(k) = &self.api_key {
+            req = req.header("X-Api-Key", k);
         }
         let res = req.call().map_err(|e| format!("{path}: {e}"))?;
         let value = read_json(path, res)?;
@@ -440,8 +450,8 @@ impl Api {
             .put(format!("{}{path}", self.base))
             .header("X-Connection-Key", &self.key)
             .header("Content-Type", "application/json");
-        if let Some(t) = &self.token {
-            req = req.header("Authorization", format!("Bearer {t}"));
+        if let Some(k) = &self.api_key {
+            req = req.header("X-Api-Key", k);
         }
         let res = req
             .send(body.to_string())
@@ -759,16 +769,13 @@ mod tests {
                 return;
             };
             let target = target.trim_start_matches('/').to_string();
-            let (path, query) = target
+            let path = target
                 .split_once('?')
-                .map_or((target.clone(), String::new()), |(p, q)| {
-                    (p.to_string(), q.to_string())
-                });
+                .map_or(target.clone(), |(p, _)| p.to_string());
             let v3 = path.starts_with("v3/");
             let path = path.strip_prefix("v3/").unwrap_or(&path).to_string();
             let (status, reply) = canned(
                 &path,
-                &query,
                 v3,
                 &body,
                 headers.get("x-connection-key").map_or("", String::as_str),
@@ -833,13 +840,16 @@ mod tests {
         matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
     }
 
-    fn canned(path: &str, query: &str, v3: bool, body: &[u8], key: &str) -> (&'static str, String) {
+    fn canned(path: &str, v3: bool, body: &[u8], key: &str) -> (&'static str, String) {
         let payload = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
         let bad = |message: &str| ("400 Bad Request", json!({ "message": message }).to_string());
         let value = match path {
             "connected" => json!({ "connected": true }),
             "info" if v3 => {
-                json!({ "fw_status": if key == "OLDFW" { 2 } else { 0 }, "fw_version": "4.0.1", "hw_model_name": "H01" })
+                json!({ "fw_status": if key == "FW4OLD" { 2 } else { 0 }, "fw_version": "4.3.0+dcee7e58", "hw_model_name": "H01" })
+            }
+            "info" if key == "FW4" || key == "FW4OLD" => {
+                json!({ "fw_version": "4.3.0+dcee7e58", "fwStatus": 0, "model": "Handy", "hwVersion": 3 })
             }
             "info" => {
                 json!({ "fwVersion": "3.2.4", "fwStatus": if key == "OLDFW" { 1 } else { 0 }, "model": "Handy", "hwVersion": 3 })
@@ -855,7 +865,7 @@ mod tests {
                     .to_string(),
                 );
             }
-            "auth/token/issue" if v3 => json!({ "token": format!("tok-{query}"), "renew": "" }),
+            "auth/token/issue" => return bad("token issue is gone; v3 takes X-Api-Key"),
             "upload" => {
                 json!({ "success": true, "url": "https://handyfeeling.com/scripts/abc.csv" })
             }
@@ -902,6 +912,7 @@ mod tests {
                 json!({ "result": 0 })
             }
             "mode" | "hssp/setup" | "hssp/stop" => json!({ "result": 1 }),
+            "mode2" if v3 => json!({ "mode": 1, "mode_session_id": 12 }),
             _ => {
                 return (
                     "404 Not Found",
@@ -1245,21 +1256,23 @@ mod tests {
     }
 
     #[test]
-    fn v3_takes_a_token_and_corrects_drift_with_synctime() {
+    fn firmware_4_routes_to_v3_and_corrects_drift_with_synctime() {
         let mock = Mock::start();
         let mut link =
-            HandyLink::connect_to("KEY", Some("APPKEY"), HandyHosting::Cloud, mock.endpoints())
+            HandyLink::connect_to("FW4", Some("APPKEY"), HandyHosting::Cloud, mock.endpoints())
                 .unwrap();
         link.sync_every = Duration::from_millis(20);
-        let issue = mock.last("auth/token/issue");
-        assert_eq!(issue.headers.get("x-api-key").unwrap(), "APPKEY");
-        assert_eq!(mock.paths()[..3], ["auth/token/issue", "info", "mode"]);
-        assert_eq!(link.device, "H01 FW4 4.0.1");
-
-        assert_eq!(
-            mock.last("info").headers.get("authorization").unwrap(),
-            "Bearer tok-ttl=86400&to=KEY"
-        );
+        let paths = mock.paths();
+        assert_eq!(paths[..4], ["connected", "info", "info", "mode2"]);
+        assert_eq!(link.device, "H01 FW4 4.3.0+dcee7e58");
+        assert_eq!(mock.count("auth/token/issue"), 0);
+        let info = mock.last("info");
+        assert_eq!(info.headers.get("x-api-key").unwrap(), "APPKEY");
+        assert_eq!(info.headers.get("x-connection-key").unwrap(), "FW4");
+        let mode = mock.last("mode2");
+        assert_eq!(mode.method, "PUT");
+        assert_eq!(mode.body, r#"{"mode":1}"#);
+        assert_eq!(mode.headers.get("x-api-key").unwrap(), "APPKEY");
 
         link.set_stroke(Some(&script()));
         run(&mut link, &mock, "hssp/play", 1, Some(1_000.0), false);
@@ -1269,7 +1282,9 @@ mod tests {
             Some("https://handyfeeling.com/scripts/abc.csv")
         );
         assert!(setup.get("sha256").is_none());
-        let play: Value = serde_json::from_str(&mock.last("hssp/play").body).unwrap();
+        let play_req = mock.last("hssp/play");
+        assert_eq!(play_req.headers.get("x-api-key").unwrap(), "APPKEY");
+        let play: Value = serde_json::from_str(&play_req.body).unwrap();
         let ahead = play["server_time"].as_u64().unwrap() as f64 - now_ms();
         assert!(
             (ahead - 5000.0).abs() < 500.0,
@@ -1295,10 +1310,10 @@ mod tests {
 
     #[test]
     fn stroke_limits_use_each_api_contract_and_are_only_sent_when_changed() {
-        for app_key in [None, Some("APPKEY")] {
+        for (key, app_key) in [("KEY", None), ("FW4", Some("APPKEY"))] {
             let mock = Mock::start();
             let mut link =
-                HandyLink::connect_to("KEY", app_key, HandyHosting::Cloud, mock.endpoints())
+                HandyLink::connect_to(key, app_key, HandyHosting::Cloud, mock.endpoints())
                     .unwrap();
             let path = if app_key.is_some() {
                 "slider/stroke"
@@ -1359,17 +1374,43 @@ mod tests {
     }
 
     #[test]
-    fn v3_rejects_old_firmware_and_private_script_hosting() {
+    fn old_firmware_and_private_hosting_are_rejected() {
         let mock = Mock::start();
         for (key, hosting, expected) in [
             ("OLDFW", HandyHosting::Cloud, "firmware update required"),
-            ("KEY", HandyHosting::Lan, "requires cloud script hosting"),
+            ("FW4OLD", HandyHosting::Cloud, "firmware update required"),
+            ("FW4", HandyHosting::Lan, "requires cloud script hosting"),
         ] {
             let error = HandyLink::connect_to(key, Some("APPKEY"), hosting, mock.endpoints())
                 .err()
                 .unwrap();
             assert!(error.to_string().contains(expected), "{error}");
         }
+    }
+
+    #[test]
+    fn firmware_4_without_an_app_key_is_a_clear_error() {
+        let mock = Mock::start();
+        for app_key in [None, Some("")] {
+            let error = HandyLink::connect_to("FW4", app_key, HandyHosting::Cloud, mock.endpoints())
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains("FW4"), "{error}");
+        }
+        assert_eq!(mock.paths(), ["connected", "info", "connected", "info"]);
+    }
+
+    #[test]
+    fn firmware_3_stays_on_v2_even_with_an_app_key() {
+        let mock = Mock::start();
+        let link = HandyLink::connect_to("KEY", Some("APPKEY"), HandyHosting::Lan, mock.endpoints())
+            .unwrap();
+        assert_eq!(link.device, "Handy FW3 3.2.4");
+        let paths = mock.paths();
+        assert_eq!(paths[..3], ["connected", "info", "mode"]);
+        assert!(paths.iter().all(|p| p != "mode2"));
+        let mode = mock.last("mode");
+        assert!(mode.headers.get("x-api-key").is_none());
     }
     #[test]
     fn actions_serialise_as_csv_the_lan_server_hands_out() {

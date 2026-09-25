@@ -18,7 +18,11 @@ export class HttpError extends Error {
 
 export async function request(url: string, init: RequestInit & { headers?: Record<string, string> }): Promise<Response> {
   const res = await fetch(url, { ...init, signal: init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)]) : AbortSignal.timeout(FETCH_TIMEOUT_MS) })
-  if (!res.ok) throw new HttpError(res.status, url)
+  const conditional = init.headers !== undefined && ('If-None-Match' in init.headers || 'If-Modified-Since' in init.headers)
+  if (!res.ok && !(conditional && res.status === 304)) {
+    await res.body?.cancel()
+    throw new HttpError(res.status, url)
+  }
   return res
 }
 

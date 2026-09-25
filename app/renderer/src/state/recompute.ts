@@ -22,6 +22,11 @@ interface RecomputeStore {
 
 const same = (a: RunSetup | null, b: RunSetup) => a !== null && a.key === b.key && a.hash === b.hash
 
+function keepsFileStroke(): boolean {
+  if (useSettings.getState().settings?.tracking.generateForScripted ?? true) return false
+  return useTracking.getState().axes.L0.source === 'off' && usePlayer.getState().scripts.some((s) => s.axis === 'L0')
+}
+
 function hosted(): ConfiguredOutput[] {
   const d = useDevices.getState()
   return d.outputs.filter((o) => HOSTED.includes(o.config.kind) && d.states[o.id]?.status === 'connected')
@@ -66,7 +71,7 @@ export const useRecompute = create<RecomputeStore>()((set, get) => {
       })
     } catch (e) {
       if (engine.generateState().status !== 'cancelled') console.warn('recompute', e)
-      declined = s
+      if (!keepsFileStroke()) declined = s
       clear()
     }
     running = null
@@ -90,7 +95,7 @@ export const useRecompute = create<RecomputeStore>()((set, get) => {
     },
     check: async () => {
       const s = currentSetup()
-      if (!s || ![...s.sources].some((src) => src !== 'off')) {
+      if (!s || ![...s.sources].some((src) => src !== 'off') || keepsFileStroke()) {
         if (running) engine.generateCancel()
         else clear()
         return

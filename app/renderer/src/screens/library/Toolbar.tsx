@@ -9,6 +9,8 @@ import { Button } from '@/components/ui/Button'
 import { IconButton } from '@/components/ui/IconButton'
 import { Slider } from '@/components/ui/Slider'
 import { cx } from '@/lib/cx'
+import { ipcMessage } from '@/lib/errors'
+import { invoke } from '@/ipc'
 import { useT } from '@/state/i18n'
 import { GRID_SIZE, useLibrary, type View } from '@/state/library'
 import { useUi } from '@/state/ui'
@@ -101,7 +103,7 @@ export function Toolbar({ title }: { title: string }) {
   return (
     <>
     {playlistId !== null && <div className="playlist-heading">
-      <div><span className="eyebrow">{t('library.playlist.label')}</span><h1>{title}<span className="count">{playlistCount}</span></h1></div>
+      <div><span className="eyebrow">{t('library.playlist.label')}</span><PlaylistTitle key={playlistId} id={playlistId} title={title} count={playlistCount} /></div>
       <div className="playlist-play">
         <Button variant="primary" disabled={starting || !playlistCount || movingPlaylist !== null} onClick={() => void playPlaylist(false)}><Play />{t('library.playlist.play')}</Button>
         <DropdownMenu.Root><DropdownMenu.Trigger asChild><Button variant="primary" className="playlist-play-more" aria-label={t('library.playlist.playbackOptions')} disabled={starting || !playlistCount || movingPlaylist !== null}><ChevronDown /></Button></DropdownMenu.Trigger>
@@ -217,6 +219,51 @@ export function Toolbar({ title }: { title: string }) {
     {(playlistError || playError) && <div className="playlist-error" role="alert">{playlistError || playError}</div>}
     </>
   )
+}
+
+function PlaylistTitle({ id, title, count }: { id: number; title: string; count: number }) {
+  const t = useT()
+  const [name, setName] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const input = useRef<HTMLInputElement>(null)
+  const save = async () => {
+    if (saving || !name?.trim()) return
+    setSaving(true)
+    try {
+      await invoke('library:renamePlaylist', id, name.trim())
+      await useLibrary.getState().refresh()
+      setName(null)
+    } catch (error) {
+      input.current?.setCustomValidity(ipcMessage(error))
+      input.current?.reportValidity()
+    } finally {
+      setSaving(false)
+    }
+  }
+  return <h1>
+    {name === null ? <span onDoubleClick={() => setName(title)}>{title}</span> : (
+      <input ref={input} autoFocus className="input playlist-title-input" aria-label={t('library.sidebar.playlistName')}
+        value={name} readOnly={saving}
+        onFocus={(event) => event.currentTarget.select()}
+        onChange={(event) => {
+          event.currentTarget.setCustomValidity('')
+          setName(event.currentTarget.value)
+        }}
+        onBlur={() => { if (!saving) setName(null) }}
+        onKeyDown={(event) => {
+          event.stopPropagation()
+          if (event.nativeEvent.isComposing) return
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            void save()
+          } else if (event.key === 'Escape') {
+            event.preventDefault()
+            if (!saving) setName(null)
+          }
+        }} />
+    )}
+    <span className="count">{count}</span>
+  </h1>
 }
 
 function FilterGroup<T extends string>({ label, value, options, onChange }: { label: string; value: T | undefined; options: ReadonlyArray<readonly [T, string]>; onChange: (v: T | undefined) => void }) {

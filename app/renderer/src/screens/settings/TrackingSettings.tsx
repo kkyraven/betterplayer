@@ -22,7 +22,7 @@ export function TrackingSettings() {
   const tracking = useSettings((s) => s.settings?.tracking) ?? defaultTrackingDefaults()
   const ready = useTracking((s) => s.present.detector)
   const defaults = defaultTrackingDefaults()
-  const custom = ['detectEveryMs', 'regionPadding', 'showBox', 'cutSensitivity', 'easeMs', 'clampJumps', 'axes'].some(
+  const custom = ['detectEveryMs', 'regionPadding', 'showBox', 'cutSensitivity', 'easeMs', 'clampJumps', 'generateForScripted', 'axes'].some(
     (key) => JSON.stringify(tracking[key as keyof typeof tracking]) !== JSON.stringify(defaults[key as keyof typeof defaults]),
   )
   const updateDebounced = useSettings((s) => s.updateDebounced)
@@ -256,6 +256,21 @@ export function TrackingSettings() {
               checked={tracking.clampJumps}
               onCheckedChange={(clampJumps) => void update((s) => ({ ...s, tracking: { ...s.tracking, clampJumps } }))}
               label={t('settings.tracking.clampJumps')}
+            />
+          </div>
+        </div>
+        <h3 className="eyebrow">{t('settings.tracking.hosted')}</h3>
+        <div className="panel">
+          <div className="prow">
+            <span>
+              <div className="lbl">{t('settings.tracking.generateForScripted')}</div>
+              <div className="sub">{t('settings.tracking.generateForScriptedSub')}</div>
+            </span>
+            <span className="spacer" />
+            <Switch
+              checked={tracking.generateForScripted}
+              onCheckedChange={(generateForScripted) => void update((s) => ({ ...s, tracking: { ...s.tracking, generateForScripted } }))}
+              label={t('settings.tracking.generateForScripted')}
             />
           </div>
         </div>

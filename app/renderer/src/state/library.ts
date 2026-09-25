@@ -161,6 +161,18 @@ function mergeRows<T extends GridEntry>(held: T[], incoming: T[]): T[] {
   return sameList(held, merged) ? held : merged
 }
 
+function mergeFolders(previous: FolderNode[], incoming: FolderNode[]): FolderNode[] {
+  const byKey = new Map(previous.map((node) => [`${node.rootId}:${node.folder}`, node]))
+  const merged = incoming.map((node) => {
+    const old = byKey.get(`${node.rootId}:${node.folder}`)
+    if (!old) return node
+    const children = mergeFolders(old.children, node.children)
+    return JSON.stringify({ ...old, children: [] }) === JSON.stringify({ ...node, children: [] }) && children === old.children
+      ? old : { ...node, children }
+  })
+  return merged.length === previous.length && merged.every((node, i) => node === previous[i]) ? previous : merged
+}
+
 export const useLibrary = create<LibraryState>()((set, get) => {
   const tagWrites = new Map<number, { confirmed: string[]; latest: string[]; tail: Promise<void> }>()
   const publishTags = (id: number, tags: string[], error = false) => set((s) => ({
@@ -275,9 +287,17 @@ export const useLibrary = create<LibraryState>()((set, get) => {
     init: () => {
       void get().refresh()
       void get().query('reset')
-      on('library:progress', (progress) => set({ progress }))
+      on('library:progress', (progress) => {
+        const finished = get().progress.scanning && !progress.scanning
+        set({ progress })
+        if (finished && users.size > 0) void invoke('library:roots').then((roots) => set({ roots }))
+      })
       on('library:changed', (change) => {
-        if (change.kind === 'thumbs') thumbsChange(change.ids)
+        if (change.kind === 'thumbs') {
+          thumbsChange(change.ids)
+          if (users.size > 0) void invoke('library:roots').then((roots) => set({ roots }))
+          else listsStale = true
+        }
         else if (change.kind === 'tags') {
           if (get().search.trim() || get().filters.tag) {
             structuralChange()
@@ -321,15 +341,19 @@ export const useLibrary = create<LibraryState>()((set, get) => {
     },
 
     refresh: async () => {
-      const [roots, counts, folders, playlists, tags, progress] = await Promise.all([
-        invoke('library:roots'),
-        invoke('library:counts'),
-        invoke('library:folders'),
-        invoke('library:playlists'),
-        invoke('library:tags'),
-        invoke('library:progress'),
-      ])
-      set({ roots, counts, folders, playlists, tags, progress, loaded: true })
+      try {
+        const [roots, counts, folders, playlists, tags, progress] = await Promise.all([
+          invoke('library:roots'),
+          invoke('library:counts'),
+          invoke('library:folders'),
+          invoke('library:playlists'),
+          invoke('library:tags'),
+          invoke('library:progress'),
+        ])
+        set((state) => ({ roots, counts, folders: mergeFolders(state.folders, folders), playlists, tags, progress, loaded: true }))
+      } catch (error) {
+        void invoke('app:reportError', `library refresh: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`)
+      }
     },
 
     query: async (mode = 'reset') => {

@@ -505,6 +505,8 @@ export function defaultShortcuts(): Shortcuts {
     d: 'Media.Seek.Forward',
     'shift+a': 'Media.Seek.BackLong',
     'shift+d': 'Media.Seek.ForwardLong',
+    pageup: 'Media.Bookmark.Previous',
+    pagedown: 'Media.Bookmark.Next',
     q: 'Media.Mark.Set',
     e: 'Media.Mark.Go',
     '1': 'Media.Intensity.Down',

@@ -1,11 +1,13 @@
 import { app } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import type { UpdateState } from '@shared/update'
+import { portableDataDir } from './portable'
 
 const CHECK_EVERY = 6 * 60 * 60 * 1000
+const PORTABLE = portableDataDir() !== null
 
 export class Updater {
-  private state: UpdateState = app.isPackaged ? { status: 'idle' } : { status: 'off' }
+  private state: UpdateState = app.isPackaged && !PORTABLE ? { status: 'idle' } : { status: 'off', portable: PORTABLE }
   private timer: NodeJS.Timeout | null = null
 
   constructor(private readonly push: (state: UpdateState) => void) {

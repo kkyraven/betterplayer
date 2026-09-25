@@ -7,8 +7,16 @@ export const FLAG_DERIVED = 2
 export const FLAG_LIVE = 4
 export const FLAG_TRACKED = 8
 
-export const AXIS_IDS: readonly string[] = axes().map((a) => a.id)
-const INDEX = new Map(AXIS_IDS.map((id, i) => [id, i]))
+let ids: readonly string[] | null = null
+let index = new Map<string, number>()
+
+function axisIds(): readonly string[] {
+  if (!ids) {
+    ids = axes().map((a) => a.id)
+    index = new Map(ids.map((id, i) => [id, i]))
+  }
+  return ids
+}
 
 export interface Live {
   timeMs: number
@@ -21,7 +29,7 @@ export interface Live {
 
 type Listener = (live: Live) => void
 
-let current: Live = { outputs: [], timeMs: 0, durationMs: 0, axisValues: new Float64Array(AXIS_IDS.length), axisFlags: new Uint8Array(AXIS_IDS.length), flagsVersion: -1 }
+let current: Live = { outputs: [], timeMs: 0, durationMs: 0, axisValues: new Float64Array(0), axisFlags: new Uint8Array(0), flagsVersion: -1 }
 const listeners = new Set<Listener>()
 
 export function get(): Live {
@@ -60,7 +68,8 @@ function sameValues(a: Float64Array, b: Float64Array): boolean {
 }
 
 export function axisIndex(id: string): number {
-  return INDEX.get(id) ?? -1
+  axisIds()
+  return index.get(id) ?? -1
 }
 
 export function axisValue(id: string): number {
@@ -68,7 +77,7 @@ export function axisValue(id: string): number {
 }
 
 export function axisIdsWith(mask: number): string[] {
-  return AXIS_IDS.filter((_, i) => ((current.axisFlags[i] ?? 0) & mask) !== 0)
+  return axisIds().filter((_, i) => ((current.axisFlags[i] ?? 0) & mask) !== 0)
 }
 
 export function useLive(listener: Listener, deps: DependencyList) {

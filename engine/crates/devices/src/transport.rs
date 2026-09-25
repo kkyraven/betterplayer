@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -322,8 +323,8 @@ impl Conn for StreamConn {
 }
 
 struct Mailbox {
-    line: String,
-    pending: bool,
+    lines: VecDeque<String>,
+    queued_bytes: usize,
     stop: bool,
     error: Option<String>,
     write_us: Option<u32>,
@@ -334,12 +335,15 @@ struct MailboxWriter {
     thread: Option<JoinHandle<()>>,
 }
 
+const STREAM_WRITE_CAP: usize = 1024;
+const STREAM_FRAME_CAP: usize = 16;
+
 impl MailboxWriter {
     fn spawn(mut writer: Box<dyn Write + Send>) -> MailboxWriter {
         let shared = Arc::new((
             Mutex::new(Mailbox {
-                line: String::new(),
-                pending: false,
+                lines: VecDeque::new(),
+                queued_bytes: 0,
                 stop: false,
                 error: None,
                 write_us: None,
@@ -350,19 +354,19 @@ impl MailboxWriter {
             let shared = shared.clone();
             thread::spawn(move || {
                 let (mailbox, wake) = &*shared;
-                let mut line = String::new();
                 loop {
-                    {
+                    let line = {
                         let mut m = mailbox.lock().unwrap();
-                        while !m.pending && !m.stop {
+                        while m.lines.is_empty() && !m.stop {
                             m = wake.wait(m).unwrap();
                         }
-                        if m.stop && !m.pending {
+                        if m.lines.is_empty() {
                             break;
                         }
-                        std::mem::swap(&mut line, &mut m.line);
-                        m.pending = false;
-                    }
+                        let line = m.lines.pop_front().unwrap();
+                        m.queued_bytes -= line.len();
+                        line
+                    };
                     let t0 = Instant::now();
                     let result = writer.write_all(line.as_bytes());
                     let mut m = mailbox.lock().unwrap();
@@ -370,6 +374,9 @@ impl MailboxWriter {
                         Ok(()) => m.write_us = Some(t0.elapsed().as_micros() as u32),
                         Err(e) => {
                             m.error = Some(e.to_string());
+                            m.lines.clear();
+                            m.queued_bytes = 0;
+                            m.stop = true;
                             break;
                         }
                     }
@@ -387,9 +394,17 @@ impl MailboxWriter {
         if let Some(e) = &m.error {
             return Err(io::Error::new(ErrorKind::BrokenPipe, e.clone()));
         }
-        m.line.clear();
-        m.line.push_str(line);
-        m.pending = true;
+        if m.lines.len() >= STREAM_FRAME_CAP || line.len() > STREAM_WRITE_CAP - m.queued_bytes {
+            let error = "device write queue full";
+            m.error = Some(error.into());
+            m.lines.clear();
+            m.queued_bytes = 0;
+            m.stop = true;
+            self.shared.1.notify_one();
+            return Err(io::Error::new(ErrorKind::BrokenPipe, error));
+        }
+        m.queued_bytes += line.len();
+        m.lines.push_back(line.to_owned());
         self.shared.1.notify_one();
         Ok(())
     }
@@ -553,14 +568,14 @@ mod tests {
     }
 
     #[test]
-    fn the_mailbox_writes_the_newest_line_and_reports_a_failed_write() {
+    fn the_mailbox_writes_in_order_and_reports_a_failed_write() {
         let got = Arc::new(Mutex::new(Vec::new()));
         let writer = MailboxWriter::spawn(Box::new(Sink(got.clone(), false)));
         writer.send("L0500\n").unwrap();
         writer.send("L0600\n").unwrap();
         drop(writer);
         let text = String::from_utf8(got.lock().unwrap().clone()).unwrap();
-        assert!(text.ends_with("L0600\n"), "wrote {text:?}");
+        assert_eq!(text, "L0500\nL0600\n");
 
         let failing = MailboxWriter::spawn(Box::new(Sink(got, true)));
         failing.send("L0500\n").unwrap();
@@ -569,6 +584,97 @@ mod tests {
             assert!(Instant::now() < deadline, "the failed write never surfaced");
             thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    struct BlockFirstWrite {
+        sent: std::sync::mpsc::Sender<String>,
+        blocked: Option<std::sync::mpsc::Receiver<()>>,
+    }
+    impl Write for BlockFirstWrite {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.sent.send(String::from_utf8(bytes.to_vec()).unwrap()).unwrap();
+            if let Some(blocked) = self.blocked.take() {
+                blocked.recv_timeout(Duration::from_secs(5))
+                    .map_err(|e| io::Error::new(ErrorKind::TimedOut, e))?;
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+
+    #[test]
+    fn queued_updates_keep_axes_missing_from_the_next_tick() {
+        let (sent, received) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let writer = MailboxWriter::spawn(Box::new(BlockFirstWrite { sent, blocked: Some(blocked) }));
+        writer.send("L05000I10\n").unwrap();
+        let first = received.recv_timeout(Duration::from_secs(2)).unwrap();
+        writer.send("R04000I10 R16000I10 R27000I10 L12000I10 L23000I10\n").unwrap();
+        writer.send("L06000I10 R04500I10\n").unwrap();
+        writer.send("L07000I10\n").unwrap();
+        release.send(()).unwrap();
+        drop(writer);
+        assert_eq!(first, "L05000I10\n");
+        assert_eq!(received.try_iter().collect::<String>(),
+            "R04000I10 R16000I10 R27000I10 L12000I10 L23000I10\nL06000I10 R04500I10\nL07000I10\n");
+    }
+
+    #[test]
+    fn queued_controls_and_level_stops_survive_motion_updates() {
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let writer = MailboxWriter::spawn(Box::new(Sink(got.clone(), false)));
+        let lines = ["D0\nD1\n", "R04000I10 V09000I10\n", "V00000I10\n", "L06000I10\n", "DSTOP\n", "R05000I1000\n"];
+        for line in lines {
+            writer.send(line).unwrap();
+        }
+        drop(writer);
+        assert_eq!(String::from_utf8(got.lock().unwrap().clone()).unwrap(), lines.concat());
+    }
+
+    #[test]
+    fn an_overfull_queue_fails_and_discards_stale_pending_motion() {
+        let (sent, received) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let writer = MailboxWriter::spawn(Box::new(BlockFirstWrite { sent, blocked: Some(blocked) }));
+        writer.send("R05000I10\n").unwrap();
+        let first = received.recv_timeout(Duration::from_secs(2)).unwrap();
+        for _ in 0..STREAM_FRAME_CAP { writer.send("R06000I10\n").unwrap(); }
+        let overflow = writer.send("R07000I10\n").unwrap_err();
+        let next = writer.send("R08000I10\n").unwrap_err();
+        release.send(()).unwrap();
+        drop(writer);
+        assert_eq!(first, "R05000I10\n");
+        assert_eq!(overflow.kind(), ErrorKind::BrokenPipe);
+        assert_eq!(next.to_string(), overflow.to_string());
+        assert_eq!(received.try_iter().count(), 0, "stale queued targets must not drain after failure");
+    }
+
+    #[test]
+    fn oversized_frames_fail_before_writing() {
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let writer = MailboxWriter::spawn(Box::new(Sink(got.clone(), false)));
+        assert!(writer.send(&"x".repeat(STREAM_WRITE_CAP + 1)).is_err());
+        drop(writer);
+        assert!(got.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn partial_writes_preserve_complete_frames() {
+        struct PartialSink(Arc<Mutex<Vec<u8>>>);
+        impl Write for PartialSink {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                let n = bytes.len().min(3);
+                self.0.lock().unwrap().extend_from_slice(&bytes[..n]);
+                Ok(n)
+            }
+            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+        }
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let writer = MailboxWriter::spawn(Box::new(PartialSink(got.clone())));
+        writer.send("R04000I10 L05000I10\n").unwrap();
+        writer.send("R06000I10\n").unwrap();
+        drop(writer);
+        assert_eq!(String::from_utf8(got.lock().unwrap().clone()).unwrap(), "R04000I10 L05000I10\nR06000I10\n");
     }
 
     #[test]

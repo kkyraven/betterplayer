@@ -12,8 +12,9 @@
 .playlist-drag-source { opacity: .3; }
 .playlist-insertion { position: fixed; z-index: 90; pointer-events: none; background: var(--accent); border-radius: 2px; }
 .playlist-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 23px 0 22px; border-bottom: 1px solid var(--line); }
-.playlist-heading > div:first-child { display: grid; gap: 7px; min-width: 0; }
+.playlist-heading > div:first-child { flex: 1; display: grid; gap: 7px; min-width: 0; }
 .playlist-heading h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.playlist-heading .playlist-title-input { field-sizing: content; width: auto; height: auto; min-width: 3ch; max-width: calc(100% - 50px); padding: 0 4px; font: inherit; letter-spacing: inherit; }
 .playlist-heading .eyebrow { color: var(--text-3); }
 .playlist-heading .count { margin-left: 10px; color: var(--text-3); font-size: 13px; font-weight: 500; }
 .playlist-play { display: flex; flex: none; }

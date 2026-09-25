@@ -14,7 +14,12 @@ import { cx } from '@/lib/cx'
 import './AxesTable.css'
 
 const SOURCE_MODEL: Partial<Record<TrackSource, ModelKind>> = { 'ai-motion': 'motion', 'ai-music': 'music' }
-const MUSIC_MODELS = models().filter((m) => m.kind === 'music').map((m) => ({ id: m.id, label: m.label }))
+let cachedMusicModels: { id: string; label: string }[] | null = null
+function shippedMusicModels(): { id: string; label: string }[] {
+  return (cachedMusicModels ??= models()
+    .filter((m) => m.kind === 'music')
+    .map((m) => ({ id: m.id, label: m.label })))
+}
 const percent = (v: number) => `${v}%`
 
 interface Props {
@@ -33,7 +38,7 @@ export function AxesTable({ axes, onChange, scripted, beat = true, present, fapt
   const update = useSettings((s) => s.update)
   const refreshModels = useTracking((s) => s.refreshModels)
   const millis = (v: number) => (v === 0 ? t('common.off') : t('common.millisShort', { value: v }))
-  const musicModels = useMemo(() => MUSIC_MODELS.map((m) => ({ ...m, locked: isSupporterModel(m.id) && !premium })), [premium])
+  const musicModels = useMemo(() => shippedMusicModels().map((m) => ({ ...m, locked: isSupporterModel(m.id) && !premium })), [premium])
   const entitled = entitledMusicModel(chosenMusic, premium)
   const playing = musicModels.find((m) => m.id === entitled)?.id ?? musicModels[0]?.id ?? null
   const chooseMusic = async (id: string) => {

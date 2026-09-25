@@ -68,7 +68,7 @@ useBrowser.subscribe((s, prev) => {
 
 window.addEventListener('beforeunload', () => {
   if (retry !== null) window.clearTimeout(retry)
-  engine.stopIntiface()
+  if (engine) engine.stopIntiface()
 })
 
 export interface IntifaceStatus {

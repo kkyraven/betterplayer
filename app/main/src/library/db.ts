@@ -26,6 +26,7 @@ import {
 import { PROJECTION_KINDS, type ProjectionKind } from '@shared/projection'
 import { ROOT_KINDS, type RootKind } from '@shared/remote'
 import { holdBack, mixRecommended, recommendSeed, type MixEntry } from './recommend'
+import type { Validators } from './servers/images'
 import { SEARCH_SCHEMA, SearchIndex, type CompiledSearch } from './search-index'
 import { normalizeSearch, type ImportedPerformer, type Performer } from '@shared/search'
 import { sessionRun, sessionSetup } from '@shared/session-settings'
@@ -285,7 +286,50 @@ UPDATE media SET favourite = 1 WHERE rating >= 4;
 UPDATE media SET remote_stamp = '${FOLDED_STAMP}' WHERE root_id IN (SELECT id FROM roots WHERE kind = 'heresphere');
 `
 
-const SCHEMA_VERSION = 19
+const SCHEMA_V20 = `
+CREATE TABLE remote_asset_jobs (
+  media_id INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK(kind IN ('scripts', 'thumb', 'strip')),
+  source TEXT NOT NULL,
+  generation INTEGER NOT NULL DEFAULT 1,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt INTEGER,
+  blocked_until INTEGER NOT NULL DEFAULT 0,
+  priority INTEGER NOT NULL,
+  error TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (media_id, kind)
+);
+CREATE INDEX remote_asset_jobs_due ON remote_asset_jobs(next_attempt, priority);
+`
+
+const SCHEMA_V21 = `
+ALTER TABLE remote_assets ADD COLUMN validators TEXT NOT NULL DEFAULT '';
+`
+
+export type AssetKind = 'scripts' | 'thumb' | 'strip'
+export interface AssetJob {
+  mediaId: number
+  rootId: number
+  durationMs: number
+  kind: AssetKind
+  source: string
+  generation: number
+  attempts: number
+  nextAttempt: number | null
+  priority: number
+}
+
+const SCHEMA_VERSION = 21
+
+function parseValidators(raw: string): Validators {
+  if (!raw) return {}
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? parsed as Validators : {}
+  } catch {
+    return {}
+  }
+}
 
 const hasColumn = (db: DatabaseSync, table: string, column: string) =>
   db.prepare(`SELECT 1 FROM pragma_table_info(?) WHERE name = ?`).get(table, column) !== undefined
@@ -335,6 +379,10 @@ function migrate(db: DatabaseSync) {
       case 18:
         if (!hasColumn(db, 'media', 'thumb_quality')) db.exec('ALTER TABLE media ADD COLUMN thumb_quality INTEGER NOT NULL DEFAULT 0')
         if (!hasColumn(db, 'media', 'strip_quality')) db.exec('ALTER TABLE media ADD COLUMN strip_quality INTEGER NOT NULL DEFAULT 0')
+      case 19:
+        db.exec(SCHEMA_V20)
+      case 20:
+        db.exec(SCHEMA_V21)
       default:
         break
     }
@@ -500,7 +548,7 @@ export class LibraryDb {
 
   constructor(file: string) {
     mkdirSync(dirname(file), { recursive: true })
-    this.db = new DatabaseSync(file)
+    this.db = new DatabaseSync(file, { timeout: 5000 })
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec('PRAGMA synchronous = NORMAL')
     migrate(this.db)
@@ -551,12 +599,19 @@ export class LibraryDb {
   }
 
   roots(): LibraryRoot[] {
-    return this.stmt('SELECT * FROM roots ORDER BY id').all().map(toRoot)
+    return this.stmt('SELECT * FROM roots ORDER BY id').all().map((row) => this.withAssetError(row))
   }
 
   root(id: number): LibraryRoot | null {
     const row = this.stmt('SELECT * FROM roots WHERE id = ?').get(id)
-    return row ? toRoot(row) : null
+    return row ? this.withAssetError(row) : null
+  }
+
+  private withAssetError(row: Row): LibraryRoot {
+    const root = toRoot(row)
+    const failure = this.stmt(`SELECT j.error FROM remote_asset_jobs j JOIN media m ON m.id = j.media_id
+      WHERE m.root_id = ? AND j.error != '' LIMIT 1`).get(root.id)
+    return failure ? { ...root, error: [root.error, text(failure, 'error')].filter(Boolean).join('\n') } : root
   }
 
   addRoot(path: string): LibraryRoot {
@@ -658,9 +713,10 @@ export class LibraryDb {
     const root = num(media, 'root_id')
     this.transaction(() => {
       this.stmt(`INSERT INTO media_details(media_id, description, studio, filename, import_version) VALUES (?, ?, ?, ?, 1)
-        ON CONFLICT(media_id) DO UPDATE SET description = excluded.description, studio = excluded.studio, filename = excluded.filename, import_version = 1`)
+        ON CONFLICT(media_id) DO UPDATE SET description = excluded.description, studio = excluded.studio, filename = excluded.filename, import_version = 1
+        WHERE description != excluded.description OR studio != excluded.studio OR filename != excluded.filename OR import_version != 1`)
         .run(id, data.description, data.studio, data.filename)
-      this.stmt('DELETE FROM media_performers WHERE media_id = ?').run(id)
+      const performerIds: number[] = []
       for (const person of data.performers) {
         const name = person.name.trim()
         if (!name) continue
@@ -670,7 +726,13 @@ export class LibraryDb {
           ON CONFLICT(root_id, source_key) DO UPDATE SET name = excluded.name, aliases = excluded.aliases
           WHERE name != excluded.name OR aliases != excluded.aliases RETURNING id`).get(root, key, name, aliases)
           ?? this.stmt('SELECT id FROM performers WHERE root_id = ? AND source_key = ?').get(root, key)
-        if (row) this.stmt('INSERT OR IGNORE INTO media_performers(media_id, performer_id) VALUES (?, ?)').run(id, num(row, 'id'))
+        if (row) performerIds.push(num(row, 'id'))
+      }
+      const previous = this.stmt('SELECT performer_id FROM media_performers WHERE media_id = ? ORDER BY performer_id').all(id).map((r) => num(r, 'performer_id'))
+      const next = [...new Set(performerIds)].sort((a, b) => a - b)
+      if (previous.length !== next.length || previous.some((value, i) => value !== next[i])) {
+        this.stmt('DELETE FROM media_performers WHERE media_id = ?').run(id)
+        for (const person of next) this.stmt('INSERT INTO media_performers(media_id, performer_id) VALUES (?, ?)').run(id, person)
       }
     })
   }
@@ -787,6 +849,10 @@ export class LibraryDb {
       this.stmt("UPDATE media SET tags_ready = 0 WHERE remote_key != '' AND tags_ready != 1 AND duration_ms > 0").run()
       return this.tagRows("remote_key != '' AND tags_ready = 0")
     })
+  }
+
+  pendingServerTagRows(): TagRow[] {
+    return this.tagRows("remote_key != '' AND tags_ready = 0 AND duration_ms > 0")
   }
 
   private tagRows(where: string): TagRow[] {
@@ -1221,13 +1287,16 @@ export class LibraryDb {
 
   setTags(mediaId: number, tags: string[]) {
     const names = [...new Set(tags.map(tagName).filter(Boolean))]
+    const previous = this.stmt('SELECT t.id, t.name FROM media_tags mt JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = ? ORDER BY t.name').all(mediaId)
+    names.sort()
+    if (previous.length === names.length && previous.every((row, i) => text(row, 'name') === names[i])) return
     this.transaction(() => {
       this.stmt('DELETE FROM media_tags WHERE media_id = ?').run(mediaId)
       for (const name of names) {
         this.stmt('INSERT OR IGNORE INTO tags (name) VALUES (?)').run(name)
         this.stmt('INSERT OR IGNORE INTO media_tags (media_id, tag_id) SELECT ?, id FROM tags WHERE name = ?').run(mediaId, name)
       }
-      this.stmt('DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM media_tags)').run()
+      for (const row of previous) this.stmt('DELETE FROM tags WHERE id = ? AND NOT EXISTS (SELECT 1 FROM media_tags WHERE tag_id = ?)').run(num(row, 'id'), num(row, 'id'))
     })
   }
 
@@ -1503,13 +1572,79 @@ export class LibraryDb {
     })
   }
 
-  remoteAsset(id: number, kind: 'thumb' | 'strip') {
-    const row = this.stmt('SELECT source, checked_at, digest FROM remote_assets WHERE media_id = ? AND kind = ?').get(id, kind)
-    return row ? { source: text(row, 'source'), checkedAt: num(row, 'checked_at'), digest: text(row, 'digest') } : null
+  remoteSyncRows(rootId: number, after: number) {
+    return this.stmt(`SELECT m.id, m.path, m.remote_key, m.remote_stamp, m.scripts_stamp, m.rating, m.favourite,
+      coalesce(d.import_version, 0) AS imported,
+      EXISTS(SELECT 1 FROM remote_asset_jobs j WHERE j.media_id = m.id AND j.kind = 'scripts') AS scripts_queued,
+      (SELECT json_group_array(name) FROM (SELECT t.name FROM media_tags mt JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = m.id ORDER BY t.name)) AS tag_names
+      FROM media m LEFT JOIN media_details d ON d.media_id = m.id WHERE m.root_id = ? AND m.id > ? ORDER BY m.id LIMIT 100`)
+      .all(rootId, after).map((r) => ({ id: num(r, 'id'), key: text(r, 'remote_key'), path: text(r, 'path'), stamp: text(r, 'remote_stamp'),
+        scriptsStamp: text(r, 'scripts_stamp'), scriptsQueued: num(r, 'scripts_queued') !== 0, imported: num(r, 'imported') === 1,
+        rating: num(r, 'rating'), favourite: num(r, 'favourite') !== 0, tags: strings(text(r, 'tag_names')) }))
   }
 
-  setRemoteAsset(id: number, kind: 'thumb' | 'strip', source: string, digest: string, at: number) {
-    this.stmt('INSERT INTO remote_assets (media_id, kind, source, digest, checked_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(media_id, kind) DO UPDATE SET source = excluded.source, digest = excluded.digest, checked_at = excluded.checked_at').run(id, kind, source, digest, at)
+  enqueueAsset(id: number, kind: AssetKind, source: string, nextAttempt: number | null, priority: number) {
+    this.stmt(`INSERT INTO remote_asset_jobs(media_id, kind, source, next_attempt, priority) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(media_id, kind) DO UPDATE SET source = excluded.source, generation = generation + 1,
+      attempts = 0, error = '', blocked_until = 0, next_attempt = excluded.next_attempt, priority = excluded.priority WHERE source != excluded.source`)
+      .run(id, kind, source, nextAttempt, priority)
+  }
+
+  assetJob(id: number, kind: AssetKind): AssetJob | null {
+    const row = this.stmt(`SELECT j.*, m.root_id, m.duration_ms FROM remote_asset_jobs j JOIN media m ON m.id = j.media_id
+      WHERE j.media_id = ? AND j.kind = ?`).get(id, kind)
+    return row ? toAssetJob(row) : null
+  }
+
+  dueAsset(now: number): AssetJob | null {
+    const row = this.stmt(`SELECT j.*, m.root_id, m.duration_ms FROM remote_asset_jobs j JOIN media m ON m.id = j.media_id
+      WHERE j.next_attempt <= ? ORDER BY j.priority, j.next_attempt, j.media_id LIMIT 1`).get(now)
+    return row ? toAssetJob(row) : null
+  }
+
+  nextAssetAttempt(): number | null {
+    const row = this.stmt('SELECT min(next_attempt) AS due FROM remote_asset_jobs').get()
+    return row && row.due !== null ? num(row, 'due') : null
+  }
+
+  pendingAssets(): number {
+    return num(this.stmt('SELECT count(*) AS n FROM remote_asset_jobs WHERE next_attempt IS NOT NULL AND (attempts > 0 OR priority < 2)').get()!, 'n')
+  }
+
+  finishAsset(job: AssetJob, nextAttempt: number | null, attempts = 0, error = '') {
+    this.stmt(`UPDATE remote_asset_jobs SET next_attempt = ?, attempts = ?, error = ?, blocked_until = 0, priority = CASE WHEN ? = 0 THEN 2 ELSE priority END
+      WHERE media_id = ? AND kind = ? AND generation = ?`).run(nextAttempt, attempts, error, attempts, job.mediaId, job.kind, job.generation)
+  }
+
+  repairAsset(job: AssetJob, priority: number) {
+    const now = Date.now()
+    this.stmt(`UPDATE remote_asset_jobs SET priority = min(priority, ?),
+      next_attempt = CASE WHEN attempts = 0 AND blocked_until <= ? THEN min(coalesce(next_attempt, ?), ?) ELSE next_attempt END
+      WHERE media_id = ? AND kind = ? AND generation = ?`).run(priority, now, now, now, job.mediaId, job.kind, job.generation)
+  }
+
+  deferAssetScope(rootId: number | null, kind: AssetKind | null, until: number) {
+    this.stmt(`UPDATE remote_asset_jobs SET next_attempt = max(next_attempt, ?), blocked_until = max(blocked_until, ?) WHERE next_attempt IS NOT NULL
+      AND (? IS NULL OR kind = ?) AND (? IS NULL OR media_id IN (SELECT id FROM media WHERE root_id = ?))`)
+      .run(until, until, kind, kind, rootId, rootId)
+  }
+
+  remoteAssetPage(rootId: number, after: number) {
+    return this.stmt(`SELECT a.*, m.duration_ms FROM remote_assets a JOIN media m ON m.id = a.media_id
+      WHERE m.id IN (SELECT DISTINCT a.media_id FROM remote_assets a JOIN media m ON m.id = a.media_id WHERE m.root_id = ? AND m.id > ? ORDER BY m.id LIMIT 100) ORDER BY m.id`).all(rootId, after)
+      .map((r) => ({ id: num(r, 'media_id'), kind: text(r, 'kind') as 'thumb' | 'strip', source: text(r, 'source'),
+        checkedAt: num(r, 'checked_at'), digest: text(r, 'digest') }))
+  }
+
+  remoteAsset(id: number, kind: 'thumb' | 'strip') {
+    const row = this.stmt('SELECT source, checked_at, digest, validators FROM remote_assets WHERE media_id = ? AND kind = ?').get(id, kind)
+    return row ? { source: text(row, 'source'), checkedAt: num(row, 'checked_at'), digest: text(row, 'digest'), validators: parseValidators(text(row, 'validators')) } : null
+  }
+
+  setRemoteAsset(id: number, kind: 'thumb' | 'strip', source: string, digest: string, at: number, validators: Validators = {}) {
+    this.stmt(`INSERT INTO remote_assets (media_id, kind, source, digest, checked_at, validators) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(media_id, kind) DO UPDATE SET source = excluded.source, digest = excluded.digest, checked_at = excluded.checked_at, validators = excluded.validators`)
+      .run(id, kind, source, digest, at, Object.keys(validators).length ? JSON.stringify(validators) : '')
     if (kind === 'thumb') this.setCoverStamp(id, digest)
     else this.stmt('UPDATE media SET strip_stamp = ? WHERE id = ?').run(digest, id)
   }
@@ -1654,4 +1789,10 @@ function toMediaRow(row: Row): MediaRow {
     pinned: num(row, 'pinned') > 0,
     hidden: num(row, 'hidden') === 1,
   }
+}
+
+function toAssetJob(row: Record<string, SQLOutputValue>): AssetJob {
+  return { mediaId: num(row, 'media_id'), rootId: num(row, 'root_id'), durationMs: num(row, 'duration_ms'),
+    kind: text(row, 'kind') as AssetKind, source: text(row, 'source'), generation: num(row, 'generation'),
+    attempts: num(row, 'attempts'), nextAttempt: row.next_attempt === null ? null : num(row, 'next_attempt'), priority: num(row, 'priority') }
 }

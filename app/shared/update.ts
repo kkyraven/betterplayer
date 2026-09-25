@@ -1,5 +1,5 @@
 export type UpdateState =
-  | { status: 'off' }
+  | { status: 'off'; portable: boolean }
   | { status: 'idle' }
   | { status: 'checking' }
   | { status: 'upToDate' }

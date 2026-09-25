@@ -37,6 +37,8 @@ export const ACTIONS = {
   'Media.Seek.Forward': player('input.action.mediaSeekForward', () => usePlayer.getState().seekBy(4)),
   'Media.Seek.BackLong': player('input.action.mediaSeekBackLong', () => usePlayer.getState().seekBy(-20)),
   'Media.Seek.ForwardLong': player('input.action.mediaSeekForwardLong', () => usePlayer.getState().seekBy(20)),
+  'Media.Bookmark.Previous': player('input.action.mediaBookmarkPrevious', () => usePlayer.getState().stepBookmark(-1)),
+  'Media.Bookmark.Next': player('input.action.mediaBookmarkNext', () => usePlayer.getState().stepBookmark(1)),
   'Media.Mark.Set': player('input.action.mediaMarkSet', () => usePlayer.getState().setMark()),
   'Media.Mark.Go': player('input.action.mediaMarkGo', () => usePlayer.getState().goToMark()),
   'Media.Gap.Skip': player('input.action.mediaGapSkip', skipGap),

@@ -8,17 +8,42 @@ type EngineModule = typeof import('bp-engine')
 
 const ENGINE_ARG = '--bp-engine='
 const enginePath = process.argv.find((a) => a.startsWith(ENGINE_ARG))?.slice(ENGINE_ARG.length)
-if (!enginePath) throw new Error('Missing --bp-engine argument; main passes it through webPreferences.additionalArguments')
 
-const mod: EngineModule = window.require(enginePath)
+let mod: EngineModule | null = null
+let modError: Error | null = null
 
-export const { axes, listPorts, probeSerial, bleScan, toyScan, toyDevices, version, funscriptJson, funscriptBundle, simplifyIndices, beatAnalyse, beatAnalyseAsync, beatGenerate } = mod
-
-export async function readScripts(path: string) {
-  return mod.readScripts(path, await invoke('library:scriptFolders', path))
+function getMod(): EngineModule {
+  if (modError) throw modError
+  if (mod) return mod
+  try {
+    if (!enginePath) throw new Error('Missing --bp-engine argument; main passes it through webPreferences.additionalArguments')
+    mod = window.require(enginePath) as EngineModule
+    return mod
+  } catch (error) {
+    modError = error instanceof Error ? error : new Error(String(error))
+    throw modError
+  }
 }
 
-export const models = (): ModelInfo[] => mod.models() as ModelInfo[]
+export const axes: EngineModule['axes'] = (...args) => getMod().axes(...args)
+export const listPorts: EngineModule['listPorts'] = (...args) => getMod().listPorts(...args)
+export const probeSerial: EngineModule['probeSerial'] = (...args) => getMod().probeSerial(...args)
+export const bleScan: EngineModule['bleScan'] = (...args) => getMod().bleScan(...args)
+export const toyScan: EngineModule['toyScan'] = (...args) => getMod().toyScan(...args)
+export const toyDevices: EngineModule['toyDevices'] = (...args) => getMod().toyDevices(...args)
+export const version: EngineModule['version'] = (...args) => getMod().version(...args)
+export const funscriptJson: EngineModule['funscriptJson'] = (...args) => getMod().funscriptJson(...args)
+export const funscriptBundle: EngineModule['funscriptBundle'] = (...args) => getMod().funscriptBundle(...args)
+export const simplifyIndices: EngineModule['simplifyIndices'] = (...args) => getMod().simplifyIndices(...args)
+export const beatAnalyse: EngineModule['beatAnalyse'] = (...args) => getMod().beatAnalyse(...args)
+export const beatAnalyseAsync: EngineModule['beatAnalyseAsync'] = (...args) => getMod().beatAnalyseAsync(...args)
+export const beatGenerate: EngineModule['beatGenerate'] = (...args) => getMod().beatGenerate(...args)
+
+export async function readScripts(path: string) {
+  return getMod().readScripts(path, await invoke('library:scriptFolders', path))
+}
+
+export const models = (): ModelInfo[] => getMod().models() as ModelInfo[]
 
 export const MAX_HEIGHT = 1440
 export const MAX_OUTPUT_PIXELS = 3840 * 2160
@@ -93,7 +118,8 @@ export const hasYtdlp = Boolean(ytdlp)
 const PICTURE_OPTIONS = { keepaspect: 'no', 'sub-auto': 'no', sid: 'no', 'audio-display': 'no' }
 
 export function createEngine() {
-  engine = new mod.Engine(width, height, frames, {
+  const m = getMod()
+  engine = new m.Engine(width, height, frames, {
     mpvOptions: {
       ...PICTURE_OPTIONS,
       ...(ytdlp ? { ytdl: 'yes', 'script-opts': `ytdl_hook-ytdl_path=${ytdlp}`, 'ytdl-format': 'bestvideo[vcodec^=avc1][height<=1440]+bestaudio/bestvideo[vcodec^=hev][height<=1440]+bestaudio/bestvideo[height<=1440]+bestaudio/best[height<=1440]/best' } : {}),
@@ -107,7 +133,7 @@ export function createEngine() {
 }
 
 export function createVideoPlayer(w: number, h: number, buffers: Uint8Array[]) {
-  return new mod.VideoPlayer(w, h, buffers, { hwdec: engine.hwdec(), mpvOptions: PICTURE_OPTIONS })
+  return new (getMod().VideoPlayer)(w, h, buffers, { hwdec: engine.hwdec(), mpvOptions: PICTURE_OPTIONS })
 }
 
 let displayHz = 60

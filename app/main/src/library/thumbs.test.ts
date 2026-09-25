@@ -24,7 +24,7 @@ it('refreshes older local previews without hiding them or invalidating server im
     }
     db.close()
     const old = new DatabaseSync(file)
-    old.exec('ALTER TABLE media DROP COLUMN thumb_quality; ALTER TABLE media DROP COLUMN strip_quality; PRAGMA user_version = 18')
+    old.exec('DROP TABLE remote_asset_jobs; ALTER TABLE remote_assets DROP COLUMN validators; ALTER TABLE media DROP COLUMN thumb_quality; ALTER TABLE media DROP COLUMN strip_quality; PRAGMA user_version = 18')
     old.close()
     db = new LibraryDb(file)
     expect(db.stamp(path)).toMatchObject({ thumb: 'pending', strip: 'pending' })

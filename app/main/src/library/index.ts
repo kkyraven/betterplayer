@@ -3,7 +3,7 @@ import { statSync, watch, type FSWatcher } from 'node:fs'
 import { access, copyFile, readdir, rename, stat, unlink } from 'node:fs/promises'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { nativeImage, net } from 'electron'
+import { net } from 'electron'
 import type { AxisId } from '@shared/axes'
 import { isMediaPath, isVideoPath, type GeneratedResult, type GeneratedScriptRow, type IpcEvent, type IpcEvents } from '@shared/ipc'
 import type { DropResult, FolderNode, LibraryChange, LibraryCounts, LibraryRoot, MediaDetail, MediaIndexRow, MediaPage, MediaQuery, Playlist, ScanProgress, Tag } from '@shared/library'
@@ -21,6 +21,7 @@ import { ScriptScanner } from './scripts'
 import { detectServer, makeAdapter, type Adapter } from './servers/adapter'
 import { baseUrl, headerList } from './servers/http'
 import { ServerSync } from './servers/sync'
+import { PosterDecoder } from './servers/poster'
 import { StashAdapter } from './servers/stash'
 import { RemoteWrites } from './servers/writes'
 import { TagQueue, type TagJob } from './tagger'
@@ -99,18 +100,21 @@ export class Library {
   private readonly tagger: TagQueue
   private readonly jobs: JobSink
   private readonly scanner: Scanner
+  private closed = false
   private emit: Emitter = () => {}
   private watchers = new Map<number, FSWatcher>()
   private rescanTimers = new Map<number, NodeJS.Timeout>()
-  private readonly progressChanged = throttle(() => this.emit('library:progress', this.progress()), 250)
+  private readonly progressChanged = throttle(() => { if (!this.closed) this.emit('library:progress', this.progress()) }, 250)
   private readonly thumbsDone = new IdBatch((ids) => this.changed({ kind: 'thumbs', ids }), THUMBS_EVERY_MS)
   private readonly tagsDone = new IdBatch((ids) => this.changed({ kind: 'tags', ids }), THUMBS_EVERY_MS)
   private readonly writeBack: RemoteWrites
   private readonly servers: ServerSync
+  private readonly posterDecoder = new PosterDecoder()
+  private readonly serverChanged = throttle(() => this.changed({ kind: 'scan' }), 2000)
   private readonly adapters = new Map<number, Adapter>()
   private readonly groupImports = new Set<number>()
   private autoTag = false
-  private tagServers = false
+  private tagServers: boolean | null = null
 
   constructor(options: LibraryOptions) {
     this.db = new LibraryDb(join(options.dataDir, 'library.db'))
@@ -119,16 +123,13 @@ export class Library {
     this.thumbs = new ThumbQueue(options.dataDir, this.db, { done: (id) => this.thumbsDone.add(id), progress: this.progressChanged })
     const scripts = new ScriptScanner(options.enginePath)
     this.servers = new ServerSync(this.db, scripts, join(options.dataDir, 'remote'), (id) => this.thumbs.file('thumb', id), (id) => this.thumbs.file('strip', id), {
-      changed: () => this.changed({ kind: 'scan' }),
+      changed: this.serverChanged,
+      image: (id) => this.thumbsDone.add(id),
       progress: this.progressChanged,
       editing: (id) => this.db.hasRemoteWrite(id),
-      tagging: () => this.tagServers,
+      tagging: () => this.tagServers === true,
       tag: (job) => this.tagger.enqueue(job),
-      decodePoster: (bytes) => {
-        const image = nativeImage.createFromBuffer(bytes)
-        if (image.isEmpty()) throw new Error(t('library.error.invalidThumbnail'))
-        return image.resize({ width: 480 }).toJPEG(85)
-      },
+      decodePoster: (bytes, signal) => this.posterDecoder.decode(bytes, signal),
     })
     this.tagger = new TagQueue(options.modelsDir, options.enginePath, this.db, {
       done: (id) => {
@@ -160,7 +161,7 @@ export class Library {
   }
 
   private changed(change: LibraryChange) {
-    this.emit('library:changed', change)
+    if (!this.closed) this.emit('library:changed', change)
   }
 
   setAutoTag(on: boolean) {
@@ -170,9 +171,10 @@ export class Library {
   }
 
   setTagServers(on: boolean) {
-    if (on === this.tagServers) return
+    const before = this.tagServers
+    if (on === before) return
     this.tagServers = on
-    const rows = this.db.setServerTagging(on)
+    const rows = before === null ? (on ? this.db.pendingServerTagRows() : []) : this.db.setServerTagging(on)
     if (!on) this.tagger.remove(this.db.remoteRowIds())
     for (const job of rows) this.tagger.enqueue(this.tagJob(job))
     this.tagger.wake()
@@ -183,7 +185,7 @@ export class Library {
   }
 
   retagAll(): number {
-    const jobs = this.db.resetTags(this.tagServers)
+    const jobs = this.db.resetTags(this.tagServers === true)
     for (const job of jobs) this.tagger.enqueue(this.tagJob(job))
     this.tagger.wake()
     return jobs.length
@@ -202,6 +204,7 @@ export class Library {
 
   start() {
     this.writeBack.start()
+    this.servers.assets.wake()
     setTimeout(() => this.scanner.scan(), 1500)
     for (const root of this.db.roots()) if (root.kind === 'folder') this.watchRoot(root)
   }
@@ -228,11 +231,15 @@ export class Library {
   }
 
   close() {
+    this.closed = true
     for (const id of [...this.watchers.keys()]) this.unwatchRoot(id)
     this.thumbsDone.close()
     this.tagsDone.close()
     this.writeBack.close()
     this.tagger.close()
+    this.scanner.close()
+    this.servers.close()
+    this.posterDecoder.close()
     this.db.close()
   }
 
@@ -318,6 +325,7 @@ export class Library {
     this.unwatchRoot(id)
     this.adapters.delete(id)
     const ids = this.db.mediaIds(id).map((m) => m.id)
+    this.servers.assets.cancel(ids)
     this.db.removeRoot(id)
     this.changed({ kind: 'meta' })
     await this.jobs.remove(ids)
@@ -356,7 +364,7 @@ export class Library {
   }
 
   progress(): ScanProgress {
-    return { ...this.scanner.state, thumbsPending: this.thumbs.pending(), tagsPending: this.tagger.pending() }
+    return { ...this.scanner.state, thumbsPending: this.thumbs.pending() + this.servers.assets.pending(), tagsPending: this.tagger.pending() }
   }
 
   prepareSearch(q: MediaQuery): Promise<void> {

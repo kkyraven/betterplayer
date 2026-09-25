@@ -18,6 +18,7 @@ export default defineConfig({
         input: {
           index: resolve(__dirname, 'preload/src/index.ts'),
           browser: resolve(__dirname, 'preload/src/browser.ts'),
+          poster: resolve(__dirname, 'preload/src/poster.ts'),
         },
         output: { format: 'cjs', entryFileNames: '[name].js' },
       },

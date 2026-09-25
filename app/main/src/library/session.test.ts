@@ -67,7 +67,7 @@ it('migrates version sixteen additively while keeping old session history and wa
   db.close()
   const raw = new DatabaseSync(file)
   raw.exec(
-    'ALTER TABLE media DROP COLUMN favourite; DROP TABLE saved_sessions; ALTER TABLE sessions DROP COLUMN name; ALTER TABLE sessions DROP COLUMN favourite; ALTER TABLE sessions DROP COLUMN ended_at; ALTER TABLE sessions DROP COLUMN status; ALTER TABLE sessions DROP COLUMN run_json; PRAGMA user_version = 16',
+    'DROP TABLE remote_asset_jobs; ALTER TABLE remote_assets DROP COLUMN validators; ALTER TABLE media DROP COLUMN favourite; DROP TABLE saved_sessions; ALTER TABLE sessions DROP COLUMN name; ALTER TABLE sessions DROP COLUMN favourite; ALTER TABLE sessions DROP COLUMN ended_at; ALTER TABLE sessions DROP COLUMN status; ALTER TABLE sessions DROP COLUMN run_json; PRAGMA user_version = 16',
   )
   raw.close()
   db = new LibraryDb(file)

@@ -30,6 +30,7 @@ type Handler<C extends IpcChannel> = (...args: Parameters<IpcContract[C]>) => Re
 const handlers = new Map<IpcChannel, (...args: never[]) => unknown>()
 
 export function send<E extends IpcEvent>(win: BrowserWindow, event: E, payload: IpcEvents[E]) {
+  if (win.isDestroyed() || win.webContents.isDestroyed()) return
   win.webContents.send(event, payload)
 }
 
@@ -230,7 +231,7 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   handle('admin:stats', (days) => account.adminStats(days))
   handle('settings:set', (settings) => {
     store.set(settings)
-    void syncLanguage(store)
+    void syncLanguage(store).catch((error: unknown) => logEvent({ processType: 'main', reason: 'error', message: `syncLanguage: ${String(error)}` }))
     syncNativeTheme(store, win)
     remote.apply(store.get())
     client.apply(store.get())

@@ -46,3 +46,34 @@ it('recovers an unchanged video after a missing probe, then resumes incremental 
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+
+it('stops an active scan before it can write or enqueue work after shutdown', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'bp-scanner-close-'))
+  const db = new LibraryDb(':memory:')
+  let closed = false
+  try {
+    await writeFile(join(dir, 'scene.mp4'), '')
+    const root = db.addRoot(dir)
+    let finish: () => void = () => {}
+    const scriptsFor = vi.fn(() => new Promise<[]>((resolve) => { finish = () => resolve([]) }))
+    const enqueue = vi.fn()
+    const write = vi.spyOn(db, 'upsertMedia')
+    const scanned = vi.spyOn(db, 'setRootScanned')
+    vi.mocked(probe).mockResolvedValue({ durationMs: 1000, width: 32, height: 18, codec: '' })
+    const scanner = new Scanner(db, { scriptsFor }, { enqueue, remove: vi.fn() }, { progress: vi.fn(), changed: vi.fn() }, { sync: vi.fn() })
+    scanner.scan(root.id)
+    await vi.waitFor(() => expect(scriptsFor).toHaveBeenCalled())
+    scanner.close()
+    db.close()
+    closed = true
+    finish()
+    await vi.waitFor(() => expect(scanner.state.scanning).toBe(false))
+    expect(write).not.toHaveBeenCalled()
+    expect(scanned).not.toHaveBeenCalled()
+    expect(enqueue).not.toHaveBeenCalled()
+  } finally {
+    if (!closed) db.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})

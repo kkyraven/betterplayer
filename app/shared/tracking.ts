@@ -438,6 +438,7 @@ export interface TrackingDefaults {
   models: ModelChoice
   defaultPace: number
   motionDefault: boolean
+  generateForScripted: boolean
   regionSource: 'auto' | 'centre'
   detectEveryMs: number
   regionPadding: number
@@ -479,6 +480,7 @@ export function defaultTrackingDefaults(): TrackingDefaults {
     models: { ...DEFAULT_MODELS },
     defaultPace: PACE_DEFAULT,
     motionDefault: true,
+    generateForScripted: true,
     regionSource: 'auto',
     detectEveryMs: DETECT_EVERY_DEFAULT_MS,
     regionPadding: REGION_PADDING_DEFAULT,

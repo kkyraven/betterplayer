@@ -25,11 +25,14 @@ function fallbackDirs(): string[] {
   }
   return dirs
 }
-const FALLBACK_DIRS = fallbackDirs()
+let fallbackCache: string[] | null = null
+function fallback(): string[] {
+  return (fallbackCache ??= fallbackDirs())
+}
 
 export class ToolMissingError extends Error {
   constructor(tool: Tool) {
-    super(`${tool} not found on PATH or in ${FALLBACK_DIRS.join(', ')}`)
+    super(`${tool} not found on PATH or in ${fallback().join(', ')}`)
   }
 }
 
@@ -59,7 +62,7 @@ export async function runToolBytes(tool: Tool, args: string[], timeoutMs: number
   } catch (e) {
     if (!(e instanceof ToolMissingError)) throw e
   }
-  for (const dir of FALLBACK_DIRS) {
+  for (const dir of fallback()) {
     signal?.throwIfAborted()
     if (existsSync(join(dir, win32 ? `${tool}.exe` : tool))) return exec(tool, dir, args, timeoutMs, signal)
   }

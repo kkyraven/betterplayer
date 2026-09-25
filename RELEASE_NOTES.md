@@ -1,5 +1,10 @@
 # Release notes
 
+## 0.7.2
+
+- Stash Library Caching & Performance Improvements
+- SR6 Improvements
+
 ## 0.7.1
 
 - Fix dependencies

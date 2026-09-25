@@ -1,24 +1,25 @@
 import { t } from '../../i18n'
-import { existsSync } from 'node:fs'
-import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
+import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { readPerVideo } from '../../settings/store'
-import { FOLDED_STAMP, type LibraryDb, type ScriptRow, type ServerRoot } from '../db'
+import { FOLDED_STAMP, type LibraryDb, type ServerRoot } from '../db'
 import { WriteBatch } from '../scanner'
-import { summarise, type ScriptScanner } from '../scripts'
+import type { ScriptScanner } from '../scripts'
 import type { TagJob } from '../tagger'
 import { makeAdapter, type RemoteScene } from './adapter'
-import { mapLanes, request } from './http'
-import { scriptFileNames, STAND_IN } from './names'
-import { ASSET_RECHECK_MS, cacheImage } from './images'
+import { STAND_IN } from './names'
+import type { PosterDecoder } from './images'
+import { recordMetric } from './diagnostics'
+import { AssetQueue } from './assets'
 
-const DOWNLOAD_LANES = 4
+const yieldTurn = () => new Promise<void>((resolve) => setImmediate(resolve))
 
 export interface SyncHooks {
   progress: () => void
   changed: () => void
   editing?: (id: number) => boolean
-  decodePoster?: (bytes: Buffer) => Buffer
+  decodePoster?: PosterDecoder
+  image?: (id: number) => void
   tagging?: () => boolean
   tag?: (job: TagJob) => void
 }
@@ -28,40 +29,55 @@ export interface SyncState {
   total: number
 }
 
-const warn = (what: string, e: unknown) => process.stderr.write(`${what}: ${e instanceof Error ? e.message : String(e)}\n`)
-
 export class ServerSync {
+  readonly assets: AssetQueue
+  private closed = false
   constructor(
     private readonly db: LibraryDb,
-    private readonly scripts: ScriptScanner,
+    scripts: ScriptScanner,
     private readonly remoteDir: string,
-    private readonly posterFile: (id: number) => string,
-    private readonly stripFile: (id: number) => string,
+    posterFile: (id: number) => string,
+    stripFile: (id: number) => string,
     private readonly hooks: SyncHooks,
-  ) {}
+  ) {
+    this.assets = new AssetQueue(db, scripts, remoteDir, posterFile, stripFile, hooks)
+  }
+
+  close() {
+    this.closed = true
+    this.assets.close()
+  }
 
   standIn(id: number): string {
     return join(this.remoteDir, String(id), STAND_IN)
   }
 
   async removeCache(ids: number[]) {
+    this.assets.cancel(ids)
     await Promise.allSettled(ids.map((id) => rm(join(this.remoteDir, String(id)), { recursive: true, force: true })))
   }
 
   async sync(root: ServerRoot, state: SyncState): Promise<number[]> {
     const started = Date.now()
     const adapter = makeAdapter(root)
-    const rows = this.db.remoteRows(root.id)
-    const known = new Map(rows.map((r) => {
-      const cached = this.db.stamp(r.path)
-      const incomplete = cached && (!cached.scriptsStamp || this.assetDue(r.id, 'thumb', root.kind === 'stash') || (root.kind === 'stash' && this.assetDue(r.id, 'strip', true)))
-      return [r.key, incomplete || !this.db.metadataImported(r.id) ? '' : r.stamp]
-    }))
+    const rows: ReturnType<LibraryDb['remoteSyncRows']> = []
+    let after = 0
+    while (!this.closed && this.db.server(root.id)) {
+      const page = this.db.remoteSyncRows(root.id, after)
+      if (!page.length) break
+      rows.push(...page)
+      after = page[page.length - 1]!.id
+      await yieldTurn()
+    }
+    if (this.closed || !this.db.server(root.id)) return []
+    const known = new Map(rows.map((r) => [r.key, r.imported && (r.scriptsStamp || r.scriptsQueued) ? r.stamp : '']))
     const byKey = new Map(rows.map((r) => [r.key, r]))
-    const localEdits = new Map(rows.map((r) => {
-      const media = this.db.mediaRow(r.id)
-      return [r.id, { pending: this.hooks.editing?.(r.id) ?? false, folded: root.kind === 'heresphere' && r.stamp === FOLDED_STAMP, rating: media?.rating, favourite: media?.favourite, tags: media?.tags }]
-    }))
+    const localEdits = new Map(rows.map((r) => [r.id, {
+      pending: this.hooks.editing?.(r.id) ?? false, folded: root.kind === 'heresphere' && r.stamp === FOLDED_STAMP,
+      rating: r.rating, favourite: r.favourite, tags: r.tags,
+    }]))
+    await this.assets.restore(root)
+    if (this.closed || !this.db.server(root.id)) return []
     const preserveEdit = (id: number, field: 'rating' | 'tags') => {
       const before = localEdits.get(id)
       const current = before && this.db.mediaRow(id)
@@ -74,7 +90,7 @@ export class ServerSync {
     const excluded = new Set(this.db.excludedFolders(root.id))
     const seen = new Set<string>()
     const seenPaths = new Set<string>()
-    const batch = new WriteBatch(this.db, () => this.hooks.changed())
+    const batch = new WriteBatch(this.db, () => this.hooks.changed(), () => !this.closed)
     let changed = 0
     const failures: string[] = []
     try {
@@ -82,41 +98,51 @@ export class ServerSync {
         state.total += n
         this.hooks.progress()
       })) {
+        if (this.closed || !this.db.server(root.id)) return []
         const fresh = entries.filter((e) => e.scene !== null && known.get(e.key) !== e.stamp && !excluded.has(e.scene.folder))
         for (const e of entries) seen.add(e.key)
         state.done += entries.length - fresh.length
         this.hooks.progress()
-        await mapLanes(fresh, DOWNLOAD_LANES, async (entry) => {
+        for (const entry of fresh) {
           const scene = entry.scene
-          if (!scene) return
+          if (!scene) continue
+          if (this.closed || !this.db.server(root.id)) return []
           try {
-            const complete = await this.importScene(root, adapter.headers, scene, entry.stamp, byKey.get(entry.key) ?? null, batch, preserveEdit)
-            if (!complete) failures.push(t('library.server.error.downloadAssets', { title: scene.title }))
+            await this.importScene(root, adapter.headers, scene, entry.stamp, byKey.get(entry.key) ?? null, batch, preserveEdit)
             seenPaths.add(scene.stream)
             changed++
           } catch (e) {
-            warn(`import ${scene.title}`, e)
+            process.stderr.write('metadata import failed\n')
             failures.push(t('library.server.error.importScene', { title: scene.title, error: e instanceof Error ? e.message : String(e) }))
           }
           state.done++
           this.hooks.progress()
-        })
-        batch.flush()
+          await yieldTurn()
+        }
+        await batch.flush()
       }
     } catch (e) {
-      batch.flush()
+      await batch.flush()
+      if (this.closed) return []
+      this.assets.wake()
       this.db.setRootError(root.id, e instanceof Error ? e.message : String(e))
       throw e
     }
-    batch.flush()
+    await batch.flush()
+    if (this.closed || !this.db.server(root.id)) return []
     const gone = rows.filter((r) => !seen.has(r.key) && !seenPaths.has(r.path)).map((r) => r.id)
     if (gone.length > 0) {
+      this.assets.cancel(gone)
       this.db.removeMedia(gone)
       await this.removeCache(gone)
+      if (this.closed || !this.db.server(root.id)) return gone
+      this.hooks.changed()
     }
     this.db.setRootError(root.id, [...failures, this.db.remoteWriteError(root.id)].filter(Boolean).join('\n'))
     this.db.setRootScanned(root.id, Date.now())
-    process.stderr.write(`sync ${root.url}: ${seen.size} scenes, ${changed} imported, ${gone.length} removed, ${Date.now() - started} ms\n`)
+    this.assets.wake()
+    recordMetric('metadata', Date.now() - started)
+    process.stderr.write(`metadata sync: ${seen.size} scenes, ${changed} imported, ${gone.length} removed, ${Date.now() - started} ms\n`)
     return gone
   }
 
@@ -141,26 +167,17 @@ export class ServerSync {
     const id = existing?.id ?? this.db.upsertMedia(upsert, now)
     if (id === 0) throw new Error('row not stored')
 
-    const version = root.kind === 'stash' ? stamp : ''
-    const scriptsStamp = JSON.stringify([version, scene.scripts])
-    const scriptsNeeded = !existing || existing.scriptsStamp !== scriptsStamp
-    const scripts = scriptsNeeded ? await this.fetchScripts(id, scene, headers) : null
-
-    const poster = await this.importImage(id, 'thumb', scene.thumb, version, root.kind === 'stash', headers)
-    const strip = scene.preview ? await this.importImage(id, 'strip', scene.preview, version, true, headers, scene.durationMs) : null
-    const complete = (!scriptsNeeded || scripts !== null) && poster.complete && (!strip || strip.complete)
-    batch.add(() => {
-      const tagged = this.db.stamp(scene.stream)?.tags === 'ready'
+    await batch.add(() => {
+      if (this.closed || !this.db.server(root.id)) return
+      const current = this.db.stamp(scene.stream)
+      const tagged = current?.tags === 'ready'
       if (existing) this.db.upsertMedia(upsert, now)
       this.db.setAddedAt(id, scene.addedAt)
-      if (scripts) {
-        this.db.setScripts(id, scripts, summarise(scripts))
-        this.db.setScriptsStamp(id, scriptsStamp)
+      this.assets.enqueue(root, id, scene, stamp)
+      if (current) {
+        this.db.setThumbState(id, 'thumb', current.thumb)
+        this.db.setThumbState(id, 'strip', current.strip)
       }
-      poster.commit()
-      strip?.commit()
-      this.db.setThumbState(id, 'thumb', existsSync(this.posterFile(id)) ? 'ready' : 'failed')
-      this.db.setThumbState(id, 'strip', strip && existsSync(this.stripFile(id)) ? 'ready' : 'failed')
       const tagState = !this.hooks.tagging?.() ? 'failed' : tagged ? 'ready' : 'pending'
       this.db.setThumbState(id, 'tags', tagState)
       if (tagState === 'pending' && scene.durationMs > 0) this.hooks.tag?.({ id, path: scene.stream, durationMs: scene.durationMs, headers })
@@ -172,10 +189,9 @@ export class ServerSync {
       }
       if (!keepTags) this.db.setTags(id, scene.tags)
       this.db.setMetadata(id, { description: scene.description, performers: scene.performers, filename: scene.filename, studio: scene.folder })
-      this.db.setRemoteStamp(id, complete ? stamp : '')
+      this.db.setRemoteStamp(id, stamp)
       if (scene.projection && (scene.projection.kind !== 'flat' || scene.projection.layout !== 'mono')) this.setProjection(scene.stream, scene.projection, now)
     })
-    return complete
   }
 
   private setProjection(key: string, projection: NonNullable<RemoteScene['projection']>, now: number) {
@@ -195,46 +211,4 @@ export class ServerSync {
     this.db.setVideoSettings(key, { positionMs: row?.positionMs ?? null, settings: JSON.stringify(rest) }, now)
   }
 
-  private async fetchScripts(id: number, scene: RemoteScene, headers: Record<string, string>): Promise<ScriptRow[] | null> {
-    const names = scriptFileNames(scene.scripts.map((s) => s.name))
-    const files = await mapLanes(scene.scripts, 2, async (script, i): Promise<{ name: string; text: string } | null> => {
-      const name = names[i]
-      if (!name) return null
-      try {
-        const res = await request(script.url, { headers })
-        const text = await res.text()
-        JSON.parse(text)
-        return { name, text }
-      } catch (e) {
-        warn(`script ${script.url}`, e)
-        return null
-      }
-    })
-    if (files.some((f) => f === null)) return null
-    const dir = join(this.remoteDir, String(id))
-    await rm(dir, { recursive: true, force: true })
-    await mkdir(dir, { recursive: true })
-    for (const f of files) if (f) await writeFile(join(dir, f.name), f.text)
-    if ((await readdir(dir)).length === 0) return []
-    return this.scripts.scriptsFor(this.standIn(id))
-  }
-
-  private assetDue(id: number, kind: 'thumb' | 'strip', periodic: boolean): boolean {
-    const asset = this.db.remoteAsset(id, kind)
-    return !asset || (asset.digest !== '' && !existsSync(kind === 'thumb' ? this.posterFile(id) : this.stripFile(id))) || (periodic && Date.now() - asset.checkedAt >= ASSET_RECHECK_MS)
-  }
-
-  private async importImage(id: number, kind: 'thumb' | 'strip', source: string | NonNullable<RemoteScene['preview']> | null, version: string, periodic: boolean, headers: Record<string, string>, durationMs = 0) {
-    const stamp = JSON.stringify([version, source])
-    const asset = this.db.remoteAsset(id, kind)
-    if (asset?.source === stamp && !this.assetDue(id, kind, periodic)) return { complete: true, commit: () => {} }
-    try {
-      const digest = source ? await cacheImage(kind === 'thumb' ? this.posterFile(id) : this.stripFile(id), source, headers, durationMs, this.hooks.decodePoster) : null
-      const checkedAt = Date.now()
-      return { complete: true, commit: () => this.db.setRemoteAsset(id, kind, stamp, digest ?? asset?.digest ?? '', checkedAt) }
-    } catch (e) {
-      warn(`${kind} ${id}`, e)
-      return { complete: false, commit: () => {} }
-    }
-  }
 }

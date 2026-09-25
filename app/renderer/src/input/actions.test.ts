@@ -2,7 +2,7 @@ import { beforeEach, expect, it, vi } from 'vitest'
 
 const state = vi.hoisted(() => ({
   ui: { screen: 'library', stripHiddenFor: null as string | null },
-  player: { path: '/video.mp4' as string | null, snapshot: { loaded: true, paused: false }, togglePlay: vi.fn(), seekBy: vi.fn() },
+  player: { path: '/video.mp4' as string | null, snapshot: { loaded: true, paused: false }, togglePlay: vi.fn(), seekBy: vi.fn(), stepBookmark: vi.fn() },
   editor: { open: false, togglePlay: vi.fn() },
 }))
 vi.mock('@/engine/client', () => ({ enhanceCapabilities: {} }))
@@ -86,4 +86,17 @@ it('respects rebinding and shortcut capture', () => {
   expect(capture).toHaveBeenCalledExactlyOnceWith('space')
   expect(state.player.togglePlay).not.toHaveBeenCalled()
   cancel()
+})
+
+it('dispatches bookmark shortcuts only on the loaded player', () => {
+  setBindings({ pageup: 'Media.Bookmark.Previous', pagedown: 'Media.Bookmark.Next' })
+  expect(dispatch('pageup')).toBe(false)
+  state.ui.screen = 'player'
+  expect(dispatch('pageup')).toBe(true)
+  expect(state.player.stepBookmark).toHaveBeenLastCalledWith(-1)
+  expect(dispatch('pagedown')).toBe(true)
+  expect(state.player.stepBookmark).toHaveBeenLastCalledWith(1)
+  state.player.snapshot.loaded = false
+  expect(dispatch('pagedown')).toBe(false)
+  expect(state.player.stepBookmark).toHaveBeenCalledTimes(2)
 })

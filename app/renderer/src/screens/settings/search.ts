@@ -111,6 +111,7 @@ const fields: Partial<Record<SettingsPageId, readonly [readonly MessageKey[], re
       'settings.tracking.cutSensitivity',
       'settings.tracking.easeAfterCut',
       'settings.tracking.clampJumps',
+      'settings.tracking.generateForScripted',
       'settings.tracking.generatedDefaults',
       'settings.search.tracking.allFromL0',
       'tracking.axesTable.source',

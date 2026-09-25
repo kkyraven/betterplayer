@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import type { Bookmark, Chapter } from 'bp-engine'
+import { nearestBookmark } from '@/lib/bookmarks'
 import { heatGradient } from '@/lib/heatmap'
 import { fmtDuration } from '@/lib/format'
 import { useT } from '@/state/i18n'
@@ -26,6 +27,7 @@ export function Scrubber({ durationMs, heatmap, heatDurationMs, chapters, bookma
   const dragRef = useRef<number | null>(null)
   const [hover, setHover] = useState<number | null>(null)
   const lastSeek = useRef(0)
+  const pointerStart = useRef<{ x: number; fraction: number } | null>(null)
 
   const heat = useMemo(() => heatGradient(heatmap), [heatmap])
   const heatWidth = durationMs > 0 ? Math.min(1, heatDurationMs / durationMs) : 1
@@ -51,10 +53,12 @@ export function Scrubber({ durationMs, heatmap, heatDurationMs, chapters, bookma
     if (drag !== null) ref.current?.style.setProperty('--p', drag.toFixed(5))
   }, [drag])
 
-  const fractionAt = (clientX: number) => {
+  const fractionAt = (clientX: number, snap = false) => {
     const rect = ref.current?.getBoundingClientRect()
     if (!rect || rect.width === 0) return 0
-    return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+    const fraction = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+    const bookmark = snap && durationMs > 0 ? nearestBookmark(bookmarks, fraction * durationMs, 12 / rect.width * durationMs, durationMs) : undefined
+    return bookmark ? bookmark.atMs / durationMs : fraction
   }
   const seekTo = (fraction: number, force = false) => {
     const now = performance.now()
@@ -65,25 +69,29 @@ export function Scrubber({ durationMs, heatmap, heatDurationMs, chapters, bookma
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 || durationMs <= 0) return
     e.currentTarget.setPointerCapture(e.pointerId)
-    const f = fractionAt(e.clientX)
+    const f = fractionAt(e.clientX, true)
+    pointerStart.current = { x: e.clientX, fraction: f }
     setDrag(f)
     seekTo(f, true)
   }
   const onPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
     const f = fractionAt(e.clientX)
-    setHover(f)
-    if (drag !== null) {
+    setHover(fractionAt(e.clientX, true))
+    if (drag !== null && pointerStart.current && Math.abs(e.clientX - pointerStart.current.x) > 4) {
       setDrag(f)
       seekTo(f)
     }
   }
   const onPointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (drag === null) return
-    seekTo(fractionAt(e.clientX), true)
+    const start = pointerStart.current
+    seekTo(start && Math.abs(e.clientX - start.x) <= 4 ? start.fraction : fractionAt(e.clientX), true)
+    pointerStart.current = null
     setDrag(null)
   }
 
   const pct = (f: number) => `${(f * 100).toFixed(3)}%`
+  const hoverBookmark = hover === null ? undefined : nearestBookmark(bookmarks, hover * durationMs, 1, durationMs)
   const hoverChapter = hover === null ? null : chapters.find((c) => hover * durationMs >= c.startMs && hover * durationMs < c.endMs)
 
   return (
@@ -104,10 +112,10 @@ export function Scrubber({ durationMs, heatmap, heatDurationMs, chapters, bookma
       <div className="heat" style={{ backgroundImage: heat, backgroundSize: `${(heatWidth * 100).toFixed(3)}% 100%` }} />
       <div className="unplayed" />
       {chapters.map((c, i) => (
-        <div key={`c${i}`} className="chap" style={{ left: pct(c.startMs / durationMs) }} title={c.name} />
+        <div key={`c${i}`} className="chap" style={{ left: pct(durationMs > 0 ? c.startMs / durationMs : 0) }} title={c.name} />
       ))}
-      {bookmarks.map((b, i) => (
-        <div key={`b${i}`} className="bm" style={{ left: pct(b.atMs / durationMs) }} title={b.name} />
+      {bookmarks.filter((b) => Number.isFinite(b.atMs) && b.atMs >= 0 && b.atMs <= durationMs).map((b, i) => (
+        <div key={`b${i}`} className="bm" style={{ left: pct(durationMs > 0 ? b.atMs / durationMs : 0) }} title={b.name} />
       ))}
       <div className="head" />
       {hover !== null && drag === null && (
@@ -117,7 +125,7 @@ export function Scrubber({ durationMs, heatmap, heatDurationMs, chapters, bookma
             {strip && <div className="pt" style={{ backgroundImage: `url(${strip})`, backgroundPositionX: `${(Math.min(STRIP_FRAMES - 1, Math.floor(hover * STRIP_FRAMES)) / (STRIP_FRAMES - 1)) * 100}%` }} />}
             <div className="pl">
               <span>{fmtDuration(hover * durationMs)}</span>
-              {hoverChapter && <span className="faint">{hoverChapter.name}</span>}
+              {(hoverBookmark || hoverChapter) && <span className="faint">{hoverBookmark?.name || hoverChapter?.name}</span>}
             </div>
           </div>
         </>
