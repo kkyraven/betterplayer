@@ -1,5 +1,9 @@
 # Release notes
 
+## 0.7.3
+
+- Fix Handy connection
+
 ## 0.7.2
 
 - Stash Library Caching & Performance Improvements
