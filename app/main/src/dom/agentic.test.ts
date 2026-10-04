@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AgenticLover } from './agentic'
+import { AgenticLover, privateAddress } from './agentic'
 import type { DomDb } from './store'
 
 vi.mock('electron', () => ({ BrowserWindow: class {}, safeStorage: { isEncryptionAvailable: () => false } }))
@@ -29,5 +29,15 @@ describe('signing up for Agentic Lover', () => {
     await expect(new AgenticLover(fakeDb()).register('you@example.com', 'you', 'long enough')).rejects.toThrow('dom:emailTaken')
     answer(409, { message: 'Username already taken' })
     await expect(new AgenticLover(fakeDb()).register('you@example.com', 'you', 'long enough')).rejects.toThrow('Username already taken')
+  })
+})
+
+describe('privateAddress', () => {
+  it('rejects loopback, private, link-local and unique local addresses', () => {
+    for (const ip of ['127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.169.254', '100.64.0.1', '0.0.0.0', '::1', '::', 'fd00::1', 'fe80::1', '::ffff:192.168.0.1']) expect(privateAddress(ip), ip).toBe(true)
+  })
+
+  it('allows public addresses', () => {
+    for (const ip of ['104.18.2.3', '172.32.0.1', '2606:4700::1']) expect(privateAddress(ip), ip).toBe(false)
   })
 })

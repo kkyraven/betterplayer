@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-KinkyRaven-Proprietary
 // Copyright (c) 2026 KinkyRaven. All rights reserved. This file is not licensed under LICENSE.txt; no permission is granted to use, copy, modify or distribute it.
 
+import { lookup } from 'node:dns/promises'
+import { isIP } from 'node:net'
 import { BrowserWindow, safeStorage } from 'electron'
 import { AGENTIC_LOVER_API, DOM_ERROR_PREFIX, DOM_FREE_SECONDS, normalizeLoras, type AlModel, type DomLora, type AlPersona, type AlTier, type ChatMessage, type ChatReply, type ChatTool, type DomAccount, type DomErrorCode } from '@shared/dom'
 import type { AlMemoryJson } from './memories'
@@ -126,6 +128,7 @@ export class AgenticLover {
         } catch {
           return
         }
+        if (parsed.origin !== new URL(FRONTEND).origin && parsed.origin !== new URL(AGENTIC_LOVER_API).origin) return
         if (parsed.pathname.endsWith('/login') && parsed.searchParams.has('error')) {
           done = true
           win.close()
@@ -315,7 +318,8 @@ export class AgenticLover {
   }
 
   async avatar(url: string): Promise<string> {
-    return url ? dataUrl(url).catch(() => '') : ''
+    if (url.startsWith('data:')) return url
+    return (await publicHttps(url)) ? dataUrl(url, 'error').catch(() => '') : ''
   }
 }
 
@@ -330,9 +334,30 @@ export function replyOf(json: OpenAiJson): ChatReply {
 
 const toPersona = (p: PersonaJson): AlPersona => ({ id: String(p.id ?? ''), name: p.name ?? '', description: p.description ?? '', avatarUrl: p.avatar_url ?? p.preview_image_url ?? '' })
 
-async function dataUrl(url: string): Promise<string> {
+export function privateAddress(ip: string): boolean {
+  const v4 = ip.startsWith('::ffff:') ? ip.slice(7) : ip
+  if (isIP(v4) === 4) {
+    const [a = 0, b = 0] = v4.split('.').map(Number)
+    return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b < 128) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b < 32) || (a === 192 && b === 168)
+  }
+  const v6 = ip.toLowerCase()
+  return v6 === '::' || v6 === '::1' || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6)
+}
+
+async function publicHttps(url: string): Promise<boolean> {
+  try {
+    const { protocol, hostname } = new URL(url)
+    if (protocol !== 'https:') return false
+    const addresses = await lookup(hostname.replace(/^\[|\]$/g, ''), { all: true })
+    return addresses.length > 0 && !addresses.some((a) => privateAddress(a.address))
+  } catch {
+    return false
+  }
+}
+
+async function dataUrl(url: string, redirect: RequestInit['redirect'] = 'follow'): Promise<string> {
   if (url.startsWith('data:')) return url
-  const res = await fetch(url)
+  const res = await fetch(url, { redirect })
   if (!res.ok) throw domError('server', `${res.status}`)
   const type = res.headers.get('content-type') ?? 'image/png'
   return `data:${type};base64,${Buffer.from(await res.arrayBuffer()).toString('base64')}`
