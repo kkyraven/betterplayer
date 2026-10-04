@@ -485,7 +485,7 @@ function readCurrent(data: Json): Settings {
       return param && s.speedLimit === 10 ? { ...s, speedLimit: 0 } : s
     }),
     estim: readEstim(data.estim),
-    playback: { hwdec: oneOf(playback.hwdec, HWDECS, 'auto'), gapSkip: oneOf(playback.gapSkip, GAP_SKIPS, 'off') },
+    playback: { hwdec: oneOf(playback.hwdec, HWDECS, 'auto'), gapSkip: oneOf(playback.gapSkip, GAP_SKIPS, 'off'), suggestions: bool(playback.suggestions, true) },
     upscaling: { upscaler: oneOf(upscaling.upscaler, UPSCALERS, 'off'), frameGen: oneOf(upscaling.frameGen, FRAME_GEN_TARGETS, 'off'), dlss: readDlss(upscaling.dlss) },
     subtitles: {
       enabled: bool(subtitles.enabled, subtitleDefaults.enabled),

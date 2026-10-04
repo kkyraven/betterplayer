@@ -17,6 +17,7 @@ import { useSession } from '@/state/session'
 import { useTracking } from '@/state/tracking'
 import { SCREEN_LABEL, useUi } from '@/state/ui'
 import { ControlBar } from './ControlBar'
+import { EndGrid } from './EndGrid'
 import { SideSheet } from './SideSheet'
 import './player.css'
 
@@ -30,6 +31,7 @@ export function PlayerScreen() {
   const audio = usePlayer((s) => s.audio)
   const paused = usePlayer((s) => s.snapshot.paused)
   const sheet = usePlayer((s) => s.sheet)
+  const suggesting = usePlayer((s) => s.suggestions !== null)
   const setScreen = useUi((s) => s.setScreen)
   const back = useUi((s) => s.previous)
   const toggleFullscreen = useUi((s) => s.toggleFullscreen)
@@ -78,6 +80,7 @@ export function PlayerScreen() {
         const p = usePlayer.getState()
         const u = useUi.getState()
         if (p.sheet) p.setSheet(null)
+        else if (p.suggestions) p.dismissSuggestions()
         else if (!u.fullscreen && !u.mediaCentre) u.setScreen(u.previous)
         e.preventDefault()
       }
@@ -116,6 +119,7 @@ export function PlayerScreen() {
           <span>{isUrl(path) ? t('player.error.ytdlp') : loadError}</span>
         </div>
       )}
+      {path && <EndGrid />}
       {path && (
         <div className="overlay" ref={setOverlay}>
           <Recompute />
@@ -136,7 +140,7 @@ export function PlayerScreen() {
             <TrackBar variant="player" />
           </TooltipGroup>
           )}
-          {!sheet && <DeviceViz />}
+          {!sheet && !suggesting && <DeviceViz />}
           <SideSheet />
           <ControlBar overlay={overlay} onHoverChange={setBarHovered} />
         </div>

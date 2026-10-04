@@ -549,7 +549,7 @@ export interface Settings {
   }
   axesDefault: Record<AxisId, AxisSettings>
   estim: EstimSettings
-  playback: { hwdec: Hwdec; gapSkip: GapSkip }
+  playback: { hwdec: Hwdec; gapSkip: GapSkip; suggestions: boolean }
   upscaling: UpscalingSettings
   subtitles: SubtitleSettings
   appearance: {
@@ -626,7 +626,7 @@ export function defaultSettings(): Settings {
     devices: { outputs: [], stopOnPause: true },
     axesDefault: axisRecord((id) => defaultAxisSettings(id)),
     estim: defaultEstim(),
-    playback: { hwdec: 'auto', gapSkip: 'off' },
+    playback: { hwdec: 'auto', gapSkip: 'off', suggestions: true },
     upscaling: defaultUpscaling(),
     subtitles: defaultSubtitles(),
     appearance: { reduceTransparency: false, startInMediaCentre: false, theme: defaultTheme() },

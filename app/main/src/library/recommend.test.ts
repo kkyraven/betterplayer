@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { holdBack, mixRecommended, recommendSeed, type MixEntry, type RecommendVideo } from './recommend'
+import { holdBack, mixRecommended, pickSuggestions, recommendSeed, type MixEntry, type RecommendVideo } from './recommend'
 
 const videos = (n: number, played = 0): RecommendVideo[] =>
   Array.from({ length: n }, (_, i) => ({
@@ -80,5 +80,33 @@ describe('holdBack', () => {
 
   it('pushes held videos to the end of a short list', () => {
     expect(holdBack([video(1), video(2)], new Set([1]), 16)).toEqual([video(2), video(1)])
+  })
+})
+
+describe('pickSuggestions', () => {
+  const range = (from: number, n: number) => Array.from({ length: n }, (_, i) => from + i)
+  const pools = { newest: range(1, 10), mostPlayed: range(11, 10), tagged: range(21, 10), fill: range(31, 10) }
+
+  it('takes one of the 3 newest, one of the 5 most played and the 4 best tag matches', () => {
+    for (let run = 0; run < 50; run++) {
+      const picks = pickSuggestions(pools)
+      expect(picks).toHaveLength(6)
+      expect(picks.filter((id) => id <= 3)).toHaveLength(1)
+      expect(picks.filter((id) => id >= 11 && id <= 15)).toHaveLength(1)
+      expect(picks.filter((id) => id >= 21).sort((a, b) => a - b)).toEqual([21, 22, 23, 24])
+    }
+  })
+
+  it('never repeats a video that sits in several lists', () => {
+    const shared = { newest: [1, 2, 3], mostPlayed: [1, 2, 3, 4, 5], tagged: [1, 2, 3, 4, 5, 6], fill: [] }
+    const picks = pickSuggestions(shared)
+    expect(new Set(picks).size).toBe(6)
+    expect(picks.sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6])
+  })
+
+  it('fills from random videos when there are too few tag matches', () => {
+    const picks = pickSuggestions({ newest: [1, 2, 3], mostPlayed: [], tagged: [21], fill: [31, 32, 33, 34, 35] })
+    expect(picks).toHaveLength(6)
+    expect(picks).toContain(21)
   })
 })

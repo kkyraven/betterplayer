@@ -282,6 +282,7 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
     return library.jump(query, prefix)
   })
   handle('library:media', (id) => library.media(id))
+  handle('library:suggestions', (id) => library.suggestions(id))
   handle('library:scriptFolders', (path) => library.scriptFolders(path))
   handle('library:byPath', (path) => library.byPath(path))
   handle('library:byTitle', (title) => library.byTitle(title))

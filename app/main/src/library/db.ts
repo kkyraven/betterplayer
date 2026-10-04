@@ -25,7 +25,7 @@ import {
 } from '@shared/library'
 import { PROJECTION_KINDS, type ProjectionKind } from '@shared/projection'
 import { ROOT_KINDS, type RootKind } from '@shared/remote'
-import { holdBack, mixRecommended, recommendSeed, type MixEntry } from './recommend'
+import { holdBack, mixRecommended, pickSuggestions, recommendSeed, SUGGESTION_COUNT, type MixEntry } from './recommend'
 import type { Validators } from './servers/images'
 import { SEARCH_SCHEMA, SearchIndex, type CompiledSearch } from './search-index'
 import { normalizeSearch, type ImportedPerformer, type Performer } from '@shared/search'
@@ -933,6 +933,23 @@ export class LibraryDb {
   mediaRowByPath(path: string): MediaRow | null {
     const row = this.stmt(`${ROW_SELECT} WHERE m.path = ?`).get(path)
     return row ? toMediaRow(row) : null
+  }
+
+  suggestions(id: number): MediaRow[] {
+    const ids = (sql: string) => this.stmt(sql).all(id).map((r) => num(r, 'id'))
+    const picks = pickSuggestions({
+      newest: ids(`SELECT m.id FROM media m WHERE ${SHOWN_SQL} AND m.id != ? ORDER BY m.added_at DESC, m.id DESC LIMIT 12`),
+      mostPlayed: ids(`SELECT m.id FROM media m JOIN watch w ON w.media_id = m.id WHERE ${SHOWN_SQL} AND m.id != ? AND w.play_count > 0 ORDER BY w.play_count DESC, w.last_played DESC LIMIT 12`),
+      tagged: this.stmt(
+        `SELECT mt.media_id AS id FROM media_tags mt JOIN media m ON m.id = mt.media_id
+         WHERE ${SHOWN_SQL} AND mt.media_id != ? AND mt.tag_id IN (SELECT tag_id FROM media_tags WHERE media_id = ?)
+         GROUP BY mt.media_id ORDER BY count(*) DESC, random() LIMIT 24`,
+      ).all(id, id).map((r) => num(r, 'id')),
+      fill: ids(`SELECT m.id FROM media m WHERE ${SHOWN_SQL} AND m.id != ? ORDER BY random() LIMIT ${SUGGESTION_COUNT * 3}`),
+    })
+    if (picks.length === 0) return []
+    const rows = new Map(this.stmt(`${ROW_SELECT} WHERE m.id IN (${picks.map(() => '?').join(',')})`).all(...picks).map((r) => [num(r, 'id'), toMediaRow(r)] as const))
+    return picks.flatMap((p) => rows.get(p) ?? [])
   }
 
   mediaRowByTitle(title: string): MediaRow | null {

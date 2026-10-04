@@ -6,7 +6,7 @@ const fields: Partial<Record<SettingsPageId, readonly [readonly MessageKey[], re
   appearance: [[...(LANGUAGE_CHOICE ? (['settings.appearance.language'] as const) : []), 'settings.appearance.mode', 'settings.appearance.reduceTransparency', 'settings.appearance.startInMediaCentre', 'settings.appearance.accent', 'settings.appearance.tint', 'settings.appearance.continueRow', 'settings.appearance.axisBadges'], []],
   'media-centre': [['settings.mediaCentre.buttonHints', 'settings.mediaCentre.backdrop'], []],
   shortcuts: [['settings.search.shortcutBindings', 'settings.shortcuts.reset'], []],
-  playback: [['settings.playback.gapSkip'], []],
+  playback: [['settings.playback.suggestions', 'settings.playback.gapSkip'], []],
   video: [
     ['settings.video.upscaling', 'settings.video.frameGeneration', 'settings.video.compareWith'],
     [

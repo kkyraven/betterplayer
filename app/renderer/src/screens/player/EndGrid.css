@@ -1,0 +1,11 @@
+.end-grid {
+  position: absolute; inset: 0; z-index: 1; container-type: size;
+  display: grid; place-items: center; padding: 84px 48px 104px; overflow: hidden;
+  background: color-mix(in oklab, var(--glass-strong) 75%, transparent);
+  backdrop-filter: var(--blur-strong); -webkit-backdrop-filter: var(--blur-strong);
+  animation: end-grid-in var(--t-ui) var(--ease);
+}
+.end-grid-inner { display: grid; gap: 8px; justify-items: end; width: min(100%, 940px, calc((100cqh - 172px) * 8 / 3 + 36px)); }
+.end-grid-cards { justify-self: stretch; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px 18px; }
+@keyframes end-grid-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .end-grid { animation: none; } }

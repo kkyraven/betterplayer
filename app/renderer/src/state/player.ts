@@ -3,7 +3,7 @@ import { create } from 'zustand'
 import { track } from '@/state/usage'
 import type { TrackingSettings } from '@shared/tracking'
 import type { ScriptInfo } from 'bp-engine'
-import type { MediaDetail } from '@shared/library'
+import type { MediaDetail, MediaRow } from '@shared/library'
 import type { BrowserHandoff } from '@shared/browser'
 import { movePlaylistItems, shufflePlaylist, type PlaylistMove } from '@shared/playlist'
 import { isAudioPath, type MediaTags } from '@shared/ipc'
@@ -97,6 +97,9 @@ interface PlayerState {
   cycleAutoplay: () => void
   cycleRepeat: () => void
   onEnded: () => Promise<void>
+  ended: boolean
+  suggestions: MediaRow[] | null
+  dismissSuggestions: () => void
   step: (dir: 1 | -1) => Promise<void>
   takePauseRequest: () => boolean
   markEnded: () => void
@@ -186,7 +189,6 @@ export const usePlayer = create<PlayerState>()((set, get) => {
   }
   let prepared: { path: string; video: PerVideoSettings } | null = null
   let pauseRequested = false
-  let ended = false
   let openToken = 0
   let retryBrowserPage: (() => void) | null = null
   let browserLoad: AbortController | null = null
@@ -228,6 +230,8 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     repeat: playback.repeat,
     replayed: false,
     playlist: null,
+    ended: false,
+    suggestions: null,
     sheet: null,
     mark: null,
     snapshot: { durationMs: 0, paused: true, loaded: false, rate: 1, flagsVersion: -1, videoWidth: 0, videoHeight: 0, error: null },
@@ -240,7 +244,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       const token = ++openToken
       retryBrowserPage = null
       advanceToken++
-      set({ playlist: playlist ?? null, ...(!playlist && get().sheet === 'queue' ? { sheet: null } : {}) })
+      set({ playlist: playlist ?? null, suggestions: null, ...(!playlist && get().sheet === 'queue' ? { sheet: null } : {}) })
       if (path !== get().path) track('play')
       const settingsStore = useSettings.getState()
       const settings = settingsStore.settings ?? (await settingsStore.load())
@@ -276,8 +280,8 @@ export const usePlayer = create<PlayerState>()((set, get) => {
           projection: video.projection ?? detectProjection(fileTitle(path)),
           mark: null,
           replayed: false,
+          ended: false,
         })
-        ended = false
         const mediaId = mediaIdFromUrl(path)
         if (mediaId !== null) told({ kind: 'open', mediaId })
         void useSubtitles.getState().load(path)
@@ -415,14 +419,13 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       useTracking.getState().stop()
       engine.unload()
       prepared = null
-      ended = false
       useSubtitles.getState().clear()
-      set({ path: null, title: '', scripts: [], media: null, audio: null, video: EMPTY_VIDEO, sheet: null, mark: null, replayed: false, playlist: null })
+      set({ path: null, title: '', scripts: [], media: null, audio: null, video: EMPTY_VIDEO, sheet: null, mark: null, replayed: false, playlist: null, ended: false, suggestions: null })
       pushParams()
       useUi.getState().setScreen('library')
     },
     play: () => {
-      if (ended) get().seek(0)
+      if (get().ended) get().seek(0)
       engine.play()
       told({ kind: 'play' })
     },
@@ -442,7 +445,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
         console.debug(`seek: ${String(e)}`)
         return
       }
-      ended = false
+      set({ ended: false, suggestions: null })
       savePositionAt(target * 1000)
       told({ kind: 'seek', timeMs: target * 1000 })
     },
@@ -524,11 +527,16 @@ export const usePlayer = create<PlayerState>()((set, get) => {
         engine.play()
         return
       }
-      if (autoplay === 'off') return
       const stillAtEnd = () => {
         const s = get()
         return token === advanceToken && s.path === path && s.playlist === playlist && s.autoplay === autoplay && s.snapshot.paused && live.get().timeMs >= s.snapshot.durationMs - END_WINDOW_MS
       }
+      const suggest = async () => {
+        if (!media || useUi.getState().mediaCentre || useSettings.getState().settings?.playback.suggestions === false) return
+        const suggestions = await invoke('library:suggestions', media.id)
+        if (suggestions.length > 0 && stillAtEnd()) set({ suggestions })
+      }
+      if (autoplay === 'off') return suggest()
       const ids = playlist?.ids ?? await useLibrary.getState().allIds()
       if (ids.length === 0 || !stillAtEnd()) return
       let id: number | undefined
@@ -541,7 +549,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       } else {
         id = adjacent(ids, media?.id, 1)
       }
-      if (id === undefined) return
+      if (id === undefined) return suggest()
       const detail = await invoke('library:media', id)
       if (!detail || !stillAtEnd()) return
       await get().open(detail.path, playlist ? 0 : undefined, playlist ? { ...playlist, index: playlist.index + 1 } : undefined, false)
@@ -560,9 +568,8 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       pauseRequested = false
       return requested
     },
-    markEnded: () => {
-      ended = true
-    },
+    markEnded: () => set({ ended: true }),
+    dismissSuggestions: () => set({ suggestions: null }),
     setSheet: (sheet) => set({ sheet }),
     setProjection: (projection) => {
       const { video, title } = get()

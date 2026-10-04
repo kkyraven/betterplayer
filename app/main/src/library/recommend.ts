@@ -115,3 +115,30 @@ export function holdBack(entries: MixEntry[], held: ReadonlySet<number>, head: n
   for (; i < entries.length && lead.length < head; i++) (isHeld(entries[i]!) ? moved : lead).push(entries[i]!)
   return moved.length === 0 ? entries : [...lead, ...moved, ...entries.slice(i)]
 }
+
+export interface SuggestionPools {
+  newest: number[]
+  mostPlayed: number[]
+  tagged: number[]
+  fill: number[]
+}
+
+export const SUGGESTION_COUNT = 6
+
+export function pickSuggestions(pools: SuggestionPools, rand: () => number = Math.random): number[] {
+  const used = new Set<number>()
+  const take = (list: number[], window: number, count: number) => {
+    const open = list.filter((id) => !used.has(id)).slice(0, window)
+    for (let n = 0; n < count && open.length > 0; n++) used.add(open.splice(Math.floor(rand() * open.length), 1)[0]!)
+  }
+  take(pools.newest, 3, 1)
+  take(pools.mostPlayed, 5, 1)
+  take(pools.tagged, 4, 4)
+  take(pools.fill, SUGGESTION_COUNT - used.size, SUGGESTION_COUNT - used.size)
+  const out = [...used]
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1))
+    ;[out[i], out[j]] = [out[j]!, out[i]!]
+  }
+  return out
+}

@@ -1,4 +1,4 @@
-import { Captions, CaptionsOff, Crosshair, Glasses, List, ListVideo, Maximize2, Minimize2, Pause, Play, Repeat, Repeat1, Rewind, FastForward, Shuffle, SkipBack, SkipForward, SlidersHorizontal, Volume2, VolumeX } from 'lucide-react'
+import { Captions, CaptionsOff, Crosshair, Glasses, List, ListVideo, Maximize2, Minimize2, Pause, Play, Repeat, Repeat1, Rewind, RotateCcw, FastForward, Shuffle, SkipBack, SkipForward, SlidersHorizontal, Volume2, VolumeX } from 'lucide-react'
 import { useMemo, useRef } from 'react'
 import { TooltipGroup } from '@/components/ui/TooltipGroup'
 import { IconButton } from '@/components/ui/IconButton'
@@ -19,6 +19,7 @@ import { VariantMenu, variantGroups } from './VariantMenu'
 export function ControlBar({ overlay, onHoverChange }: { overlay: HTMLDivElement | null; onHoverChange: (hovered: boolean) => void }) {
   const t = useT()
   const paused = usePlayer((s) => s.snapshot.paused)
+  const ended = usePlayer((s) => s.ended)
   const ownRate = usePlayer((s) => s.snapshot.rate)
   const followedRate = useRemote((s) => (s.followed ? s.playing.rate : null))
   const baseRate = useTracking((s) => s.playbackBaseRate)
@@ -77,8 +78,8 @@ export function ControlBar({ overlay, onHoverChange }: { overlay: HTMLDivElement
           <IconButton label={t('player.controls.back10')} onClick={() => seekBy(-10)}>
             <Rewind />
           </IconButton>
-          <IconButton label={paused ? t('player.controls.play') : t('player.controls.pause')} size="lg" onClick={togglePlay}>
-            {paused ? <Play /> : <Pause />}
+          <IconButton label={!paused ? t('player.controls.pause') : ended ? t('player.controls.replay') : t('player.controls.play')} size="lg" onClick={togglePlay}>
+            {!paused ? <Pause /> : ended ? <RotateCcw /> : <Play />}
           </IconButton>
           <IconButton label={t('player.controls.forward10')} onClick={() => seekBy(10)}>
             <FastForward />

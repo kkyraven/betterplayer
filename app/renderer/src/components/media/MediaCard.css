@@ -47,6 +47,8 @@
 .card.selected .thumb { box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px var(--accent-soft); }
 .card:focus-visible { outline: 0; }
 .card:focus-visible .thumb { box-shadow: 0 0 0 2px var(--accent); }
+.card-flush .thumb { border-radius: var(--r) var(--r) 0 0; }
+.card-flush .heat-strip { margin-top: -8px; border-radius: 0 0 var(--r) var(--r) / 0 0 4px 4px; }
 .card-compact { gap: 6px; }
 .card-compact .title { font-size: 12px; }
 .card-tenfoot { gap: 12px; }

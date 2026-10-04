@@ -29,6 +29,7 @@ interface Props {
   order?: ReactNode
   onPointerDown?: (e: ReactPointerEvent<HTMLDivElement>, row: MediaRow) => void
   onContextMenu?: (e: MouseEvent<HTMLDivElement>, row: MediaRow) => void
+  flush?: boolean
 }
 
 const STRIP_FRAMES = 20
@@ -41,7 +42,7 @@ export function resolutionLabel(height: number): string {
   return height > 0 ? `${height}p` : ''
 }
 
-export const MediaCard = memo(function MediaCard({ row, selected = false, resume = false, density = 'comfortable', onSelect, onPlay, menu, checked, order, onPointerDown, onContextMenu }: Props) {
+export const MediaCard = memo(function MediaCard({ row, selected = false, resume = false, density = 'comfortable', onSelect, onPlay, menu, checked, order, onPointerDown, onContextMenu, flush = false }: Props) {
   const t = useT()
   const axisBadges = useSettings((s) => s.settings?.library.axisBadges) ?? true
   const hover = useHoverPreview(row)
@@ -61,7 +62,7 @@ export const MediaCard = memo(function MediaCard({ row, selected = false, resume
   const selecting = checked !== undefined
   return (
     <div
-      className={cx('card', `card-${density}`, selected && 'selected', row.hidden && 'hidden', selecting && 'selecting', checked && 'picked')}
+      className={cx('card', `card-${density}`, flush && 'card-flush', selected && 'selected', row.hidden && 'hidden', selecting && 'selecting', checked && 'picked')}
       tabIndex={0}
       role="option"
       aria-selected={selecting ? checked : selected}

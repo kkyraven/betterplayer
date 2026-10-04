@@ -61,10 +61,16 @@ export function HardwareDecodeSettings() {
 export function PlaybackSettings() {
   const t = useT()
   const gapSkip = useSettings((s) => s.settings?.playback.gapSkip) ?? 'off'
+  const suggestions = useSettings((s) => s.settings?.playback.suggestions) ?? true
   const update = useSettings((s) => s.update)
   return (
     <div className="panel">
       {' '}
+      <div className="prow">
+        <span className="lbl">{t('settings.playback.suggestions')}</span>
+        <span className="spacer" />
+        <Switch checked={suggestions} onCheckedChange={(suggestions) => void update((s) => ({ ...s, playback: { ...s.playback, suggestions } }))} label={t('settings.playback.suggestions')} />
+      </div>
       <div className="prow">
         <span>
           <div className="lbl">{t('settings.playback.gapSkip')}</div>

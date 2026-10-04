@@ -8,7 +8,7 @@ import type { BrowserError, BrowserFrame, BrowserHandoff, BrowserRegionEdit, Bro
 import type { EditorDocument, EditorFilePage, EditorFileQuery, EditorStored, Pattern } from './editor'
 import type { GameSources } from './game'
 import type { MatcherReport, MatcherResolveResult, OrphanSet } from './matcher'
-import type { DropResult, FolderNode, LibraryChange, LibraryCounts, LibraryRoot, MediaDetail, MediaPage, MediaQuery, Playlist, ScanProgress, Tag } from './library'
+import type { DropResult, FolderNode, LibraryChange, LibraryCounts, LibraryRoot, MediaDetail, MediaPage, MediaQuery, MediaRow, Playlist, ScanProgress, Tag } from './library'
 import type { PlayerCommand, PlayingState, RemoteSourceStatus } from './peer'
 import type { RemoteLoad, ServerInput } from './remote'
 import type { PerVideoSettings, Settings } from './settings'
@@ -116,6 +116,7 @@ export interface IpcContract {
   'library:queryIds': (query: MediaQuery) => number[]
   'library:jump': (query: MediaQuery, prefix: string) => { index: number; id: number } | null
   'library:media': (id: number) => MediaDetail | null
+  'library:suggestions': (id: number) => MediaRow[]
   'library:scriptFolders': (path: string) => Promise<string[]>
   'library:byPath': (path: string) => MediaDetail | null
   'library:byTitle': (title: string) => MediaDetail | null

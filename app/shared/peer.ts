@@ -67,6 +67,7 @@ export const FORWARDED_CHANNELS = [
   'library:queryIds',
   'library:jump',
   'library:media',
+  'library:suggestions',
   'library:byPath',
   'library:byTitle',
   'library:folders',

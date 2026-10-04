@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url'
 import { net } from 'electron'
 import type { AxisId } from '@shared/axes'
 import { isMediaPath, isVideoPath, type GeneratedResult, type GeneratedScriptRow, type IpcEvent, type IpcEvents } from '@shared/ipc'
-import type { DropResult, FolderNode, LibraryChange, LibraryCounts, LibraryRoot, MediaDetail, MediaIndexRow, MediaPage, MediaQuery, Playlist, ScanProgress, Tag } from '@shared/library'
+import type { DropResult, FolderNode, LibraryChange, LibraryCounts, LibraryRoot, MediaDetail, MediaIndexRow, MediaPage, MediaQuery, MediaRow, Playlist, ScanProgress, Tag } from '@shared/library'
 import type { MatcherReport, MatcherResolveResult, OrphanSet } from '@shared/matcher'
 import type { ScriptSet } from '@shared/peer'
 import { isUrl, type RemoteLoad, type ServerInput } from '@shared/remote'
@@ -386,6 +386,10 @@ export class Library {
   media(id: number): MediaDetail | null {
     const row = this.db.mediaRow(id)
     return row ? { ...row, ...this.db.metadata(id), scripts: this.db.scripts(id) } : null
+  }
+
+  suggestions(id: number): MediaRow[] {
+    return this.db.suggestions(id)
   }
 
   byPath(path: string): MediaDetail | null {

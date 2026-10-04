@@ -161,3 +161,26 @@ it('adds asset jobs to v19 without invalidating successful stamps or cached file
     } finally { migrated.close() }
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
+
+describe('suggestions', () => {
+  it('leaves out the video that ended and hidden ones, and puts the best tag matches in', () => {
+    const db = new LibraryDb(':memory:')
+    try {
+      const rootId = db.addRoot('/fictional').id
+      const add = (n: number) => db.upsertMedia({ rootId, path: `/fictional/${n}.mp4`, title: `${n}`, folder: '', size: 1, mtime: 1, durationMs: 60_000, width: 1920, height: 1080, codec: '', projection: 'flat' }, n)
+      const ids = Array.from({ length: 12 }, (_, i) => add(i + 1))
+      const [ended, close, hidden] = ids as [number, number, number]
+      for (const id of [ended, close, hidden]) db.setTags(id, ['beach', 'pov'])
+      db.setHidden([hidden], true)
+      for (let run = 0; run < 10; run++) {
+        const picks = db.suggestions(ended).map((r) => r.id)
+        expect(picks).toHaveLength(6)
+        expect(picks).toContain(close)
+        expect(picks).not.toContain(ended)
+        expect(picks).not.toContain(hidden)
+      }
+    } finally {
+      db.close()
+    }
+  })
+})

@@ -1,7 +1,7 @@
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import type { ForwardedChannel } from '@shared/peer'
 import { mediaIdFromUrl, mediaUrl, PATH_CHANNELS } from '@shared/peer'
-import { isPlaylist, type LibraryRoot, type MediaDetail, type MediaPage } from '@shared/library'
+import { isPlaylist, type LibraryRoot, type MediaDetail, type MediaPage, type MediaRow } from '@shared/library'
 
 export const contains = (root: string, path: string): boolean => {
   const rel = relative(resolve(root), resolve(path))
@@ -25,6 +25,8 @@ export function outbound(channel: ForwardedChannel, result: unknown, base: strin
       const page = result as MediaPage
       return { ...page, rows: page.rows.map((row) => (isPlaylist(row) ? row : withUrl(row, base))) }
     }
+    case 'library:suggestions':
+      return (result as MediaRow[]).map((row) => withUrl(row, base))
     case 'library:media':
     case 'library:byPath':
     case 'library:byTitle': {
