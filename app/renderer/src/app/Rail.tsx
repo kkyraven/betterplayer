@@ -1,4 +1,4 @@
-import { ArrowDownToLine, BarChart3, Cable, Gamepad2, Globe, Library, MonitorPlay, Settings, Shuffle, Volume2, Wrench, type LucideIcon } from 'lucide-react'
+import { ArrowDownToLine, BarChart3, Cable, Crown, Gamepad2, Globe, Library, MonitorPlay, Settings, Shuffle, Volume2, Wrench, type LucideIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { TooltipGroup } from '@/components/ui/TooltipGroup'
 import { isAdmin } from '@shared/account'
@@ -6,6 +6,7 @@ import { useAccount } from '@/state/account'
 import { useT } from '@/state/i18n'
 import { cx } from '@/lib/cx'
 import { useBrowser } from '@/state/browser'
+import { useDom } from '@/state/dom'
 import { useGame } from '@/state/game'
 import { usePlayer } from '@/state/player'
 import { SCREEN_LABEL, useUi, type Screen } from '@/state/ui'
@@ -19,6 +20,7 @@ const ITEMS: ReadonlyArray<{ id: Screen; icon: LucideIcon }> = [
   { id: 'session', icon: Shuffle },
   { id: 'browser', icon: Globe },
   { id: 'game', icon: Gamepad2 },
+  { id: 'dom', icon: Crown },
 ]
 
 const GAME_SCREENS: ReadonlySet<Screen> = new Set<Screen>(['game', 'settings'])
@@ -61,12 +63,13 @@ export function Rail() {
   const t = useT()
   const hasMedia = usePlayer((s) => s.path !== null)
   const gameRunning = useGame((s) => s.running)
+  const domRunning = useDom((s) => s.running)
   const browserSound = useBrowser((s) => s.tabs.some((tab) => tab.audible && !tab.muted))
   const admin = useAccount((s) => isAdmin(s.status.me))
   return (
     <TooltipGroup as="nav" side="right" className="rail" aria-label={t('app.rail.screens')}>
       {ITEMS.map((item) => (
-        <RailButton key={item.id} {...item} badge={(item.id === 'player' && hasMedia) || (item.id === 'game' && gameRunning)} sound={item.id === 'browser' && browserSound} />
+        <RailButton key={item.id} {...item} badge={(item.id === 'player' && hasMedia) || (item.id === 'game' && gameRunning) || (item.id === 'dom' && domRunning)} sound={item.id === 'browser' && browserSound} />
       ))}
       <div className="spacer" />
       <UpdateButton />

@@ -7,7 +7,7 @@ import { tvBack, type TvNav, type TvOverlay, type TvTab, type TvView } from './t
 
 export { TV_TABS, type TvTab } from './tvNav'
 
-export const SCREENS = ['library', 'player', 'session', 'browser', 'game', 'editor', 'devices', 'utilities', 'settings', 'admin'] as const
+export const SCREENS = ['library', 'player', 'session', 'browser', 'game', 'dom', 'editor', 'devices', 'utilities', 'settings', 'admin'] as const
 export type Screen = (typeof SCREENS)[number]
 
 export const SCREEN_LABEL: Record<Screen, MessageKey> = {
@@ -16,6 +16,7 @@ export const SCREEN_LABEL: Record<Screen, MessageKey> = {
   session: 'screen.session',
   browser: 'screen.browser',
   game: 'screen.game',
+  dom: 'screen.dom',
   editor: 'screen.editor',
   devices: 'screen.devices',
   utilities: 'screen.utilities',

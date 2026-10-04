@@ -4,7 +4,7 @@ import { installGamepadActions } from '@/input/gamepad'
 import { spaceIsClaimed } from '@/input/keyboard'
 import { cx } from '@/lib/cx'
 import { isAdmin } from '@shared/account'
-import { isPremium, useAccount } from '@/state/account'
+import { useAccount } from '@/state/account'
 import { useT } from '@/state/i18n'
 import { useSettings } from '@/state/settings'
 import { useProfilePhoto } from '@/state/profilePhoto'
@@ -16,6 +16,7 @@ import { DeviceWizard } from '@/screens/devices/DeviceWizard'
 import { EditorScreen } from '@/screens/editor/EditorScreen'
 import { FirstStart } from '@/screens/firstStart/FirstStart'
 import { GameScreen } from '@/screens/game/GameScreen'
+import { DomScreen } from '@/screens/dom/DomScreen'
 import { AccountPanel } from '@/components/account/AccountPanel'
 import { ProfilePhotoDialog } from '@/components/account/ProfilePhotoDialog'
 import { SessionPanel } from '@/components/together/SessionPanel'
@@ -45,6 +46,7 @@ const SCREEN_COMPONENTS: Record<Screen, ComponentType> = {
   session: SessionScreen,
   browser: BrowserScreen,
   game: GameScreen,
+  dom: DomScreen,
   editor: EditorScreen,
   devices: DevicesScreen,
   utilities: UtilitiesScreen,
@@ -60,7 +62,6 @@ export function App() {
   const fullscreen = useUi((s) => s.fullscreen)
   const reduceTransparency = useUi((s) => s.reduceTransparency)
   const theme = useSettings((s) => s.settings?.appearance.theme)
-  const premium = useAccount(isPremium)
   const systemDark = useSystemDark()
   const toggleFullscreen = useUi((s) => s.toggleFullscreen)
   const mediaCentre = useUi((s) => s.mediaCentre)
@@ -126,8 +127,8 @@ export function App() {
   }, [reduceTransparency])
 
   useEffect(() => {
-    if (theme) applyTheme(theme, !premium, systemDark)
-  }, [theme, premium, systemDark])
+    if (theme) applyTheme(theme, systemDark)
+  }, [theme, systemDark])
 
   useEffect(() => {
     if (!fullscreen) return

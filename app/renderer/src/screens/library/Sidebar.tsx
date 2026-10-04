@@ -46,6 +46,7 @@ import { Prompt } from '@/components/ui/Prompt'
 import { invoke } from '@/ipc'
 import { cx } from '@/lib/cx'
 import { ipcMessage } from '@/lib/errors'
+import { electron, REVEAL_LABEL } from '@/node'
 import { useT } from '@/state/i18n'
 import { useLibrary } from '@/state/library'
 import { useRemote } from '@/state/remote'
@@ -53,6 +54,8 @@ import { useSettings } from '@/state/settings'
 import { dropKey, useSelect, type DropTarget } from '@/state/select'
 import { ServerDialog } from './ServerDialog'
 import { dropItem, flattenFolders, moveItem, orderedItems, sidebarKey } from './sidebarOrder'
+
+const nodePath = window.require('node:path') as typeof import('node:path')
 
 const VIEW_DEFS: ReadonlyArray<{
   id: Section
@@ -638,6 +641,7 @@ function FolderMenu({ node, server }: { node: FolderNode; server: boolean }) {
   const updateSettings = useSettings((s) => s.update)
   const togglePin = () => void updateSettings((s) => ({ ...s, library: { ...s.library, pinnedFolders: s.library.pinnedFolders.includes(pinKey) ? s.library.pinnedFolders.filter((key) => key !== pinKey) : [...s.library.pinnedFolders, pinKey] } }))
   const isStash = useLibrary((s) => s.roots.some((root) => root.id === node.rootId && root.kind === 'stash'))
+  const rootPath = useLibrary((s) => server || source ? null : s.roots.find((root) => root.id === node.rootId)?.path ?? null)
   const [importingGroups, setImportingGroups] = useState(false)
   const [groupResult, setGroupResult] = useState('')
   useEffect(() => {
@@ -671,6 +675,12 @@ function FolderMenu({ node, server }: { node: FolderNode; server: boolean }) {
     <>
       <SidebarMenu name={node.name}>{() => <>
         <DropdownMenu.Item className="item" onSelect={togglePin}>{pinned ? <PinOff /> : <Pin />}{t(pinned ? 'library.tag.unpin' : 'library.tag.pin')}</DropdownMenu.Item>
+        {rootPath !== null && (
+          <DropdownMenu.Item className="item" onSelect={() => void electron.shell.openPath(nodePath.join(rootPath, ...node.folder.split('/')))}>
+            <FolderOpen />
+            {t(REVEAL_LABEL)}
+          </DropdownMenu.Item>
+        )}
         <DropdownMenu.Separator className="sep" />
         <DropdownMenu.Sub open={tagsOpen} onOpenChange={setTagsOpen}>
           <DropdownMenu.SubTrigger className="item">

@@ -9,7 +9,7 @@ import { movePlaylistItems, shufflePlaylist, type PlaylistMove } from '@shared/p
 import { isAudioPath, type MediaTags } from '@shared/ipc'
 import { basicAuth, isRemoteMedia, mediaIdFromUrl, type PlayerCommand } from '@shared/peer'
 import { AXIS_IDS, type AxisId } from '@shared/axes'
-import { effectiveParam, pushParams } from './params'
+import { plainParam, pushParams } from './params'
 import { detectProjection, type Projection } from '@shared/projection'
 import { isUrl } from '@shared/remote'
 import { defaultAxisSettings, type AxisSettings, type DlssSettings, type FrameGenOverride, type PerVideoSettings, type UpscalingSettings, type ParamAxisId, type ParamSourceSettings } from '@shared/settings'
@@ -620,7 +620,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     },
     setParam: (id, patch) => {
       const { video } = get()
-      persist({ ...video, params: { ...video.params, [id]: { ...effectiveParam(id), ...patch } } })
+      persist({ ...video, params: { ...video.params, [id]: { ...plainParam(id), ...patch } } })
       pushParams()
     },
     resetParam: (id) => {

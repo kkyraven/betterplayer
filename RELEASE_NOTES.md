@@ -1,5 +1,11 @@
 # Release notes
 
+## 1.0.0
+
+- Initial Release AI Dom
+- Fix bugs
+- Other Improvements
+
 ## 0.7.3
 
 - Fix Handy connection

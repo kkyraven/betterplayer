@@ -7,6 +7,7 @@ import type { ModelFileInfo, ModelFileStatus, ModelProgress } from './tracking'
 import type { BrowserError, BrowserFrame, BrowserHandoff, BrowserRegionEdit, BrowserStartData, BrowserTab, Rect, Region, RegionBox } from './browser'
 import type { EditorDocument, EditorFilePage, EditorFileQuery, EditorStored, Pattern } from './editor'
 import type { GameSources } from './game'
+import type { AlPersona, ChatMessage, ChatReply, ChatTool, DomAccount, DomAiSettings, DomMemory, DomMemoryKind, DomPose, DomProfile, DomYou, PleasurePain } from './dom'
 import type { MatcherReport, MatcherResolveResult, OrphanSet } from './matcher'
 import type { DropResult, FolderNode, LibraryChange, LibraryCounts, LibraryRoot, MediaDetail, MediaPage, MediaQuery, MediaRow, Playlist, ScanProgress, Tag } from './library'
 import type { PlayerCommand, PlayingState, RemoteSourceStatus } from './peer'
@@ -226,6 +227,34 @@ export interface IpcContract {
   'game:sources': () => GameSources
   'game:capture': (id: string | null) => void
   'game:openScreenAccess': () => void
+  'dom:list': () => DomProfile[]
+  'dom:save': (dom: DomProfile) => void
+  'dom:delete': (id: string) => void
+  'dom:you': () => DomYou
+  'dom:setYou': (you: DomYou) => void
+  'dom:pleasurePain': () => PleasurePain
+  'dom:setPleasurePain': (pp: PleasurePain) => void
+  'dom:ai': () => DomAiSettings
+  'dom:setAi': (ai: DomAiSettings) => void
+  'dom:hasKey': () => boolean
+  'dom:setKey': (key: string | null) => void
+  'dom:ownModels': (url: string) => string[]
+  'dom:account': (freeMinutes: boolean) => DomAccount
+  'dom:login': (email: string, password: string, freeMinutes: boolean) => DomAccount
+  'dom:register': (email: string, username: string, password: string, freeMinutes: boolean) => DomAccount
+  'dom:loginWith': (provider: 'google' | 'discord', freeMinutes: boolean) => DomAccount
+  'dom:logout': () => void
+  'dom:heartbeat': (seconds: number) => number
+  'dom:personas': (source: 'mine' | 'directory', query: string) => AlPersona[]
+  'dom:import': (source: 'mine' | 'directory', id: string) => DomProfile
+  'dom:refreshPersona': (domId: string) => DomProfile
+  'dom:memories': (domId: string) => DomMemory[]
+  'dom:remember': (domId: string, kind: DomMemoryKind, content: string) => DomMemory
+  'dom:forget': (domId: string, memoryId: string) => void
+  'dom:forgetAll': (domId: string) => void
+  'dom:chat': (messages: ChatMessage[], tools: ChatTool[], freeMinutes: boolean) => ChatReply
+  'dom:image': (domId: string, pose: DomPose) => string
+  'dom:comfyFiles': (url: string) => { checkpoints: string[]; loras: string[] }
   'audio:peaks': (source: string) => AudioPeaks
   'editor:load': (key: string) => EditorStored
   'editor:files': (query: EditorFileQuery) => EditorFilePage

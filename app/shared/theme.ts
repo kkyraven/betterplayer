@@ -10,7 +10,6 @@ export interface ThemeSettings {
   tint: Tint
 }
 export const defaultTheme = (): ThemeSettings => ({ mode: 'dark', accent: 'violet', tint: 'none' })
-export const effectiveTheme = (theme: ThemeSettings, free: boolean): ThemeSettings => (free ? { ...theme, accent: 'violet', tint: 'none' } : theme)
 
 export type ResolvedMode = Exclude<ThemeMode, 'system'>
 export const resolveMode = (mode: ThemeMode, systemDark: boolean): ResolvedMode => (mode === 'system' ? (systemDark ? 'dark' : 'light') : mode)

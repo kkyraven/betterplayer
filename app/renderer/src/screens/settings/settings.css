@@ -53,10 +53,7 @@
 .set-playback .preview .captions { transition: opacity var(--t-ui) var(--ease); }
 
 .set-appearance { display: grid; gap: 10px; }
-.set-appearance .eyebrow { margin-top: 8px; display: flex; align-items: center; gap: 6px; }
-.set-appearance .eyebrow svg { width: 11px; height: 11px; }
-.set-appearance .panel[inert] { opacity: 0.5; }
-.set-appearance > .btn { justify-self: start; }
+.set-appearance .eyebrow { margin-top: 8px; }
 
 .set-tracking { display: grid; gap: 10px; }
 .set-tracking .prow .sl { width: 160px; flex: none; }

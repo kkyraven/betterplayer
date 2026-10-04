@@ -24,9 +24,21 @@ export function outputParam(axis: ParamAxisId): ParamSourceSettings {
   return output?.config.params?.[axis] ?? defaultParamSource()
 }
 
-export function effectiveParam(axis: ParamAxisId): ParamSourceSettings {
+let held: Partial<Record<ParamAxisId, number>> = {}
+
+export function holdParams(values: Partial<Record<ParamAxisId, number>>) {
+  held = values
+  pushParams()
+}
+
+export function plainParam(axis: ParamAxisId): ParamSourceSettings {
   if (useTracking.getState().source === 'browser') return outputParam(axis)
   return usePlayer.getState().video.params?.[axis] ?? outputParam(axis)
+}
+
+export function effectiveParam(axis: ParamAxisId): ParamSourceSettings {
+  const value = held[axis]
+  return value !== undefined ? { ...defaultParamSource(), source: 'fixed', value } : plainParam(axis)
 }
 
 export function pushParams() {

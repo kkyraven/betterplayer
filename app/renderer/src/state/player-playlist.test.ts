@@ -11,7 +11,7 @@ const mocks = vi.hoisted(() => ({
 }))
 vi.mock('@/ipc', () => ({ invoke: mocks.invoke }))
 vi.mock('@/state/usage', () => ({ track: vi.fn() }))
-vi.mock('./params', () => ({ effectiveParam: vi.fn(), pushParams: vi.fn() }))
+vi.mock('./params', () => ({ plainParam: vi.fn(), pushParams: vi.fn() }))
 vi.mock('./live', () => ({ get: () => ({ timeMs: mocks.time }) }))
 vi.mock('./account', () => ({ isFree: () => true, useAccount: { subscribe: vi.fn() } }))
 vi.mock('./library', () => ({ useLibrary: { getState: () => ({ allIds: mocks.allIds, playlistId: mocks.playlistId }), setState: mocks.librarySetState } }))

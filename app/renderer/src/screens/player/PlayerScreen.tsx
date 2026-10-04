@@ -13,7 +13,9 @@ import { useCompare } from '@/state/compare'
 import { useT } from '@/state/i18n'
 import { TrackBar } from '@/components/tracking/TrackBar'
 import { isUrl, usePlayer } from '@/state/player'
+import { useDom } from '@/state/dom'
 import { useSession } from '@/state/session'
+import { DomColumn } from '@/screens/dom/DomColumn'
 import { useTracking } from '@/state/tracking'
 import { SCREEN_LABEL, useUi } from '@/state/ui'
 import { ControlBar } from './ControlBar'
@@ -38,6 +40,7 @@ export function PlayerScreen() {
   const sessionTitle = useSession((s) => (s.stage !== 'running' ? null : s.setup.showTimes ? t('player.sessionStrip.clipOf', { index: s.index + 1, total: s.plan.length }) : t('player.sessionStrip.title')))
   const heading = sessionTitle ?? (audio ? null : title)
   const zoneEdit = useTracking((s) => s.zoneEdit)
+  const domRunning = useDom((s) => s.running)
   const comparing = useCompare((s) => s.on)
   const compareLeft = useCompare((s) => s.left)
   const compareRight = useCompare((s) => s.right)
@@ -99,6 +102,7 @@ export function PlayerScreen() {
   }, [])
 
   return (
+    <>
     <div className="stage" data-empty={!path || undefined} data-chrome={chrome} onPointerMove={wake} onPointerDown={wake}>
       {path && <VideoSlot subtitles onClick={() => {
         if (!useTracking.getState().zoneEdit && usePlayer.getState().snapshot.loaded) usePlayer.getState().togglePlay()
@@ -146,5 +150,7 @@ export function PlayerScreen() {
         </div>
       )}
     </div>
+    {domRunning && <DomColumn />}
+    </>
   )
 }

@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { delimiter, join, resolve } from 'node:path'
 import { isMediaPath } from '@shared/ipc'
 import { Account } from './account'
+import { Dom } from './dom'
 import { syncLanguage, t } from './i18n'
 import { registerIpc, send } from './ipc'
 import { Library } from './library'
@@ -83,7 +84,7 @@ app.on('child-process-gone', (_event, details) => logProcessExit(details.type, d
 
 const RELOAD_WINDOW_MS = 30_000
 
-function createWindow(store: SettingsStore, library: Library, remote: RemoteServer, client: RemoteClient, account: Account, updater: Updater) {
+function createWindow(store: SettingsStore, library: Library, remote: RemoteServer, client: RemoteClient, account: Account, updater: Updater, dom: Dom) {
   const [sizeW, sizeH] = (flag('size') ?? '1440x900').split('x').map(Number)
   const workArea = screen.getPrimaryDisplay().workAreaSize
   const colours = syncNativeTheme(store)
@@ -110,7 +111,7 @@ function createWindow(store: SettingsStore, library: Library, remote: RemoteServ
   })
 
   watchNativeTheme(store, win)
-  registerIpc(win, store, library, remote, client, account, updater, ytdlp)
+  registerIpc(win, store, library, remote, client, account, updater, ytdlp, dom)
   let reloadedAt = 0
   win.webContents.on('render-process-gone', (_event, details) => {
     logProcessExit('renderer', details)
@@ -174,6 +175,7 @@ if (!app.requestSingleInstanceLock()) {
   let client: RemoteClient | null = null
   let settings: SettingsStore | null = null
   let updater: Updater | null = null
+  let dom: Dom | null = null
 
   const openFile = (path: string) => {
     if (!win) {
@@ -229,7 +231,9 @@ if (!app.requestSingleInstanceLock()) {
       if (win) send(win, 'update:state', state)
     })
     updater = upd
-    win = createWindow(store, lib, server, source, acct, upd)
+    const doms = new Dom(userData)
+    dom = doms
+    win = createWindow(store, lib, server, source, acct, upd, doms)
     upd.start()
     acct.start(store.get())
     server.apply(store.get())
@@ -255,5 +259,6 @@ if (!app.requestSingleInstanceLock()) {
     client?.stop()
     settings?.flush()
     library?.close()
+    dom?.close()
   })
 }

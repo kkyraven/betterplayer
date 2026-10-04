@@ -9,12 +9,12 @@ import { checkSupporter, useAccount } from '@/state/account'
 import { useT } from '@/state/i18n'
 
 const FEATURES: ReadonlyArray<readonly [MessageKey, MessageKey]> = [
+  ['settings.support.feature.aiDom', 'settings.support.feature.aiDomSub'],
   ['settings.support.feature.hmv', 'settings.support.feature.hmvSub'],
   ['settings.support.feature.adBlock', 'settings.support.feature.adBlockSub'],
   ['settings.support.feature.together', 'settings.support.feature.togetherSub'],
   ['settings.support.feature.denial', 'settings.support.feature.denialSub'],
   ['settings.support.feature.dlss', 'settings.support.feature.dlssSub'],
-  ['settings.support.feature.theme', 'settings.support.feature.themeSub'],
 ]
 
 export function SupportSettings() {

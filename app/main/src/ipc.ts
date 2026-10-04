@@ -17,6 +17,7 @@ import { Models } from './models'
 import { findSubtitles, readSubtitles } from './subtitles'
 import { readTags } from './tags'
 import type { Account } from './account'
+import type { Dom } from './dom'
 import type { RemoteClient } from './remote/client'
 import type { RemoteServer } from './remote/server'
 import type { SettingsStore } from './settings/store'
@@ -34,7 +35,7 @@ export function send<E extends IpcEvent>(win: BrowserWindow, event: E, payload: 
   win.webContents.send(event, payload)
 }
 
-export function registerIpc(win: BrowserWindow, store: SettingsStore, library: Library, remote: RemoteServer, client: RemoteClient, account: Account, updater: Updater, ytdlp: string | null) {
+export function registerIpc(win: BrowserWindow, store: SettingsStore, library: Library, remote: RemoteServer, client: RemoteClient, account: Account, updater: Updater, ytdlp: string | null, dom: Dom) {
   function handle<C extends IpcChannel>(channel: C, handler: Handler<C>) {
     handlers.set(channel, handler as (...args: never[]) => unknown)
     ipcMain.handle(channel, (_event: IpcMainInvokeEvent, ...args: Parameters<IpcContract[C]>) => {
@@ -169,6 +170,34 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   handle('audio:cancelWindow', (requestId) => audio.cancelWindow(requestId))
   handle('audio:peaks', (source) => audio.peaks(source))
   const game = new GameCapture(win)
+  handle('dom:list', () => dom.list())
+  handle('dom:save', (d) => dom.save(d))
+  handle('dom:delete', (id) => dom.remove(id))
+  handle('dom:you', () => dom.you())
+  handle('dom:setYou', (you) => dom.setYou(you))
+  handle('dom:pleasurePain', () => dom.pleasurePain())
+  handle('dom:setPleasurePain', (pp) => dom.setPleasurePain(pp))
+  handle('dom:ai', () => dom.ai())
+  handle('dom:setAi', (ai) => dom.setAi(ai))
+  handle('dom:hasKey', () => dom.hasKey())
+  handle('dom:setKey', (key) => dom.setKey(key))
+  handle('dom:ownModels', (url) => dom.ownModels(url))
+  handle('dom:account', (free) => dom.account(free))
+  handle('dom:login', (email, password, free) => dom.login(email, password, free))
+  handle('dom:register', (email, username, password, free) => dom.register(email, username, password, free))
+  handle('dom:loginWith', (provider, free) => dom.loginWith(provider, win, free))
+  handle('dom:logout', () => dom.al.logout())
+  handle('dom:heartbeat', (seconds) => dom.al.heartbeat(seconds))
+  handle('dom:personas', (source, query) => dom.personas(source, query))
+  handle('dom:import', (source, id) => dom.importPersona(source, id))
+  handle('dom:refreshPersona', (id) => dom.refreshPersona(id))
+  handle('dom:memories', (id) => dom.memories(id))
+  handle('dom:remember', (id, kind, content) => dom.remember(id, kind, content))
+  handle('dom:forget', (id, memoryId) => dom.forget(id, memoryId))
+  handle('dom:forgetAll', (id) => dom.forgetAll(id))
+  handle('dom:chat', (messages, tools, free) => dom.chat(messages, tools, free))
+  handle('dom:image', (id, pose) => dom.image(id, pose))
+  handle('dom:comfyFiles', (url) => dom.comfyFiles(url))
   handle('game:sources', () => game.sources())
   handle('game:capture', (id) => game.pick(id))
   handle('game:openScreenAccess', () => game.openScreenAccess())

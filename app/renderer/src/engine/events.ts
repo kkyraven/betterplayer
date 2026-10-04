@@ -6,6 +6,7 @@ import '@/state/paramFeeds'
 import { useFollow } from '@/state/follow'
 import { autoSkipGap } from '@/state/gapSkip'
 import * as live from '@/state/live'
+import { useDom } from '@/state/dom'
 import { useSession } from '@/state/session'
 import { useTracking } from '@/state/tracking'
 import { useUi } from '@/state/ui'
@@ -70,7 +71,8 @@ export function startEngineEvents(): () => void {
       if (atEnd) usePlayer.getState().markEnded()
       const ui = useUi.getState()
       const playerShown = ui.mediaCentre ? ui.tvTab === 'nowplaying' : ui.screen === 'player'
-      if (atEnd && useSession.getState().stage !== 'running' && (playerShown || usePlayer.getState().playlist !== null)) {
+      if (atEnd && useDom.getState().running) void useDom.getState().onEnded()
+      else if (atEnd && useSession.getState().stage !== 'running' && (playerShown || usePlayer.getState().playlist !== null)) {
         void usePlayer.getState().onEnded()
       }
     }

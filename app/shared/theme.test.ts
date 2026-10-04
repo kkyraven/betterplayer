@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ACCENTS, THEME_MODES, defaultTheme, effectiveTheme, resolveMode, themeVars, windowColours } from './theme'
+import { ACCENTS, defaultTheme, resolveMode, themeVars, windowColours } from './theme'
 
 describe('theme', () => {
   it('follows the OS only for System', () => {
@@ -31,12 +31,6 @@ describe('theme', () => {
     expect(vars['--bg']).toBe('#000000')
     expect(vars['--bg-2']).toBe('color-mix(in oklab, #0a0a0c, #ffc86b 8%)')
     expect(vars['--wash-1']).toBe('rgba(200, 140, 50, 0)')
-  })
-  it.each(THEME_MODES)('keeps %s free and restores saved colours for supporters', (mode) => {
-    const saved = { mode, accent: 'rose', tint: 'sky' } as const
-    expect(effectiveTheme(saved, true)).toEqual({ mode, accent: 'violet', tint: 'none' })
-    expect(effectiveTheme(saved, false)).toEqual({ mode, accent: 'rose', tint: 'sky' })
-    expect(saved).toEqual({ mode, accent: 'rose', tint: 'sky' })
   })
   it('uses light colours for the light window frame', () => {
     expect(windowColours('light')).toEqual({ background: '#f3f3f7', text: '#16181d' })

@@ -23,10 +23,7 @@ export function TitleBar() {
   const setMediaCentre = useUi((s) => s.setMediaCentre)
   return (
     <header className="titlebar">
-      <div className="titlebar-brand">
-        <Logo className="logo" variant="lockup" alt="Beta Player" />
-        <span className="titlebar-beta" aria-hidden="true">{t('app.titleBar.beta')}</span>
-      </div>
+      <Logo className="logo" variant="lockup" />
       <div className="spacer" />
       <div className="win-status">
         {chasterLock && <ChastityTime lock={chasterLock} />}
