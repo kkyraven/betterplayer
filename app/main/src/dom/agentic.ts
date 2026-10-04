@@ -315,7 +315,10 @@ export class AgenticLover {
   async image(prompt: string, negative: string): Promise<string> {
     const json = (await this.call('/api/ag-cloud/image/generate', { method: 'POST', body: JSON.stringify({ prompt, negative_prompt: negative, width: 640, height: 960 }) })) as { image_url?: string }
     if (!json.image_url) throw domError('server', 'no image')
-    return dataUrl(json.image_url)
+    if (json.image_url.startsWith('data:')) return json.image_url
+    return publicImage(json.image_url).catch((e: unknown) => {
+      throw domError('server', e instanceof Error ? e.message : String(e))
+    })
   }
 
   async avatar(url: string): Promise<string> {
@@ -344,7 +347,7 @@ export function privateAddress(ip: string): boolean {
   return family === 0 || BLOCKED.check(ip, family === 6 ? 'ipv6' : 'ipv4')
 }
 
-const AVATAR_MAX_BYTES = 8 * 1024 * 1024
+const PICTURE_MAX_BYTES = 8 * 1024 * 1024
 
 function publicImage(url: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -370,7 +373,7 @@ function publicImage(url: string): Promise<string> {
       let size = 0
       res.on('data', (chunk: Buffer) => {
         size += chunk.length
-        if (size > AVATAR_MAX_BYTES) req.destroy(new Error('too large'))
+        if (size > PICTURE_MAX_BYTES) req.destroy(new Error('too large'))
         else chunks.push(chunk)
       })
       res.on('end', () => resolve(`data:${res.headers['content-type'] ?? 'image/png'};base64,${Buffer.concat(chunks).toString('base64')}`))
@@ -379,12 +382,4 @@ function publicImage(url: string): Promise<string> {
     req.on('timeout', () => req.destroy(new Error('timeout')))
     req.on('error', reject)
   })
-}
-
-async function dataUrl(url: string): Promise<string> {
-  if (url.startsWith('data:')) return url
-  const res = await fetch(url)
-  if (!res.ok) throw domError('server', `${res.status}`)
-  const type = res.headers.get('content-type') ?? 'image/png'
-  return `data:${type};base64,${Buffer.from(await res.arrayBuffer()).toString('base64')}`
 }
