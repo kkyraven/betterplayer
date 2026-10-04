@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-KinkyRaven-Proprietary
 // Copyright (c) 2026 KinkyRaven. All rights reserved. This file is not licensed under LICENSE.txt; no permission is granted to use, copy, modify or distribute it.
 
-import { lookup } from 'node:dns/promises'
-import { isIP } from 'node:net'
+import { lookup, type LookupAddress } from 'node:dns'
+import { get } from 'node:https'
+import { BlockList, isIP } from 'node:net'
 import { BrowserWindow, safeStorage } from 'electron'
 import { AGENTIC_LOVER_API, DOM_ERROR_PREFIX, DOM_FREE_SECONDS, normalizeLoras, type AlModel, type DomLora, type AlPersona, type AlTier, type ChatMessage, type ChatReply, type ChatTool, type DomAccount, type DomErrorCode } from '@shared/dom'
 import type { AlMemoryJson } from './memories'
@@ -319,7 +320,7 @@ export class AgenticLover {
 
   async avatar(url: string): Promise<string> {
     if (url.startsWith('data:')) return url
-    return (await publicHttps(url)) ? dataUrl(url, 'error').catch(() => '') : ''
+    return publicImage(url).catch(() => '')
   }
 }
 
@@ -334,30 +335,55 @@ export function replyOf(json: OpenAiJson): ChatReply {
 
 const toPersona = (p: PersonaJson): AlPersona => ({ id: String(p.id ?? ''), name: p.name ?? '', description: p.description ?? '', avatarUrl: p.avatar_url ?? p.preview_image_url ?? '' })
 
+const BLOCKED = new BlockList()
+for (const [net, prefix] of [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['224.0.0.0', 3]] as const) BLOCKED.addSubnet(net, prefix, 'ipv4')
+for (const [net, prefix] of [['::', 127], ['64:ff9b::', 96], ['2002::', 16], ['fc00::', 7], ['fe80::', 10], ['ff00::', 8]] as const) BLOCKED.addSubnet(net, prefix, 'ipv6')
+
 export function privateAddress(ip: string): boolean {
-  const v4 = ip.startsWith('::ffff:') ? ip.slice(7) : ip
-  if (isIP(v4) === 4) {
-    const [a = 0, b = 0] = v4.split('.').map(Number)
-    return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b < 128) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b < 32) || (a === 192 && b === 168)
-  }
-  const v6 = ip.toLowerCase()
-  return v6 === '::' || v6 === '::1' || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6)
+  const family = isIP(ip)
+  return family === 0 || BLOCKED.check(ip, family === 6 ? 'ipv6' : 'ipv4')
 }
 
-async function publicHttps(url: string): Promise<boolean> {
-  try {
-    const { protocol, hostname } = new URL(url)
-    if (protocol !== 'https:') return false
-    const addresses = await lookup(hostname.replace(/^\[|\]$/g, ''), { all: true })
-    return addresses.length > 0 && !addresses.some((a) => privateAddress(a.address))
-  } catch {
-    return false
-  }
+const AVATAR_MAX_BYTES = 8 * 1024 * 1024
+
+function publicImage(url: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url)
+    if (target.protocol !== 'https:') return reject(new Error('not https'))
+    const req = get(target, {
+      timeout: 15_000,
+      lookup: (host, options, callback) => {
+        lookup(host, { ...options, all: true }, (err, addresses: LookupAddress[]) => {
+          if (err) return callback(err, '', 0)
+          const allowed = addresses.filter((a) => !privateAddress(a.address))
+          if (allowed.length === 0 || allowed.length < addresses.length) return callback(new Error('private address'), '', 0)
+          if (options.all) return (callback as unknown as (e: null, a: LookupAddress[]) => void)(null, allowed)
+          callback(null, allowed[0]!.address, allowed[0]!.family)
+        })
+      },
+    }, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume()
+        return reject(new Error(`${res.statusCode}`))
+      }
+      const chunks: Buffer[] = []
+      let size = 0
+      res.on('data', (chunk: Buffer) => {
+        size += chunk.length
+        if (size > AVATAR_MAX_BYTES) req.destroy(new Error('too large'))
+        else chunks.push(chunk)
+      })
+      res.on('end', () => resolve(`data:${res.headers['content-type'] ?? 'image/png'};base64,${Buffer.concat(chunks).toString('base64')}`))
+      res.on('error', reject)
+    })
+    req.on('timeout', () => req.destroy(new Error('timeout')))
+    req.on('error', reject)
+  })
 }
 
-async function dataUrl(url: string, redirect: RequestInit['redirect'] = 'follow'): Promise<string> {
+async function dataUrl(url: string): Promise<string> {
   if (url.startsWith('data:')) return url
-  const res = await fetch(url, { redirect })
+  const res = await fetch(url)
   if (!res.ok) throw domError('server', `${res.status}`)
   const type = res.headers.get('content-type') ?? 'image/png'
   return `data:${type};base64,${Buffer.from(await res.arrayBuffer()).toString('base64')}`

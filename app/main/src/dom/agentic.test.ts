@@ -34,7 +34,15 @@ describe('signing up for Agentic Lover', () => {
 
 describe('privateAddress', () => {
   it('rejects loopback, private, link-local and unique local addresses', () => {
-    for (const ip of ['127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.169.254', '100.64.0.1', '0.0.0.0', '::1', '::', 'fd00::1', 'fe80::1', '::ffff:192.168.0.1']) expect(privateAddress(ip), ip).toBe(true)
+    for (const ip of ['127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.169.254', '100.64.0.1', '0.0.0.0', '198.18.0.1', '239.1.1.1', '::1', '::', 'fd00::1', 'fe80::1', 'ff02::1']) expect(privateAddress(ip), ip).toBe(true)
+  })
+
+  it('rejects IPv4 wrapped in IPv6 in any notation', () => {
+    for (const ip of ['::ffff:192.168.0.1', '::ffff:7f00:1', '::ffff:a9fe:a9fe', '64:ff9b::7f00:1', '2002:7f00:1::1']) expect(privateAddress(ip), ip).toBe(true)
+  })
+
+  it('treats anything that is not an IP as blocked', () => {
+    expect(privateAddress('localhost')).toBe(true)
   })
 
   it('allows public addresses', () => {
