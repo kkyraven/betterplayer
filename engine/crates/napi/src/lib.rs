@@ -400,6 +400,44 @@ pub struct EstimOptions {
 }
 
 #[napi(object)]
+pub struct PainChannel {
+    pub shape: String,
+    pub intensity: f64,
+    pub rise_ms: f64,
+    pub hold_ms: f64,
+    pub fall_ms: f64,
+    pub gap_ms: f64,
+}
+#[napi(object)]
+pub struct PainProfile {
+    pub name: String,
+    pub volume_min: f64,
+    pub volume_max: f64,
+    pub channels: Vec<PainChannel>,
+}
+impl PainProfile {
+    fn into_profile(self) -> Result<bp_devices::pain::Profile> {
+        let channels = self.channels.into_iter().map(|c| {
+            let shape = match c.shape.as_str() {
+                "saw" => bp_devices::pain::Shape::Saw,
+                "sine" => bp_devices::pain::Shape::Sine,
+                "square" => bp_devices::pain::Shape::Square,
+                _ => return Err(Error::from_reason("Unknown pain waveform")),
+            };
+            Ok(bp_devices::pain::Channel { shape, intensity: c.intensity, rise_ms: c.rise_ms, hold_ms: c.hold_ms, fall_ms: c.fall_ms, gap_ms: c.gap_ms })
+        }).collect::<Result<Vec<_>>>()?.try_into().map_err(|_| Error::from_reason("Pain profiles require four channels"))?;
+        Ok(bp_devices::pain::Profile { name: self.name, volume_min: self.volume_min, volume_max: self.volume_max, channels })
+    }
+}
+#[napi(object)]
+pub struct PainState {
+    pub name: String,
+    pub intensity: f64,
+    pub remaining_ms: f64,
+    pub testing: bool,
+}
+
+#[napi(object)]
 pub struct RampProgress {
     pub value: f64,
     pub elapsed_ms: f64,
@@ -539,6 +577,8 @@ pub const AXIS_FLAG_TRACKED: u8 = bp_core::FLAG_TRACKED;
 #[napi(object)]
 pub struct EngineState {
     pub time_ms: f64,
+    pub seek_generation: u32,
+    pub playback_ended: bool,
     pub duration_ms: f64,
     pub paused: bool,
     pub rate: f64,
@@ -1006,6 +1046,7 @@ impl Engine {
         headers: Option<String>,
         signal: Option<AbortSignal>,
         script_folders: Option<Vec<String>>,
+        end_seconds: Option<f64>,
     ) -> Result<AsyncTask<LoadScripts>> {
         let variants = variant_pairs(variants)?;
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -1018,6 +1059,7 @@ impl Engine {
                 loader: self.inner.loader(),
                 path,
                 start_seconds: Some(start_seconds),
+                end_seconds,
                 variants,
                 scripts_path,
                 script_folders: script_folders.unwrap_or_default(),
@@ -1068,6 +1110,7 @@ impl Engine {
             loader: self.inner.loader(),
             path,
             start_seconds: None,
+            end_seconds: None,
             variants: variant_pairs(variants)?,
             scripts_path: None,
             script_folders: script_folders.unwrap_or_default(),
@@ -1134,8 +1177,8 @@ impl Engine {
     }
 
     #[napi]
-    pub fn play(&self) -> Result<()> {
-        self.inner.play().map_err(err)
+    pub fn play(&self, user_initiated: Option<bool>) -> Result<()> {
+        self.inner.play(user_initiated.unwrap_or(false)).map_err(err)
     }
 
     #[napi]
@@ -1941,6 +1984,47 @@ impl Engine {
     }
 
     #[napi]
+    pub fn clear_playback_end(&self) -> Result<()> {
+        self.inner.clear_playback_end().map_err(err)
+    }
+
+    #[napi]
+    pub fn stop_sensation(&self, seconds: f64) -> bool {
+        self.inner.stop_sensation(seconds)
+    }
+
+    #[napi]
+    pub fn start_sensation(&self) {
+        self.inner.start_sensation();
+    }
+
+    #[napi]
+    pub fn reset_sensation(&self) {
+        self.inner.reset_sensation();
+    }
+
+    #[napi]
+    pub fn halt_sensation(&self) { self.inner.halt_sensation(); }
+
+    #[napi]
+    pub fn apply_pain(&self, profile: PainProfile, intensity: f64, seconds: f64) -> Result<bool> {
+        Ok(self.inner.apply_pain(profile.into_profile()?, intensity, seconds, false))
+    }
+
+    #[napi]
+    pub fn test_pain(&self, profile: PainProfile) -> Result<bool> {
+        Ok(self.inner.apply_pain(profile.into_profile()?, 0.0, 6.0, true))
+    }
+
+    #[napi]
+    pub fn stop_pain(&self) { self.inner.stop_pain(); }
+
+    #[napi]
+    pub fn pain_state(&self) -> Option<PainState> {
+        self.inner.pain_state().map(|p| PainState { name: p.name, intensity: p.intensity, remaining_ms: p.remaining_ms, testing: p.testing })
+    }
+
+    #[napi]
     pub fn set_output_session_scale(&self, id: u32, scale: f64) -> bool {
         self.inner.set_output_session_scale(id, scale)
     }
@@ -2091,6 +2175,8 @@ impl Engine {
         let s = self.inner.state();
         EngineState {
             time_ms: s.time_ms,
+            seek_generation: s.seek_generation,
+            playback_ended: s.playback_ended,
             duration_ms: s.duration_ms,
             paused: s.paused,
             rate: s.rate,
@@ -2340,6 +2426,7 @@ pub struct LoadScripts {
     loader: bp_core::ScriptLoader,
     path: String,
     start_seconds: Option<Option<f64>>,
+    end_seconds: Option<f64>,
     variants: Vec<(bp_script::Axis, String)>,
     scripts_path: Option<String>,
     script_folders: Vec<String>,
@@ -2370,6 +2457,7 @@ impl Task for LoadScripts {
                     pool,
                     &self.variants,
                     self.headers.as_deref(),
+                    self.end_seconds,
                 )
                 .map_err(err)?,
             None => self

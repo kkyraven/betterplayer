@@ -2,7 +2,7 @@
 // Copyright (c) 2026 KinkyRaven. All rights reserved. This file is not licensed under LICENSE.txt; no permission is granted to use, copy, modify or distribute it.
 
 import * as Popover from '@radix-ui/react-popover'
-import { ChevronsUpDown, Download, ExternalLink, Flame, Lock, Play, Plus, Search, Trash2, UserRound } from 'lucide-react'
+import { ChevronsUpDown, Download, ExternalLink, Flame, Lock, Play, Plus, Search, Trash2, UserRound, Waves } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { SUBSCRIBE_URL, SUPPORTER_PRICE } from '@shared/account'
 import { AGENTIC_LOVER_URL, DOM_FREE_SECONDS, domAccess, type AlPersona, type AlTier, type DomProfile } from '@shared/dom'
@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/Button'
 import { Modal } from '@/components/ui/Modal'
 import { Prompt } from '@/components/ui/Prompt'
 import { Segmented } from '@/components/ui/Segmented'
+import { Switch } from '@/components/ui/Switch'
 import { Select } from '@/components/ui/Select'
 import { invoke } from '@/ipc'
 import { cx } from '@/lib/cx'
@@ -22,6 +23,7 @@ import { GetStarted } from './GetStarted'
 import { ImagesTab, MemoryTab, PersonalityTab, PleasurePainPage, YouPage } from './DomTabs'
 import { OwnAiFields } from './OwnAi'
 import { Portrait } from './Portrait'
+import { AdvancedPainEditor } from './AdvancedPain'
 import './dom.css'
 
 const TABS = ['personality', 'images', 'memory'] as const
@@ -38,7 +40,7 @@ export function DomScreen() {
   const ai = useDom((s) => s.ai)
   const account = useDom((s) => s.account)
   const premium = useAccount(isPremium)
-  const [shared, setShared] = useState<'you' | 'pleasurePain' | null>(null)
+  const [shared, setShared] = useState<'you' | 'pleasurePain' | 'advancedPain' | null>(null)
   const [importing, setImporting] = useState(false)
   const { load, select, create } = useDom.getState()
   useEffect(() => {
@@ -65,6 +67,12 @@ export function DomScreen() {
             <button type="button" className={cx('side-row', shared === 'pleasurePain' && 'on')} aria-current={shared === 'pleasurePain' || undefined} onClick={() => setShared('pleasurePain')}>
               <Flame />
               {t('dom.tab.pleasurePain')}
+            </button>
+          </li>
+          <li>
+            <button type="button" className={cx('side-row', shared === 'advancedPain' && 'on')} aria-current={shared === 'advancedPain' || undefined} onClick={() => setShared('advancedPain')}>
+              <Waves />
+              {t('dom.pain.title')}
             </button>
           </li>
           {doms.map((d) => (
@@ -109,6 +117,11 @@ export function DomScreen() {
           <>
             <div className="page-hd"><h1>{t('dom.tab.pleasurePain')}</h1></div>
             <div className="dom-body"><PleasurePainPage /></div>
+          </>
+        ) : shared === 'advancedPain' ? (
+          <>
+            <div className="page-hd"><h1>{t('dom.pain.title')}</h1></div>
+            <div className="dom-body"><AdvancedPainEditor /></div>
           </>
         ) : access === 'signIn' ? (
           <GetStarted dom={selected} />
@@ -261,6 +274,18 @@ function AiPopover() {
             </div>
           </>
         ) : null}
+      </div>
+      <div className="panel">
+        <div className="prow">
+          <span className="lbl">{t('dom.ai.tagEditing')}</span>
+          <span className="spacer" />
+          <Switch checked={ai.tagEditing} onCheckedChange={(tagEditing) => void setAi({ tagEditing })} label={t('dom.ai.tagEditing')} />
+        </div>
+        <div className="prow">
+          <span className="lbl">{t('dom.ai.viewVideo')}</span>
+          <span className="spacer" />
+          <Switch checked={ai.viewVideo} onCheckedChange={(viewVideo) => void setAi({ viewVideo })} label={t('dom.ai.viewVideo')} />
+        </div>
       </div>
       <button type="button" className="dom-link dom-al-link" onClick={() => open(AGENTIC_LOVER_URL)}>
         agenticlover.ai

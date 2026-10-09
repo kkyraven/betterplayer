@@ -9,6 +9,7 @@ mod motion;
 mod params;
 mod pass;
 mod range;
+mod sensation;
 mod track;
 mod zones;
 
@@ -130,6 +131,8 @@ pub const FLAG_TRACKED: u8 = 8;
 #[derive(Clone, Debug)]
 pub struct EngineState {
     pub time_ms: f64,
+    pub seek_generation: u32,
+    pub playback_ended: bool,
     pub duration_ms: f64,
     pub paused: bool,
     pub rate: f64,
@@ -482,6 +485,8 @@ struct Published {
 
 struct Shared {
     clock: Mutex<Clock>,
+    seek_generation: AtomicU32,
+    playback_ended: AtomicBool,
     browser_tracking: AtomicBool,
     browser_clock: Mutex<Clock>,
     mixer: Mutex<Mixer>,
@@ -498,6 +503,8 @@ struct Shared {
     live_params: AtomicBool,
     params_enabled: AtomicBool,
     stop_on_pause: AtomicBool,
+    sensation: Mutex<sensation::Sensation>,
+    pain: Mutex<bp_devices::pain::Runtime>,
     estim_volume: Mutex<bp_devices::ramp::VolumeSettings>,
     detect_wanted: AtomicBool,
     boxes_wanted: AtomicBool,
@@ -557,6 +564,8 @@ impl Engine {
     pub fn new(width: u32, height: u32, opts: EngineOptions) -> Result<Engine, String> {
         let shared = Arc::new(Shared {
             clock: Mutex::new(Clock::new()),
+            seek_generation: AtomicU32::new(0),
+            playback_ended: AtomicBool::new(false),
             browser_tracking: AtomicBool::new(false),
             browser_clock: Mutex::new(Clock::new()),
             mixer: Mutex::new(Mixer::new()),
@@ -577,6 +586,8 @@ impl Engine {
             live_params: AtomicBool::new(false),
             params_enabled: AtomicBool::new(EstimOptions::default().params),
             stop_on_pause: AtomicBool::new(true),
+            sensation: Mutex::new(sensation::Sensation::default()),
+            pain: Mutex::new(bp_devices::pain::Runtime::default()),
             estim_volume: Mutex::new(bp_devices::ramp::VolumeSettings::default()),
             detect_wanted: AtomicBool::new(false),
             boxes_wanted: AtomicBool::new(false),
@@ -658,7 +669,7 @@ impl Engine {
     ) -> Result<MediaInfo, String> {
         let loader = self.loader();
         let pool = loader.pool_for(path, None, &[]);
-        loader.load(path, start_seconds, pool, variants, None)
+        loader.load(path, start_seconds, pool, variants, None, None)
     }
 
     pub fn load_media(&self, path: &str, start_seconds: Option<f64>) -> Result<(), String> {
@@ -766,12 +777,20 @@ impl Engine {
         self.follow.lock().unwrap().as_ref().map(Follow::state)
     }
 
-    pub fn play(&self) -> Result<(), String> {
-        self.player.play()
+    pub fn play(&self, user_initiated: bool) -> Result<(), String> {
+        let mut sensation = self.shared.sensation.lock().unwrap();
+        if sensation.is_halted() && !user_initiated { return Ok(()); }
+        self.player.play()?;
+        if user_initiated { sensation.resume_from_halt(Instant::now()); }
+        Ok(())
     }
 
     pub fn pause(&self) -> Result<(), String> {
         self.player.pause()
+    }
+
+    pub fn clear_playback_end(&self) -> Result<(), String> {
+        self.player.clear_playback_end()
     }
 
     pub fn seek(&self, seconds: f64) -> Result<(), String> {
@@ -1585,6 +1604,33 @@ impl Engine {
             .find_map(|o| o.slider())
     }
 
+    pub fn stop_sensation(&self, seconds: f64) -> bool {
+        self.shared.sensation.lock().unwrap().stop(seconds, Instant::now())
+    }
+
+    pub fn start_sensation(&self) {
+        self.shared.sensation.lock().unwrap().start(Instant::now());
+    }
+
+    pub fn reset_sensation(&self) {
+        *self.shared.sensation.lock().unwrap() = sensation::Sensation::default();
+    }
+
+    pub fn halt_sensation(&self) {
+        self.shared.sensation.lock().unwrap().halt();
+        self.shared.pain.lock().unwrap().stop();
+        let _ = self.player.pause();
+    }
+
+    pub fn apply_pain(&self, profile: bp_devices::pain::Profile, intensity: f64, seconds: f64, testing: bool) -> bool {
+        if !self.shared.outputs.lock().unwrap().iter().any(|o| o.profile == Profile::Restim && o.connected()) { return false; }
+        self.shared.pain.lock().unwrap().start(profile, intensity, seconds, testing, Instant::now())
+    }
+
+    pub fn stop_pain(&self) { self.shared.pain.lock().unwrap().stop(); }
+
+    pub fn pain_state(&self) -> Option<bp_devices::pain::State> { self.shared.pain.lock().unwrap().state(Instant::now()) }
+
     pub fn set_output_session_scale(&self, id: u32, scale: f64) -> bool {
         if !scale.is_finite() || !(0.0..=1.0).contains(&scale) { return false; }
         let mut outputs = self.shared.outputs.lock().unwrap();
@@ -1777,13 +1823,15 @@ impl Engine {
     }
 
     pub fn state(&self) -> EngineState {
-        let (time_ms, duration_ms, paused, rate) = {
+        let (time_ms, duration_ms, paused, rate, seek_generation, playback_ended) = {
             let clock = self.shared.clock.lock().unwrap();
             (
                 clock.peek(),
                 clock.duration_ms,
                 clock.paused(),
                 clock.speed(),
+                self.shared.seek_generation.load(Ordering::Relaxed),
+                self.shared.playback_ended.load(Ordering::Relaxed),
             )
         };
         let (axis_values, axis_flags, flags_version) = {
@@ -1801,6 +1849,8 @@ impl Engine {
         let (video_width, video_height) = self.video_size();
         EngineState {
             time_ms,
+            seek_generation,
+            playback_ended,
             duration_ms,
             paused,
             rate,
@@ -1904,8 +1954,9 @@ impl ScriptLoader {
         pool: Vec<PoolEntry>,
         variants: &[(Axis, String)],
         remote: Option<&str>,
+        end_seconds: Option<f64>,
     ) -> Result<MediaInfo, String> {
-        self.load_media(path, start_seconds, remote)?;
+        self.load_media_range(path, start_seconds, remote, end_seconds)?;
         Ok(self.apply(Path::new(path), pool, variants))
     }
 
@@ -1915,8 +1966,12 @@ impl ScriptLoader {
         start_seconds: Option<f64>,
         remote: Option<&str>,
     ) -> Result<(), String> {
+        self.load_media_range(path, start_seconds, remote, None)
+    }
+
+    fn load_media_range(&self, path: &str, start_seconds: Option<f64>, remote: Option<&str>, end_seconds: Option<f64>) -> Result<(), String> {
         *self.shared.load_error.lock().unwrap() = None;
-        self.media.load(path, start_seconds, remote)?;
+        self.media.load_range(path, start_seconds, remote, end_seconds)?;
         *self.shared.media_path.lock().unwrap() = Some(path.to_string());
         self.shared.beat.lock().unwrap().clear();
         self.shared.beat_live_installed.store(false, Ordering::Relaxed);
@@ -2217,15 +2272,20 @@ impl Shared {
                 clock.set_paused(p);
                 self.mixer.lock().unwrap().resync();
             }
+            PlayerEvent::PlaybackEnded(ended) => self.playback_ended.store(ended, Ordering::Relaxed),
             PlayerEvent::Idle(i) => clock.set_idle(i),
             PlayerEvent::Speed(s) => clock.set_speed(s),
             PlayerEvent::Seek | PlayerEvent::FileLoaded => {
+                self.playback_ended.store(false, Ordering::Relaxed);
                 self.hero.lock().unwrap().reset_hits();
                 self.zones.lock().unwrap().reset();
                 clock.snap();
                 self.mixer.lock().unwrap().resync();
             }
-            PlayerEvent::PlaybackRestart => clock.snap(),
+            PlayerEvent::PlaybackRestart => {
+                clock.snap();
+                self.seek_generation.fetch_add(1, Ordering::Relaxed);
+            },
             PlayerEvent::EndFile { error: Some(e) } => *self.load_error.lock().unwrap() = Some(e),
             PlayerEvent::EndFile { .. } | PlayerEvent::VideoSize(..) | PlayerEvent::VideoFps(_) => {}
         }
@@ -2751,6 +2811,8 @@ impl Shared {
             rate,
             interval_ms: ((t.dt_ms + 0.75).floor() as u32).clamp(1, 100),
         };
+        let sensation_scale = self.sensation.lock().unwrap().scale(t.fired);
+        let pain_frame = self.pain.lock().unwrap().sample(t.fired);
         let (connected, wrote, shown) = {
             let mut outputs = self.outputs.lock().unwrap();
             let (mut connected, mut wrote) = (false, false);
@@ -2771,6 +2833,8 @@ impl Shared {
                     .flatten()
             };
             for o in outputs.iter_mut() {
+                o.sensation_scale = sensation_scale;
+                o.pain_frame = pain_frame;
                 o.poll();
                 connected |= o.connected();
                 let stroke_next = keyframes.iter().find(|(d, _)| *d == o.delay_ms).and_then(|(_, k)| *k);

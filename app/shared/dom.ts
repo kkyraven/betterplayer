@@ -80,11 +80,12 @@ export interface DomYou {
   petNames: string[]
   pronouns: string
   genitals: string
+  safeword: string
   kinks: string[]
   limits: string[]
 }
 
-export const emptyYou = (): DomYou => ({ name: '', petNames: [], pronouns: '', genitals: '', kinks: [], limits: [] })
+export const emptyYou = (): DomYou => ({ name: '', petNames: [], pronouns: '', genitals: '', safeword: '', kinks: [], limits: [] })
 
 const strings = (v: unknown) => (Array.isArray(v) ? v.filter((p): p is string => typeof p === 'string' && p.trim() !== '').map((p) => p.trim()) : [])
 
@@ -95,6 +96,7 @@ export function normalizeYou(raw: unknown): DomYou {
     petNames: strings(raw.petNames),
     pronouns: str(raw.pronouns).slice(0, 100),
     genitals: str(raw.genitals).slice(0, 100),
+    safeword: str(raw.safeword).trim().slice(0, 100),
     kinks: strings(raw.kinks),
     limits: strings(raw.limits),
   }
@@ -105,9 +107,24 @@ export interface DomAiSettings {
   alModel: string
   ownUrl: string
   ownModel: string
+  tagEditing: boolean
+  viewVideo: boolean
 }
 
-export const defaultDomAi = (): DomAiSettings => ({ provider: 'agenticlover', alModel: '', ownUrl: 'http://127.0.0.1:1234/v1', ownModel: '' })
+export const defaultDomAi = (): DomAiSettings => ({ provider: 'agenticlover', alModel: '', ownUrl: 'http://127.0.0.1:1234/v1', ownModel: '', tagEditing: false, viewVideo: false })
+
+export function normalizeDomAi(raw: unknown): DomAiSettings {
+  const d = defaultDomAi()
+  if (!isRecord(raw)) return d
+  return {
+    provider: raw.provider === 'own' ? 'own' : 'agenticlover',
+    alModel: str(raw.alModel, d.alModel),
+    ownUrl: str(raw.ownUrl, d.ownUrl),
+    ownModel: str(raw.ownModel, d.ownModel),
+    tagEditing: raw.tagEditing === true,
+    viewVideo: raw.viewVideo === true,
+  }
+}
 
 const point = (at0: number, at15: number, on: boolean): PainPoint => ({ on, at0, at15 })
 const span = (at0: [number, number], at15: [number, number], on: boolean): PainSpan => ({ on, at0, at15 })
@@ -236,6 +253,7 @@ export interface DomVideo {
   id: number
   title: string
   minutes: number
+  duration_seconds: number
   tags: string[]
 }
 
@@ -245,9 +263,13 @@ export interface ChatToolCall {
   function: { name: string; arguments: string }
 }
 
+export type ChatContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string; detail?: 'auto' | 'low' | 'high' } }
+
 export type ChatMessage =
   | { role: 'system'; content: string }
-  | { role: 'user'; content: string }
+  | { role: 'user'; content: string | ChatContentPart[] }
   | { role: 'assistant'; content: string | null; tool_calls?: ChatToolCall[] }
   | { role: 'tool'; tool_call_id: string; content: string }
 

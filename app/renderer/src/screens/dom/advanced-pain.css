@@ -1,0 +1,27 @@
+.advanced-pain { overflow: hidden; }
+.pain-editor { display: grid; grid-template-columns: 140px minmax(0, 1fr); border-top: 1px solid var(--line); }
+.pain-profiles { padding: 12px 8px; border-right: 1px solid var(--line); display: flex; flex-direction: column; align-items: stretch; gap: 4px; }
+.pain-profiles > button:not(.btn) { padding: 9px 10px; text-align: left; background: transparent; color: var(--text-2); border: 0; border-radius: 6px; cursor: pointer; overflow-wrap: anywhere; }
+.pain-profiles > button.selected { background: var(--accent-soft); color: var(--accent); }
+.pain-details { padding: 16px; min-width: 0; display: grid; gap: 14px; }
+.pain-heading { display: flex; align-items: center; gap: 8px; }
+.pain-heading input { min-width: 0; flex: 1; }
+.pain-channels { display: grid; gap: 14px; }
+.pain-channel { border: 1px solid var(--line); border-radius: 8px; padding: 12px; display: grid; gap: 8px; }
+.pain-channel-main { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.pain-channel-main strong { color: var(--accent); }
+.pain-phases { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.pain-phases label, .pain-volume label { display: grid; gap: 6px; color: var(--text-2); font-size: 11px; }
+.pain-phases .numf { width: fit-content; max-width: 100%; }
+.pain-wave { width: 100%; height: 40px; }
+.pain-wave path, .pain-test-curve path { fill: none; stroke: var(--line); }
+.pain-wave polyline, .pain-test-curve polyline { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+.pain-volume { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; padding: 12px 0; }
+.pain-test-curve, .pain-volume > .sub { grid-column: 1 / -1; width: 100%; }
+.pain-test-curve { height: 100px; }
+.pain-test-row { display: flex; gap: 12px; align-items: center; padding-top: 12px; border-top: 1px solid var(--line); }
+@media (max-width: 720px) {
+  .pain-editor { grid-template-columns: minmax(0, 1fr); }
+  .pain-profiles { border-right: 0; border-bottom: 1px solid var(--line); flex-direction: row; flex-wrap: wrap; }
+  .pain-phases { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

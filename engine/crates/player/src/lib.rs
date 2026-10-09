@@ -34,6 +34,7 @@ pub enum PlayerEvent {
     TimePos(f64),
     Duration(f64),
     Pause(bool),
+    PlaybackEnded(bool),
     Idle(bool),
     Speed(f64),
     VideoSize(u32, u32),
@@ -110,9 +111,13 @@ pub struct MediaLoader {
 
 impl MediaLoader {
     pub fn load(&self, path: &str, start_seconds: Option<f64>, remote: Option<&str>) -> Result<(), String> {
+        self.load_range(path, start_seconds, remote, None)
+    }
+
+    pub fn load_range(&self, path: &str, start_seconds: Option<f64>, remote: Option<&str>, end_seconds: Option<f64>) -> Result<(), String> {
         self.mpv.set_property("http-header-fields", remote.unwrap_or(""))?;
         let _ = self.mpv.set_property("ytdl", if remote.is_some() { "no" } else { &self.ytdl });
-        load_file(&self.mpv, path, start_seconds)
+        load_file_range(&self.mpv, path, start_seconds, end_seconds)
     }
 
     pub fn hwdec_current(&self) -> String {
@@ -121,16 +126,19 @@ impl MediaLoader {
 }
 
 fn load_file(mpv: &Mpv, path: &str, start_seconds: Option<f64>) -> Result<(), String> {
-    match start_seconds {
-        Some(s) if s > 0.0 => {
-            let start = format!("start={s}");
-            if unsafe { mpv::mpv_client_api_version() } < (2 << 16 | 3) {
-                mpv.command(&["loadfile", path, "replace", &start])
-            } else {
-                mpv.command(&["loadfile", path, "replace", "-1", &start])
-            }
-        },
-        _ => mpv.command(&["loadfile", path]),
+    load_file_range(mpv, path, start_seconds, None)
+}
+
+fn load_file_range(mpv: &Mpv, path: &str, start_seconds: Option<f64>, end_seconds: Option<f64>) -> Result<(), String> {
+    let mut options = Vec::new();
+    if let Some(start) = start_seconds.filter(|s| *s > 0.0) { options.push(format!("start={start}")); }
+    if let Some(end) = end_seconds { options.push(format!("end={end}")); }
+    if options.is_empty() { return mpv.command(&["loadfile", path]); }
+    let options = options.join(",");
+    if unsafe { mpv::mpv_client_api_version() } < (2 << 16 | 3) {
+        mpv.command(&["loadfile", path, "replace", &options])
+    } else {
+        mpv.command(&["loadfile", path, "replace", "-1", &options])
     }
 }
 
@@ -166,6 +174,7 @@ impl Player {
         mpv.observe("time-pos", mpv::MPV_FORMAT_DOUBLE)?;
         mpv.observe("duration", mpv::MPV_FORMAT_DOUBLE)?;
         mpv.observe("pause", mpv::MPV_FORMAT_FLAG)?;
+        mpv.observe("eof-reached", mpv::MPV_FORMAT_FLAG)?;
         mpv.observe("core-idle", mpv::MPV_FORMAT_FLAG)?;
         mpv.observe("speed", mpv::MPV_FORMAT_DOUBLE)?;
         mpv.observe("video-params/w", mpv::MPV_FORMAT_DOUBLE)?;
@@ -213,6 +222,7 @@ impl Player {
                                 }
                                 ("duration", Some(Property::Double(d))) => emit(PlayerEvent::Duration(d)),
                                 ("pause", Some(Property::Flag(p))) => emit(PlayerEvent::Pause(p)),
+                                ("eof-reached", Some(Property::Flag(p))) => emit(PlayerEvent::PlaybackEnded(p)),
                                 ("core-idle", Some(Property::Flag(i))) => emit(PlayerEvent::Idle(i)),
                                 ("speed", Some(Property::Double(s))) => emit(PlayerEvent::Speed(s)),
                                 ("container-fps", value) => emit(PlayerEvent::VideoFps(match value {
@@ -312,6 +322,10 @@ impl Player {
 
     pub fn pause(&self) -> Result<(), String> {
         self.mpv.set_property("pause", "yes")
+    }
+
+    pub fn clear_playback_end(&self) -> Result<(), String> {
+        self.mpv.set_property("end", "none")
     }
 
     pub fn seek(&self, seconds: f64) -> Result<(), String> {

@@ -20,6 +20,8 @@ function axisIds(): readonly string[] {
 
 export interface Live {
   timeMs: number
+  seekGeneration: number
+  playbackEnded: boolean
   durationMs: number
   axisValues: Float64Array
   outputs: EngineState['outputs']
@@ -29,7 +31,7 @@ export interface Live {
 
 type Listener = (live: Live) => void
 
-let current: Live = { outputs: [], timeMs: 0, durationMs: 0, axisValues: new Float64Array(0), axisFlags: new Uint8Array(0), flagsVersion: -1 }
+let current: Live = { outputs: [], timeMs: 0, seekGeneration: 0, playbackEnded: false, durationMs: 0, axisValues: new Float64Array(0), axisFlags: new Uint8Array(0), flagsVersion: -1 }
 const listeners = new Set<Listener>()
 
 export function get(): Live {
@@ -38,9 +40,9 @@ export function get(): Live {
 
 export function set(s: EngineState) {
   const prev = current
-  const moved = s.timeMs !== prev.timeMs || s.durationMs !== prev.durationMs || s.flagsVersion !== prev.flagsVersion || !sameValues(s.axisValues, prev.axisValues) || !sameSentOutputs(s.outputs, prev.outputs)
+  const moved = s.playbackEnded !== prev.playbackEnded || s.seekGeneration !== prev.seekGeneration || s.timeMs !== prev.timeMs || s.durationMs !== prev.durationMs || s.flagsVersion !== prev.flagsVersion || !sameValues(s.axisValues, prev.axisValues) || !sameSentOutputs(s.outputs, prev.outputs)
   if (!moved) return
-  current = { outputs: s.outputs, timeMs: s.timeMs, durationMs: s.durationMs, axisValues: s.axisValues, axisFlags: s.axisFlags, flagsVersion: s.flagsVersion }
+  current = { outputs: s.outputs, timeMs: s.timeMs, seekGeneration: s.seekGeneration, playbackEnded: s.playbackEnded, durationMs: s.durationMs, axisValues: s.axisValues, axisFlags: s.axisFlags, flagsVersion: s.flagsVersion }
   for (const l of listeners) l(current)
 }
 

@@ -175,6 +175,8 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   handle('dom:delete', (id) => dom.remove(id))
   handle('dom:you', () => dom.you())
   handle('dom:setYou', (you) => dom.setYou(you))
+  handle('dom:advancedPain', () => dom.advancedPain())
+  handle('dom:setAdvancedPain', (pain) => dom.setAdvancedPain(pain))
   handle('dom:pleasurePain', () => dom.pleasurePain())
   handle('dom:setPleasurePain', (pp) => dom.setPleasurePain(pp))
   handle('dom:ai', () => dom.ai())

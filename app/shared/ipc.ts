@@ -1,3 +1,4 @@
+import type { AdvancedPain } from './dom-pain'
 import type { SharedVideo } from './together'
 import type { AccountStatus } from './account'
 import type { AdminStats } from './usage'
@@ -232,6 +233,8 @@ export interface IpcContract {
   'dom:delete': (id: string) => void
   'dom:you': () => DomYou
   'dom:setYou': (you: DomYou) => void
+  'dom:advancedPain': () => AdvancedPain
+  'dom:setAdvancedPain': (pain: AdvancedPain) => void
   'dom:pleasurePain': () => PleasurePain
   'dom:setPleasurePain': (pp: PleasurePain) => void
   'dom:ai': () => DomAiSettings

@@ -127,3 +127,17 @@ it('uses current row tags for rollback after an older failed edit and an externa
   await expect(useLibrary.getState().setTags(1, ['external', 'new'])).rejects.toThrow('failed')
   expect(useLibrary.getState().tagEdits[1]).toEqual({ tags: ['external'], error: true })
 })
+
+it('retains fetched tags after a failed AI edit of an uncached video and retry', async () => {
+  useLibrary.setState({ rows: [], continueRows: [], detail: null, selectedId: null })
+  ipc.invoke.mockImplementation(async (channel) => {
+    if (channel === 'library:setTags') throw new Error('write failed')
+    return []
+  })
+  await expect(useLibrary.getState().setTags(2, ['original', 'new'], ['original'])).rejects.toThrow('write failed')
+  expect(useLibrary.getState().tagEdits[2]).toEqual({ tags: ['original'], error: true })
+  ipc.invoke.mockResolvedValue([])
+  const current = useLibrary.getState().tagEdits[2]!.tags
+  await useLibrary.getState().setTags(2, [...current, 'retry'], ['original'])
+  expect(ipc.invoke).toHaveBeenCalledWith('library:setTags', 2, ['original', 'retry'])
+})

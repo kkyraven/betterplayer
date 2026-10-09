@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-KinkyRaven-Proprietary
 // Copyright (c) 2026 KinkyRaven. All rights reserved. This file is not licensed under LICENSE.txt; no permission is granted to use, copy, modify or distribute it.
 
+import { defaultAdvancedPain, normalizeAdvancedPain, type AdvancedPain } from '@shared/dom-pain'
 import { create } from 'zustand'
 import {
   DOM_ENDING_MS,
@@ -31,13 +32,18 @@ import { isPlaylist, type MediaQuery, type MediaRow } from '@shared/library'
 import { invoke } from '@/ipc'
 import { applyLevel, reapplyRanges, releaseLevel } from '@/dom/level'
 import { domSystemPrompt, domTools } from '@/dom/prompt'
+import { videoRange, type DomClip, type DomRange } from '@/dom/clips'
+import { saysSafeword } from '@/dom/safeword'
+import { engine } from '@/engine/client'
 import { isFree, isPremium, useAccount } from './account'
+import { useLibrary } from './library'
 import { outputName, useDevices } from './devices'
 import { t } from './i18n'
 import * as live from './live'
 import { END_WINDOW_MS, onPlayback, usePlayer } from './player'
 import { useSettings } from './settings'
 import { useUi } from './ui'
+import { track } from './usage'
 
 export type DomLine =
   | { id: number; kind: 'dom' | 'me'; text: string }
@@ -50,6 +56,7 @@ export type DomActIcon = 'top' | 'played' | 'paused' | 'seek' | 'level' | 'remem
 const PAUSE_SETTLE_MS = 1500
 const QUIET_MS = 120_000
 const MAX_ROUNDS = 4
+type ToolResult = string | { text: string; view: ChatMessage }
 const HISTORY = 40
 
 interface DomState {
@@ -57,6 +64,8 @@ interface DomState {
   loaded: boolean
   selectedId: string | null
   you: DomYou
+  advancedPain: AdvancedPain
+  setAdvancedPain: (pain: AdvancedPain) => Promise<void>
   pleasurePain: PleasurePain
   ai: DomAiSettings
   hasKey: boolean
@@ -119,7 +128,7 @@ const FATAL: ReadonlySet<DomErrorCode> = new Set(['signedOut', 'notSupporter', '
 
 const onFreeMinutes = () => isFree(useAccount.getState())
 
-const toVideo = (r: MediaRow): DomVideo => ({ id: r.id, title: r.title, minutes: Math.round(r.durationMs / 6000) / 10, tags: r.tags.slice(0, 3) })
+const toVideo = (r: MediaRow): DomVideo => ({ id: r.id, title: r.title, minutes: Math.round(r.durationMs / 6000) / 10, duration_seconds: r.durationMs / 1000, tags: r.tags.slice(0, 3) })
 const query = (q: Partial<MediaQuery>): MediaQuery => ({ section: 'all', sort: 'recommended', desc: false, filters: {}, limit: 20, offset: 0, ...q })
 const clock = (ms: number) => {
   const s = Math.max(0, Math.round(ms / 1000))
@@ -129,7 +138,11 @@ const clock = (ms: number) => {
 export const useDom = create<DomState>()((set, get) => {
   let history: ChatMessage[] = []
   let pending: string[] = []
-  let queue: number[] = []
+  let queue: DomClip[] = []
+  let clip: (DomRange & { id: number; path: string; seekGeneration: number }) | null = null
+  let advancing = false
+  let videoRun = 0
+  let sensationResumeAt: number | null = null
   let known: DomMemory[] = []
   let run = 0
   let lineId = 0
@@ -150,10 +163,18 @@ export const useDom = create<DomState>()((set, get) => {
   const pushLevel = () => {
     if (get().running) applyLevel(get().pleasurePain, effective())
   }
-  const openVideo = async (path: string, token: number) => {
-    await usePlayer.getState().open(path, 0, undefined, true, opening.signal)
-    if (token === run) return true
-    usePlayer.getState().pause()
+  const openVideo = async (path: string, token: number, range: DomRange & { id: number }, videoToken: number) => {
+    opening.abort()
+    opening = new AbortController()
+    clip = null
+    const seekGeneration = engine.state().seekGeneration
+    await usePlayer.getState().open(path, range.start_seconds, undefined, true, opening.signal, undefined, range.end_seconds)
+    if (token === run && videoToken === videoRun && get().running) {
+      clip = { ...range, path, seekGeneration }
+      advancing = false
+      return true
+    }
+    if (token !== run) usePlayer.getState().pause()
     return false
   }
 
@@ -163,36 +184,59 @@ export const useDom = create<DomState>()((set, get) => {
     return first < 0 ? tail : tail.slice(first)
   }
 
-  const room = async (): Promise<string> => {
+  const room = (): string => {
     const p = usePlayer.getState()
     const parts: string[] = []
     if (p.path) {
-      const { timeMs } = live.get()
+      const { timeMs, durationMs } = live.get()
       parts.push(`Playing "${p.title}"${p.media ? ` (id ${p.media.id})` : ''}, ${clock(timeMs)} of ${clock(p.snapshot.durationMs)}, ${p.snapshot.paused ? 'paused' : 'playing'}.`)
+      parts.push(`position_seconds=${(timeMs / 1000).toFixed(3)}, duration_seconds=${(durationMs / 1000).toFixed(3)}, playback_rate=${p.snapshot.rate}.`)
+      if (clip?.path === p.path) parts.push(clip.end_seconds === undefined ? `Current playback: start_seconds=${clip.start_seconds}.` : `Current range: start_seconds=${clip.start_seconds}, end_seconds=${clip.end_seconds}, remaining_seconds=${Math.max(0, clip.end_seconds - timeMs / 1000).toFixed(3)}.`)
     } else parts.push('Nothing is playing.')
+    const pauseLeft = sensationResumeAt === null ? 0 : sensationResumeAt - Date.now()
+    parts.push(pauseLeft > 0 ? `Sensation paused for ${(pauseLeft / 1000).toFixed(1)} more seconds.` : sensationResumeAt !== null && pauseLeft > -500 ? 'Sensation ramping up over 500 ms.' : 'Sensation active, subject to playback and device settings.')
     if (get().pleasurePain.enabled) {
       const h = get().held
       parts.push(h ? `Level ${h.level}, held ${Math.max(0, Math.round((h.until - Date.now()) / 1000))} s more, then ${get().level}.` : `Level ${get().level}.`)
     }
+    if (get().advancedPain.enabled) {
+      const pain = engine.painState()
+      parts.push(pain ? `Pain profile ${JSON.stringify(pain.name)}, intensity=${pain.intensity.toFixed(2)}, remaining_seconds=${(pain.remainingMs / 1000).toFixed(2)}.` : 'No temporary pain override.')
+    }
     if (queue.length) {
-      const next = await invoke('library:media', queue[0]!)
-      parts.push(`You queued next: ${next ? `"${next.title}" (id ${next.id})` : 'a video that is gone'}${queue.length > 1 ? ` and ${queue.length - 1} more` : ''}.`)
+      parts.push(`Queued timestamp ranges in order: ${JSON.stringify(queue)}.`)
     } else parts.push('Nothing is queued.')
     return parts.join(' ')
   }
 
-  const runTool = async (call: ChatToolCall, token: number): Promise<string> => {
+  const runTool = async (call: ChatToolCall, token: number): Promise<ToolResult> => {
     let args: Record<string, unknown> = {}
     try {
-      args = JSON.parse(call.function.arguments || '{}') as Record<string, unknown>
+      const parsed: unknown = JSON.parse(call.function.arguments || '{}')
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return 'Arguments must be an object.'
+      args = parsed as Record<string, unknown>
     } catch {
       return 'Arguments were not valid JSON.'
     }
     const d = dom()
-    if (!d) return 'No session.'
+    if (!d || token !== run || !get().running) return 'No session.'
     const num = (k: string) => (typeof args[k] === 'number' ? (args[k] as number) : Number(args[k]))
     const str = (k: string) => (typeof args[k] === 'string' ? (args[k] as string) : '')
     switch (call.function.name) {
+      case 'apply_pain': {
+        if (!get().advancedPain.enabled) return 'Advanced pain is disabled.'
+        const profile = get().advancedPain.profiles.find((p) => p.id === args.profile)
+        if (!profile) return 'Unknown pain profile.'
+        if (typeof args.intensity !== 'number' || !Number.isFinite(args.intensity) || args.intensity < 0 || args.intensity > 10 || typeof args.seconds !== 'number' || !Number.isFinite(args.seconds) || args.seconds <= 0) return 'Intensity must be 0..10 and seconds must be positive.'
+        if (!engine.applyPain(profile, args.intensity, args.seconds)) return 'No connected Restim output or invalid pain profile.'
+        act('level', profile.name, String(args.intensity))
+        return `Applied ${profile.name} at intensity ${args.intensity} for ${args.seconds} seconds.`
+      }
+      case 'stop_pain': {
+        if (!get().advancedPain.enabled) return 'Advanced pain is disabled.'
+        engine.stopPain()
+        return 'Temporary pain override stopped.'
+      }
       case 'top_videos': {
         const page = await invoke('library:query', query({ section: 'mostWatched', sort: 'plays', desc: true }))
         act('top', t('dom.act.top'))
@@ -202,22 +246,73 @@ export const useDom = create<DomState>()((set, get) => {
         const page = await invoke('library:query', query({ search: str('query') }))
         return JSON.stringify(page.rows.filter((r): r is MediaRow => !isPlaylist(r)).map(toVideo))
       }
+      case 'get_playback_state':
+        return room()
+      case 'stop_sensation': {
+        const seconds = args.seconds
+        if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0 || seconds > 30) return 'seconds must be greater than 0 and at most 30.'
+        if (!engine.stopSensation(seconds)) return 'Could not pause sensation.'
+        sensationResumeAt = Date.now() + seconds * 1000
+        const howl = useDevices.getState().outputs.some((o) => o.config.kind === 'howl')
+        return `Sensation paused for ${seconds} seconds. It then resumes over 500 ms; the video is unaffected.${howl ? ' Howl resumes directly because it does not support output scaling.' : ''}`
+      }
+      case 'start_sensation': {
+        engine.startSensation()
+        if (sensationResumeAt !== null && sensationResumeAt > Date.now()) sensationResumeAt = Date.now()
+        const howl = useDevices.getState().outputs.some((o) => o.config.kind === 'howl')
+        return `Sensation resumes over 500 ms, subject to playback and device settings.${howl ? ' Howl resumes directly because it does not support output scaling.' : ''}`
+      }
+      case 'view_video': {
+        if (get().ai.viewVideo !== true) return 'View video is disabled.'
+        const { captureVideo } = await import('@/components/player/stage')
+        if (token !== run || !get().running) return 'No session.'
+        if (get().ai.viewVideo !== true) return 'View video is disabled.'
+        const image = captureVideo()
+        if (!image) return 'No current video frame is available. Try again once the video is displayed.'
+        const p = usePlayer.getState()
+        if (p.path !== image.path) return 'The video changed. Request another screenshot.'
+        const text = `Video screenshot${p.media ? `, id=${p.media.id}` : ''}, position_seconds=${(image.timeMs / 1000).toFixed(3)}.`
+        return { text: `${text} Attached to the next request.`, view: { role: 'user', content: [{ type: 'text', text }, { type: 'image_url', image_url: { url: image.url, detail: 'auto' } }] } }
+      }
+      case 'video_tags': {
+        if (get().ai.tagEditing !== true) return 'AI tag editing is disabled.'
+        const id = args.id
+        const action = args.action
+        if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0) return 'id must be a positive integer.'
+        if (!['view', 'add', 'remove', 'replace'].includes(String(action))) return 'action must be view, add, remove or replace.'
+        if (action !== 'view' && (!Array.isArray(args.tags) || !args.tags.every((tag) => typeof tag === 'string'))) return 'tags must be an array of strings.'
+        const video = await invoke('library:media', id)
+        if (token !== run || !get().running) return 'No session.'
+        if (get().ai.tagEditing !== true) return 'AI tag editing is disabled.'
+        if (!video) return 'Video not found.'
+        const library = useLibrary.getState()
+        const current = library.tagEdits[id]?.tags ?? video.tags
+        if (action === 'view') return JSON.stringify({ id, tags: current })
+        const tags = [...new Set((args.tags as string[]).map((tag) => tag.trim().toLowerCase()).filter(Boolean))]
+        const selection = action === 'replace' ? tags : action === 'add' ? [...new Set([...current, ...tags])] : current.filter((tag) => !tags.includes(tag))
+        await library.setTags(id, selection, video.tags)
+        return JSON.stringify({ id, tags: selection })
+      }
       case 'play_video': {
+        const videoToken = ++videoRun
         const detail = await invoke('library:media', num('id'))
         if (!detail) return 'No video with that id.'
-        if (token !== run) return 'Stopped.'
+        if (token !== run || videoToken !== videoRun) return 'Stopped.'
+        const range = videoRange(args, detail.durationMs, false)
+        if (typeof range === 'string') return range
         endingFor = null
-        if (!(await openVideo(detail.path, token))) return 'Stopped.'
-        const start = num('start_seconds')
-        if (Number.isFinite(start) && start > 0) usePlayer.getState().seek(start)
+        if (!(await openVideo(detail.path, token, { id: detail.id, ...range }, videoToken))) return 'Stopped.'
         act('played', t('dom.act.played'), detail.title)
-        return `Playing "${detail.title}".`
+        return range.end_seconds === undefined ? `Playing "${detail.title}" from ${range.start_seconds} seconds to the end.` : `Playing "${detail.title}" from ${range.start_seconds} to ${range.end_seconds} seconds.`
       }
       case 'queue_video': {
         const detail = await invoke('library:media', num('id'))
         if (!detail) return 'No video with that id.'
-        queue.push(detail.id)
-        return `Queued "${detail.title}". It plays when this one ends.`
+        if (token !== run) return 'Stopped.'
+        const range = videoRange(args, detail.durationMs, true)
+        if (typeof range === 'string') return range
+        queue.push({ id: detail.id, ...range })
+        return `Queued "${detail.title}" from ${range.start_seconds} to ${range.end_seconds} seconds. It plays when the current video or range ends.`
       }
       case 'playback': {
         const p = usePlayer.getState()
@@ -230,7 +325,9 @@ export const useDom = create<DomState>()((set, get) => {
           p.play()
           act('played', t('dom.act.domPlayed'))
         } else if (action === 'seek' && Number.isFinite(num('seconds'))) {
-          p.seek(num('seconds'))
+          const seconds = num('seconds')
+          if (clip && (seconds < clip.start_seconds || (clip.end_seconds !== undefined && seconds >= clip.end_seconds))) return 'Seek must stay within the current timestamp range. Use play_video to choose another range.'
+          p.seek(seconds)
           act('seek', t('dom.act.seeked'), clock(num('seconds') * 1000))
         } else return 'Unknown action.'
         return 'Done.'
@@ -308,14 +405,19 @@ export const useDom = create<DomState>()((set, get) => {
     set({ thinking: true })
     lastTurnAt = Date.now()
     try {
-      const now = await room()
+      const now = room()
       if (token !== run) return
       history.push({ role: 'user', content: `[Now] ${now}\n${event}` })
       const toys = useDevices.getState().outputs.map((o) => outputName(o.config))
       const system: ChatMessage = { role: 'system', content: domSystemPrompt(d, get().pleasurePain, get().you, toys, known) }
-      const tools = domTools(d, get().pleasurePain)
+      let view: ChatMessage | null = null
       for (let round = 0; round < MAX_ROUNDS; round++) {
-        const reply = await invoke('dom:chat', [system, ...recent()], tools, onFreeMinutes() && get().ai.provider === 'agenticlover')
+        const state: ChatMessage[] = round === 0 ? [] : [{ role: 'user', content: `[Now] ${room()}` }]
+        if (token !== run) return
+        const tools = domTools(d, get().pleasurePain, get().ai, get().advancedPain)
+        const images: ChatMessage[] = get().ai.viewVideo === true && view ? [view] : []
+        view = null
+        const reply = await invoke('dom:chat', [system, ...recent(), ...images, ...state], tools, onFreeMinutes() && get().ai.provider === 'agenticlover')
         if (token !== run) return
         history.push({ role: 'assistant', content: reply.content || null, ...(reply.toolCalls.length ? { tool_calls: reply.toolCalls } : {}) })
         if (reply.content) {
@@ -327,7 +429,8 @@ export const useDom = create<DomState>()((set, get) => {
         for (const call of reply.toolCalls) {
           const result = await runTool(call, token).catch((error: unknown) => `Failed: ${String(error)}`)
           if (token !== run) return
-          history.push({ role: 'tool', tool_call_id: call.id, content: result })
+          history.push({ role: 'tool', tool_call_id: call.id, content: typeof result === 'string' ? result : result.text })
+          if (typeof result !== 'string') view = result.view
         }
       }
     } catch (error) {
@@ -350,6 +453,10 @@ export const useDom = create<DomState>()((set, get) => {
     unsubs.push(
       usePlayer.subscribe((s, prev) => {
         if (s.video !== prev.video || s.path !== prev.path) reapplyRanges()
+        if (!advancing && s.snapshot.loaded && clip?.path === s.path && live.get().seekGeneration > clip.seekGeneration && live.get().playbackEnded) {
+          get().onEnded()
+          return
+        }
         if (!s.snapshot.paused || prev.snapshot.paused || !s.path) return
         if (Date.now() < domPausing) {
           domPausing = 0
@@ -374,10 +481,20 @@ export const useDom = create<DomState>()((set, get) => {
       }),
       live.subscribe((l) => {
         const { path, snapshot } = usePlayer.getState()
-        if (!path || !snapshot.loaded || snapshot.durationMs !== l.durationMs || endingFor === path || l.durationMs < DOM_ENDING_MS * 2) return
-        if (l.durationMs - l.timeMs > DOM_ENDING_MS) return
+        if (!path || !snapshot.loaded || snapshot.durationMs !== l.durationMs || advancing) return
+        if (clip && clip.path !== path) clip = null
+        if (clip && l.seekGeneration <= clip.seekGeneration) return
+        const endMs = clip?.end_seconds === undefined ? l.durationMs : Math.min(clip.end_seconds * 1000, l.durationMs)
+        if (clip && ((endMs > 0 && l.timeMs >= endMs) || l.playbackEnded)) {
+          get().onEnded()
+          return
+        }
+        const startMs = clip ? clip.start_seconds * 1000 : 0
+        if (endMs <= startMs) return
+        const noticeMs = Math.min(DOM_ENDING_MS, (endMs - startMs) / 2)
+        if (endingFor === path || endMs - l.timeMs > noticeMs || snapshot.paused) return
         endingFor = path
-        void turn(`[Event] The video ends in ${Math.round(DOM_ENDING_MS / 1000)} seconds. ${queue.length ? 'You already queued the next one.' : 'Nothing is queued: find the next one and queue it now.'}`)
+        void turn(`[Event] The current video or timestamp range ends in ${Math.max(0, (endMs - l.timeMs) / 1000).toFixed(1)} seconds. ${queue.length ? 'You already queued the next range.' : 'Nothing is queued: find the next range and queue it now.'}`)
       }),
     )
     timers.push(
@@ -399,6 +516,33 @@ export const useDom = create<DomState>()((set, get) => {
     )
   }
 
+  const stopSession = (safeword: boolean) => {
+    if (!get().running) return
+    if (safeword) engine.haltSensation()
+    run++
+    for (const u of unsubs) u()
+    unsubs = []
+    for (const id of timers) {
+      window.clearInterval(id)
+      window.clearTimeout(id)
+    }
+    timers = []
+    window.clearTimeout(heldTimer)
+    window.removeEventListener('keydown', onKey, true)
+    opening.abort()
+    releaseLevel()
+    queue = []
+    const p = usePlayer.getState()
+    if (p.path) p.pause()
+    engine.stopPain()
+    if (!safeword) engine.resetSensation()
+    if (p.path) engine.clearPlaybackEnd()
+    sensationResumeAt = null
+    clip = null
+    advancing = false
+    set({ running: false, thinking: false, held: null })
+  }
+
   const onKey = (e: KeyboardEvent) => {
     if (e.key !== 'Escape' || !get().running) return
     e.preventDefault()
@@ -411,6 +555,7 @@ export const useDom = create<DomState>()((set, get) => {
     loaded: false,
     selectedId: null,
     you: emptyYou(),
+    advancedPain: defaultAdvancedPain(),
     pleasurePain: defaultPleasurePain(),
     ai: defaultDomAi(),
     hasKey: false,
@@ -420,8 +565,8 @@ export const useDom = create<DomState>()((set, get) => {
     memoriesError: null,
 
     load: async () => {
-      const [doms, ai, hasKey, you, pleasurePain] = await Promise.all([invoke('dom:list'), invoke('dom:ai'), invoke('dom:hasKey'), invoke('dom:you'), invoke('dom:pleasurePain')])
-      set((s) => ({ doms, ai, hasKey, you, pleasurePain, loaded: true, selectedId: doms.some((d) => d.id === s.selectedId) ? s.selectedId : (doms[0]?.id ?? null) }))
+      const [doms, ai, hasKey, you, pleasurePain, advancedPain] = await Promise.all([invoke('dom:list'), invoke('dom:ai'), invoke('dom:hasKey'), invoke('dom:you'), invoke('dom:pleasurePain'), invoke('dom:advancedPain')])
+      set((s) => ({ doms, ai, hasKey, you, pleasurePain, advancedPain, loaded: true, selectedId: doms.some((d) => d.id === s.selectedId) ? s.selectedId : (doms[0]?.id ?? null) }))
       await get().refreshAccount()
     },
     select: (selectedId) => set({ selectedId, memories: [], memoriesError: null }),
@@ -445,6 +590,12 @@ export const useDom = create<DomState>()((set, get) => {
     setYou: async (you) => {
       set({ you })
       await invoke('dom:setYou', you)
+    },
+    setAdvancedPain: async (raw) => {
+      const advancedPain = normalizeAdvancedPain(raw)
+      engine.stopPain()
+      set({ advancedPain })
+      await invoke('dom:setAdvancedPain', advancedPain)
     },
     setPleasurePain: async (pleasurePain) => {
       set({ pleasurePain })
@@ -517,6 +668,11 @@ export const useDom = create<DomState>()((set, get) => {
       history = []
       pending = []
       queue = []
+      clip = null
+      advancing = false
+      sensationResumeAt = null
+      engine.stopPain()
+      engine.resetSensation()
       lastPose = null
       lastImageAt = 0
       endingFor = null
@@ -526,6 +682,7 @@ export const useDom = create<DomState>()((set, get) => {
       set({ running: true, domId, level: 0, held: null, lines: [], image: d.portrait || null, thinking: false })
       known = await invoke('dom:memories', domId).catch(() => [])
       if (token !== run) return
+      track('session.aidom')
       pushLevel()
       watch()
       window.addEventListener('keydown', onKey, true)
@@ -535,46 +692,53 @@ export const useDom = create<DomState>()((set, get) => {
         ? '[Event] The session starts. Something is already playing; take over from here.'
         : '[Event] The session starts. Look at what they watch most, pick a video and start it.')
     },
-    stop: () => {
-      if (!get().running) return
-      run++
-      for (const u of unsubs) u()
-      unsubs = []
-      for (const id of timers) {
-        window.clearInterval(id)
-        window.clearTimeout(id)
-      }
-      timers = []
-      window.clearTimeout(heldTimer)
-      window.removeEventListener('keydown', onKey, true)
-      opening.abort()
-      releaseLevel()
-      queue = []
-      const p = usePlayer.getState()
-      if (p.path && !p.snapshot.paused) p.pause()
-      set({ running: false, thinking: false, held: null })
-    },
+    stop: () => stopSession(false),
     send: (text) => {
       const body = text.trim()
       if (!body || !get().running) return
       line({ kind: 'me', text: body })
+      if (saysSafeword(body, get().you.safeword)) {
+        stopSession(true)
+        act('paused', t('dom.you.safeword'))
+        return
+      }
       void turn(body)
     },
     onEnded: () => {
-      if (!get().running) return
+      if (!get().running || advancing) return
+      advancing = true
       const token = run
-      const id = queue.shift()
-      if (id === undefined) {
-        void turn('[Event] The video ended. Nothing is queued: pick the next one and play it now.')
+      const videoToken = ++videoRun
+      clip = null
+      const p = usePlayer.getState()
+      domPausing = Date.now() + 2000
+      p.pause()
+      engine.clearPlaybackEnd()
+      const next = queue.shift()
+      if (!next) {
+        advancing = false
+        void turn('[Event] The current video or timestamp range ended. Nothing is queued: pick the next range and play it now.')
         return
       }
-      void invoke('library:media', id).then(async (detail) => {
-        if (token !== run) return
-        if (!detail) return void turn('[Event] The video ended and the one you queued is gone. Pick another.')
+      void invoke('library:media', next.id).then(async (detail) => {
+        if (token !== run || videoToken !== videoRun) return
+        if (!detail || usePlayer.getState().path !== p.path) {
+          advancing = false
+          return void turn('[Event] The queued video is unavailable or playback changed. Pick another range.')
+        }
+        const range = videoRange({ ...next }, detail.durationMs, true)
+        if (typeof range === 'string') {
+          advancing = false
+          return void turn(`[Event] The queued range is no longer valid: ${range}`)
+        }
         endingFor = null
-        if (!(await openVideo(detail.path, token))) return
+        if (!(await openVideo(detail.path, token, { id: detail.id, ...range }, videoToken))) return
         act('played', t('dom.act.played'), detail.title)
-        void turn(`[Event] The video ended and the one you queued started: "${detail.title}".`)
+        void turn(`[Event] The queued range started: "${detail.title}", from ${range.start_seconds} to ${range.end_seconds} seconds.`)
+      }).catch((error: unknown) => {
+        if (token !== run || videoToken !== videoRun) return
+        advancing = false
+        void turn(`[Event] Could not open the queued range: ${String(error)}`)
       })
     },
   }

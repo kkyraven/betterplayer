@@ -1301,7 +1301,7 @@ export const useEditor = create<EditorState>()((set, get) => {
       recordLast = -1
       recordPos = valueAt(focusedLane()?.points ?? [], nowMs())
       set({ recording: true, card: 'record', ghost: null })
-      usePlayer.getState().play()
+      usePlayer.getState().play(true)
       let published = 0
       const tick = () => {
         const now = performance.now()
@@ -1402,7 +1402,7 @@ export const useEditor = create<EditorState>()((set, get) => {
       const lane = focusedLane()
       const span = lane ? selectionSpan(lane.points, get().selection) : null
       if (span) get().seekTo(span.startMs)
-      usePlayer.getState().play()
+      usePlayer.getState().play(true)
     },
     seekTo: (ms) => {
       if (!usePlayer.getState().snapshot.loaded) return

@@ -380,6 +380,10 @@ export function YouPage() {
           <span className="eyebrow">{t('dom.you.genitals')}</span>
           <input className="input" value={you.genitals} maxLength={100} onChange={(e) => void setYou({ ...you, genitals: e.target.value })} />
         </label>
+        <label className="dom-field">
+          <span className="eyebrow">{t('dom.you.safeword')}</span>
+          <input className="input" value={you.safeword} maxLength={100} placeholder={t('common.optional')} onChange={(e) => void setYou({ ...you, safeword: e.target.value })} />
+        </label>
       </div>
       <div className="dom-field">
         <span className="eyebrow">{t('dom.you.petNames')}</span>

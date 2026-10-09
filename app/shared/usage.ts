@@ -6,7 +6,7 @@ export interface UsagePing {
   features: Record<string, number>
 }
 
-export const isFeatureName = (s: string): boolean => s.length <= 64 && /^(play|session\.start|browser\.track|mediacentre|screen\.[a-z]+|action\.[a-z0-9]+(\.[a-z0-9]+){1,2}|device\.[a-z]+)$/.test(s)
+export const isFeatureName = (s: string): boolean => s.length <= 64 && /^(play|session\.(start|aidom)|browser\.track|mediacentre|screen\.[a-z]+|action\.[a-z0-9]+(\.[a-z0-9]+){1,2}|device\.[a-z]+)$/.test(s)
 
 export interface DayPoint {
   day: string

@@ -106,11 +106,11 @@ interface PlayerState {
   sheet: SheetTab | null
   snapshot: PlayerSnapshot
   mark: number | null
-  open: (path: string, startSeconds?: number, playlist?: PlaylistPlayback, showPlayer?: boolean, signal?: AbortSignal, handoff?: BrowserHandoff) => Promise<void>
+  open: (path: string, startSeconds?: number, playlist?: PlaylistPlayback, showPlayer?: boolean, signal?: AbortSignal, handoff?: BrowserHandoff, endSeconds?: number) => Promise<void>
   prepare: (path: string, size?: { width: number; height: number }) => Promise<void>
   setTracking: (tracking: TrackingSettings) => void
   close: () => void
-  play: () => void
+  play: (userInitiated?: boolean) => void
   pause: () => void
   togglePlay: () => void
   seek: (seconds: number) => void
@@ -236,7 +236,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     mark: null,
     snapshot: { durationMs: 0, paused: true, loaded: false, rate: 1, flagsVersion: -1, videoWidth: 0, videoHeight: 0, error: null },
 
-    open: async (path, startSeconds, playlist, showPlayer = true, signal, handoff) => {
+    open: async (path, startSeconds, playlist, showPlayer = true, signal, handoff, endSeconds) => {
       if (signal?.aborted) return
       browserLoad?.abort()
       browserLoad = handoff ? new AbortController() : null
@@ -250,7 +250,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       const settings = settingsStore.settings ?? (await settingsStore.load())
       if (signal?.aborted || token !== openToken) return
       const { snapshot } = get()
-      const same = !handoff && path === get().path && snapshot.loaded && !snapshot.error
+      const same = endSeconds === undefined && !handoff && path === get().path && snapshot.loaded && !snapshot.error
       const video = same ? get().video : prepared?.path === path ? prepared.video : ((await invoke('video:get', path)) ?? EMPTY_VIDEO)
       if (signal?.aborted || token !== openToken) return
       prepared = null
@@ -307,7 +307,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
         const password = isRemoteMedia(path) ? settings.remote.sourcePassword : ''
         const start = startSeconds ?? (video.position !== undefined ? video.position / 1000 : undefined)
         const current = () => !signal?.aborted && token === openToken && get().path === path
-        const loadPage = (position = start) => engine.load(path, position, video.variants, remote?.scriptsPath, remote?.headers ?? (password ? `Authorization: ${basicAuth(password)}` : undefined), signal, scriptFolders)
+        const loadPage = (position = start) => engine.load(path, position, video.variants, remote?.scriptsPath, remote?.headers ?? (password ? `Authorization: ${basicAuth(password)}` : undefined), signal, scriptFolders, endSeconds)
         const loadMedia = async () => {
           if (!handoff?.url) return loadPage()
           try {
@@ -424,9 +424,9 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       pushParams()
       useUi.getState().setScreen('library')
     },
-    play: () => {
+    play: (userInitiated = false) => {
       if (get().ended) get().seek(0)
-      engine.play()
+      engine.play(userInitiated)
       told({ kind: 'play' })
     },
     pause: () => {
@@ -435,7 +435,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       engine.pause()
       told({ kind: 'pause' })
     },
-    togglePlay: () => (get().snapshot.paused ? get().play() : get().pause()),
+    togglePlay: () => (get().snapshot.paused ? get().play(true) : get().pause()),
     seek: (seconds) => {
       if (!get().snapshot.loaded) return
       const target = Math.max(0, seconds)

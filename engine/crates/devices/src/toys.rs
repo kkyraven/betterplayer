@@ -622,6 +622,20 @@ pub struct ToyLink {
 }
 
 impl ToyLink {
+    pub fn stop(&mut self) -> io::Result<()> {
+        self.tx.send(DevCmd::Stop).map_err(|_| io::Error::new(io::ErrorKind::NotConnected, "toy disconnected"))?;
+        self.last.fill(None);
+        self.inputs.fill(None);
+        self.prev.fill(None);
+        self.speed.fill(0.0);
+        self.keyframe.fill(None);
+        for until in self.glide_until.iter_mut().filter(|until| until.is_some()) {
+            *until = Some(Instant::now());
+        }
+        self.testing_since = None;
+        Ok(())
+    }
+
     pub fn error(&self) -> Option<String> {
         let s = self.hub.shared.state.lock().unwrap();
         match s
@@ -943,6 +957,23 @@ pub(crate) mod tests {
             panic!("expected percent")
         };
         (index, value)
+    }
+
+    #[test]
+    fn stopping_cancels_a_timed_move_and_resumes_without_a_new_connect_glide() {
+        let (mut link, mut rx) = fixture(&[FeatureKind::TimedPosition]);
+        link.set_axes(&HashMap::from([(0, Some(Axis::L0))]));
+        link.glide_until[0] = Some(Instant::now() - Duration::from_secs(1));
+        let clamps = [AxisClamp::default(); Axis::COUNT];
+        let active = [true; Axis::COUNT];
+        let move_to = Keyframe { at_ms: 2000.0, pos: 0.9, in_ms: 2000.0 };
+        link.send_scaled(&[0.5; Axis::COUNT], &clamps, 100, &active, 1.0, Some(move_to)).unwrap();
+        assert_eq!(output_value(&mut rx).1, 0.9);
+        link.stop().unwrap();
+        assert!(matches!(rx.try_recv(), Ok(DevCmd::Stop)));
+        link.send_scaled(&[0.6; Axis::COUNT], &clamps, 100, &active, 0.5, None).unwrap();
+        let DevCmd::Output(_, ClientDeviceOutputCommand::HwPositionWithDuration(_, duration)) = rx.try_recv().unwrap() else { panic!("expected timed position") };
+        assert_eq!(duration, 100, "the sensation ramp must not be extended by a connect glide");
     }
 
     #[test]

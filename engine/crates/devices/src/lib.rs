@@ -21,6 +21,7 @@ pub mod ossm;
 pub mod output;
 pub mod probe;
 pub mod ramp;
+pub mod pain;
 mod realtime;
 pub mod tcode;
 pub mod toys;

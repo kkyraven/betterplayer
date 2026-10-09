@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: LicenseRef-KinkyRaven-Proprietary
 // Copyright (c) 2026 KinkyRaven. All rights reserved. This file is not licensed under LICENSE.txt; no permission is granted to use, copy, modify or distribute it.
 
+import { normalizeAdvancedPain, type AdvancedPain } from '@shared/dom-pain'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { safeStorage, type BrowserWindow } from 'electron'
 import {
   SIGNED_OUT_AL,
   defaultDomAi,
+  normalizeDomAi,
   newDom,
   normalizeDom,
   type AlPersona,
@@ -77,6 +79,15 @@ export class Dom {
     this.db.setMeta('you', JSON.stringify(normalizeYou(you)))
   }
 
+  advancedPain(): AdvancedPain {
+    try { return normalizeAdvancedPain(JSON.parse(this.db.meta('advancedPain') ?? 'null')) }
+    catch { return normalizeAdvancedPain(null) }
+  }
+
+  setAdvancedPain(pain: AdvancedPain) {
+    this.db.setMeta('advancedPain', JSON.stringify(normalizeAdvancedPain(pain)))
+  }
+
   pleasurePain(): PleasurePain {
     try {
       return normalizePleasurePain(JSON.parse(this.db.meta('pleasurePain') ?? 'null'))
@@ -91,14 +102,14 @@ export class Dom {
 
   ai(): DomAiSettings {
     try {
-      return { ...defaultDomAi(), ...(JSON.parse(this.db.meta('ai') ?? '{}') as Partial<DomAiSettings>) }
+      return normalizeDomAi(JSON.parse(this.db.meta('ai') ?? '{}'))
     } catch {
       return defaultDomAi()
     }
   }
 
   setAi(ai: DomAiSettings) {
-    this.db.setMeta('ai', JSON.stringify(ai))
+    this.db.setMeta('ai', JSON.stringify(normalizeDomAi(ai)))
   }
 
   hasKey(): boolean {

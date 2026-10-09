@@ -84,6 +84,20 @@ pub struct Buttplug {
 }
 
 impl Buttplug {
+    pub fn stop(&mut self) -> io::Result<()> {
+        self.send_msg("StopAllDevices", json!({}))?;
+        for device in &mut self.devices {
+            if device.last[0].is_some() {
+                device.last[0] = Some(u16::MAX);
+                device.glide_until = Some(Instant::now());
+            }
+            device.last[1] = None;
+            device.last[2] = None;
+            device.keyframe = None;
+        }
+        Ok(())
+    }
+
     pub fn connect(url: &str) -> io::Result<Buttplug> {
         let ws = websocket(url)?;
         let mut bp = Buttplug {
@@ -344,6 +358,34 @@ fn parse_device(v: &Value) -> Option<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stop_cancels_pending_linear_commands_and_resume_resends_a_sample() {
+        use std::net::TcpListener;
+        use tungstenite::protocol::Role;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        server.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let ws = WebSocket::from_raw_socket(MaybeTlsStream::Plain(client), Role::Client, None);
+        let mut receiver = WebSocket::from_raw_socket(server, Role::Server, None);
+        let mut device = parse_device(&json!({ "DeviceIndex": 1, "DeviceName": "Stroker", "DeviceMessages": { "LinearCmd": [{}] } })).unwrap();
+        device.last[0] = Some(500);
+        device.glide_until = Some(Instant::now() - Duration::from_secs(1));
+        let mut link = Buttplug { ws, next_id: 1, devices: vec![device], changed: false, log: VecDeque::new(), max_ping: Duration::ZERO, last_ping: Instant::now(), since_send_ms: 0.0 };
+        let clamps = [AxisClamp::default(); Axis::COUNT];
+        let active = [true; Axis::COUNT];
+        link.send(&[0.5; Axis::COUNT], &clamps, 100, &active, Some(Keyframe { at_ms: 2000.0, pos: 0.9, in_ms: 2000.0 })).unwrap();
+        let move_cmd: Value = serde_json::from_str(receiver.read().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(move_cmd[0]["LinearCmd"]["Vectors"][0]["Duration"], 2000);
+        link.stop().unwrap();
+        let stop_cmd: Value = serde_json::from_str(receiver.read().unwrap().to_text().unwrap()).unwrap();
+        assert!(stop_cmd[0].get("StopAllDevices").is_some());
+        assert!(link.devices[0].keyframe.is_none());
+        link.send(&[0.5; Axis::COUNT], &clamps, 100, &active, None).unwrap();
+        let resume_cmd: Value = serde_json::from_str(receiver.read().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(resume_cmd[0]["LinearCmd"]["Vectors"][0]["Duration"], 100);
+    }
 
     #[test]
     fn device_list_entry_maps_to_actuators() {

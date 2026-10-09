@@ -83,7 +83,7 @@ interface LibraryState {
   setSidebarOpen: (open: boolean) => void
   select: (id: number | null) => Promise<void>
   setRating: (id: number, rating: number) => Promise<void>
-  setTags: (id: number, tags: string[]) => Promise<void>
+  setTags: (id: number, tags: string[], confirmedTags?: string[]) => Promise<void>
   setTitle: (id: number, title: string) => Promise<void>
   setPinned: (ids: number[], pinned: boolean) => Promise<void>
   setHidden: (ids: number[], hidden: boolean) => Promise<void>
@@ -469,11 +469,11 @@ export const useLibrary = create<LibraryState>()((set, get) => {
         detail: s.detail?.id === id ? { ...s.detail, rating } : s.detail,
       }))
     },
-    setTags: (id, values) => {
+    setTags: (id, values, confirmedTags) => {
       const tags = [...new Set(values.map((tag) => tag.trim().toLowerCase()).filter(Boolean))]
       const state = get()
       const row = state.rows.find((row): row is MediaRow => !isPlaylist(row) && row.id === id) ?? state.continueRows.find((row) => row.id === id)
-      const write = tagWrites.get(id) ?? { confirmed: row?.tags ?? (state.detail?.id === id ? state.detail.tags : state.tagEdits[id]?.tags ?? []), latest: tags, tail: Promise.resolve() }
+      const write = tagWrites.get(id) ?? { confirmed: row?.tags ?? (state.detail?.id === id ? state.detail.tags : state.tagEdits[id]?.tags ?? confirmedTags ?? []), latest: tags, tail: Promise.resolve() }
       write.latest = tags
       tagWrites.set(id, write)
       publishTags(id, tags)

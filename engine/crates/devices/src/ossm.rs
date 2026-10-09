@@ -26,6 +26,7 @@ pub struct OssmLink {
     conn: BleConn,
     pub status: OssmStatus,
     configured: Option<String>,
+    sensation_speed: u8,
     armed: bool,
     last: Option<u8>,
     keyframe: Option<(f64, Instant)>,
@@ -44,6 +45,7 @@ impl OssmLink {
             conn,
             status: OssmStatus::default(),
             configured: None,
+            sensation_speed: 100,
             armed: false,
             last: None,
             keyframe: None,
@@ -95,7 +97,22 @@ impl OssmLink {
             for cmd in SESSION_SETTINGS {
                 self.conn.write(cmd.as_bytes())?;
             }
+            self.sensation_speed = 100;
             self.configured = Some(session);
+        }
+        Ok(())
+    }
+
+    pub fn set_sensation_scale(&mut self, scale: f64) -> io::Result<()> {
+        if !self.status.streaming() { return Ok(()); }
+        let speed = (scale.clamp(0.0, 1.0) * 100.0).round() as u8;
+        if speed != self.sensation_speed {
+            self.conn.write(format!("set:speed:{speed}").as_bytes())?;
+            self.sensation_speed = speed;
+            if speed == 0 {
+                self.keyframe = None;
+                self.hold_until = None;
+            }
         }
         Ok(())
     }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DOM_LEVEL_MAX, LORA_WEIGHT_MAX, clampLevel, defaultPleasurePain, domAccess, normalizeDom, normalizeLoras, normalizePleasurePain, windowAround, painOutput, pointAt, spanAt } from './dom'
+import { DOM_LEVEL_MAX, LORA_WEIGHT_MAX, clampLevel, emptyYou, normalizeYou, defaultDomAi, normalizeDomAi, defaultPleasurePain, domAccess, normalizeDom, normalizeLoras, normalizePleasurePain, windowAround, painOutput, pointAt, spanAt } from './dom'
 
 describe('pleasure and pain', () => {
   it('runs each setting from its value at 0 to its value at the top', () => {
@@ -65,4 +65,23 @@ describe('windowAround', () => {
     expect(windowAround(0.95).map((v) => Math.round(v * 100))).toEqual([80, 100])
     expect(windowAround(0).map((v) => Math.round(v * 100))).toEqual([0, 20])
   })
+})
+
+describe('global AI tag permission', () => {
+  it('defaults off for old settings and requires a stored boolean opt-in', () => {
+    expect(defaultDomAi().tagEditing).toBe(false)
+    expect(defaultDomAi().viewVideo).toBe(false)
+    expect(normalizeDomAi({ viewVideo: 'true' }).viewVideo).toBe(false)
+    expect(normalizeDomAi({ viewVideo: true }).viewVideo).toBe(true)
+    expect(normalizeDomAi({ provider: 'own', ownModel: 'local' })).toEqual({ ...defaultDomAi(), provider: 'own', ownModel: 'local' })
+    expect(normalizeDomAi({ tagEditing: 'true' }).tagEditing).toBe(false)
+    expect(normalizeDomAi({ tagEditing: true }).tagEditing).toBe(true)
+  })
+})
+
+it('defaults the safeword off and normalizes the optional stored word', () => {
+  expect(emptyYou().safeword).toBe('')
+  expect(normalizeYou({}).safeword).toBe('')
+  expect(normalizeYou({ safeword: ' red ' }).safeword).toBe('red')
+  expect(normalizeYou({ safeword: 42 }).safeword).toBe('')
 })

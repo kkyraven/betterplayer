@@ -46,6 +46,13 @@ beforeEach(async () => {
 })
 afterEach(() => vi.unstubAllGlobals())
 
+it('only marks a local play control as permitted to resume safeword output', () => {
+  player.getState().play()
+  expect(mocks.engine.play).toHaveBeenLastCalledWith(false)
+  player.getState().togglePlay()
+  expect(mocks.engine.play).toHaveBeenLastCalledWith(true)
+})
+
 it('loads browser media directly while keeping page identity, position and speed', async () => {
   await open()
   expect(mocks.engine.load).toHaveBeenCalledExactlyOnceWith(handoff.url, 42, undefined, undefined, handoff.headers, expect.any(AbortSignal))
@@ -62,7 +69,7 @@ it('falls back to page extraction without browser headers when direct loading re
   mocks.engine.load.mockRejectedValueOnce(new Error('unsupported media'))
   await open()
   expect(mocks.engine.load).toHaveBeenCalledTimes(2)
-  expect(mocks.engine.load).toHaveBeenLastCalledWith(handoff.pageUrl, 42, undefined, undefined, undefined, expect.any(AbortSignal), undefined)
+  expect(mocks.engine.load).toHaveBeenLastCalledWith(handoff.pageUrl, 42, undefined, undefined, undefined, expect.any(AbortSignal), undefined, undefined)
   expect(mocks.autoStart).toHaveBeenCalledOnce()
 })
 
@@ -72,7 +79,7 @@ it('retries a delayed native media error once and exposes a failed fallback', as
   expect(player.getState().snapshot.error).toBeNull()
   await flush()
   expect(mocks.engine.load).toHaveBeenCalledTimes(2)
-  expect(mocks.engine.load).toHaveBeenLastCalledWith(handoff.pageUrl, 42, undefined, undefined, undefined, expect.any(AbortSignal), undefined)
+  expect(mocks.engine.load).toHaveBeenLastCalledWith(handoff.pageUrl, 42, undefined, undefined, undefined, expect.any(AbortSignal), undefined, undefined)
   errorSnapshot('page extraction failed')
   await flush()
   expect(mocks.engine.load).toHaveBeenCalledTimes(2)
@@ -116,7 +123,7 @@ it('does not fall back from a rejected direct load after cancellation', async ()
 
 it('uses page extraction immediately for browser-only sources', async () => {
   await player.getState().open(handoff.pageUrl, 42, undefined, true, undefined, { ...handoff, url: null })
-  expect(mocks.engine.load).toHaveBeenCalledExactlyOnceWith(handoff.pageUrl, 42, undefined, undefined, undefined, expect.any(AbortSignal), undefined)
+  expect(mocks.engine.load).toHaveBeenCalledExactlyOnceWith(handoff.pageUrl, 42, undefined, undefined, undefined, expect.any(AbortSignal), undefined, undefined)
 })
 
 
@@ -142,5 +149,5 @@ it('resumes fallback from the current position after playback has progressed', a
   mocks.timeMs = 142_750
   errorSnapshot()
   await flush()
-  expect(mocks.engine.load).toHaveBeenLastCalledWith(handoff.pageUrl, 142.75, undefined, undefined, undefined, expect.any(AbortSignal), undefined)
+  expect(mocks.engine.load).toHaveBeenLastCalledWith(handoff.pageUrl, 142.75, undefined, undefined, undefined, expect.any(AbortSignal), undefined, undefined)
 })

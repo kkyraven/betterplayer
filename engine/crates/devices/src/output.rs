@@ -99,6 +99,10 @@ pub struct Output {
     pub clamps: [AxisClamp; Axis::COUNT],
     pub ramp: Ramp,
     pub session_scale: f64,
+    pub sensation_scale: f64,
+    pub pain_frame: Option<crate::pain::Frame>,
+    pain_previous: Option<[f64; 4]>,
+    sensation_muted: bool,
     volume: Volume,
     state: State,
     last: Units,
@@ -167,6 +171,10 @@ impl Output {
             clamps: [AxisClamp::default(); Axis::COUNT],
             ramp: Ramp::default(),
             session_scale: 1.0,
+            sensation_scale: 1.0,
+            pain_frame: None,
+            pain_previous: None,
+            sensation_muted: false,
             volume: Volume::default(),
             state: State::Error(String::new()),
             last: [None; Axis::COUNT],
@@ -392,27 +400,81 @@ impl Output {
         ctx: &TickContext,
     ) -> bool {
         let t0 = Instant::now();
-        let scale = self.session_scale;
+        let scale = self.session_scale * self.sensation_scale;
+        let media_ctx = ctx;
         let muted = scale == 0.0;
+        let just_muted = self.sensation_scale == 0.0 && !self.sensation_muted;
+        self.sensation_muted = self.sensation_scale == 0.0;
+        if just_muted {
+            let stopped = match &mut self.state {
+                State::Connected(Link::Buttplug(link)) => link.stop(),
+                State::Connected(Link::Toy(link)) => link.stop(),
+                State::Connected(Link::Lines(conn)) if self.profile == Profile::Stroker => {
+                    let mut positions = *driven;
+                    for axis in Axis::ALL {
+                        positions[axis.index()] &= matches!(axis.kind(), Kind::Position | Kind::Rotation);
+                        if positions[axis.index()] { self.last[axis.index()] = None; }
+                    }
+                    let clamps = session_clamps(self.clamps, self.session_scale, self.profile);
+                    tcode::encode(self.profile, values, &positions, &clamps, &mut self.last, 1, &mut self.line);
+                    if self.line.is_empty() { Ok(()) } else { conn.send(&self.line) }
+                }
+                _ => Ok(()),
+            };
+            if let Err(error) = stopped {
+                self.fail(format!("stop: {error}"));
+                return false;
+            }
+        }
         let muted_ctx = TickContext { playing: false, manual_axes: [false; Axis::COUNT], estim_manual: false, stop_on_pause: true, stroke_next: None, ..*ctx };
-        let ctx = if muted { &muted_ctx } else { ctx };
+        let pain = (self.profile == Profile::Restim).then_some(self.pain_frame).flatten();
+        let pain_ctx = TickContext { estim_manual: true, manual_axes: std::array::from_fn(|i| ctx.manual_axes[i] || [Axis::EV, Axis::E1, Axis::E2, Axis::E3, Axis::E4].iter().any(|a| a.index() == i)), ..*ctx };
+        let ctx = if muted { &muted_ctx } else if pain.is_some_and(|p| p.testing) { &pain_ctx } else { ctx };
         let mut ramped = (*values, *driven);
         let mut clamps = session_clamps(self.clamps, scale, self.profile);
         let (values, driven) =
             if self.profile == Profile::Restim && matches!(self.state, State::Connected(_)) {
-                self.ramp.advance(ctx.playing, ctx.interval_ms as f64);
+                self.ramp.advance(media_ctx.playing, ctx.interval_ms as f64);
                 self.ramp.apply(&mut ramped.0, &mut ramped.1);
                 let i = Axis::EV.index();
                 let c = self.clamps[i];
                 let volume = if ramped.1[i] { ramped.0[i] } else { 1.0 };
                 let boost_axis = ctx.estim_volume.boost.axis.index();
                 let boost_source = driven[boost_axis].then_some(values[boost_axis]);
-                let target = ctx.estim_volume.target(volume, c.min, c.max, boost_source) * scale;
+                let target = ctx.estim_volume.target(volume, c.min, c.max, boost_source) * self.session_scale;
                 let source_active = [Axis::EA, Axis::EB, Axis::EV, Axis::E1, Axis::E2, Axis::E3, Axis::E4]
                     .into_iter().any(|a| driven[a.index()] && self.clamps[a.index()].enabled);
-                let active = c.enabled && source_active && (ctx.playing || ctx.estim_manual);
-                ramped.0[i] = self.volume.apply(target, active, ctx.interval_ms as f64);
+                let active = c.enabled && source_active && (media_ctx.playing || media_ctx.estim_manual);
+                ramped.0[i] = self.volume.apply(target, active, ctx.interval_ms as f64) * self.sensation_scale;
                 ramped.1[i] = true;
+                if let Some(pain) = pain {
+                    if self.pain_previous.is_none() {
+                        self.pain_previous = Some([Axis::E1, Axis::E2, Axis::E3, Axis::E4].map(|axis| {
+                            let index = axis.index();
+                            self.sent[index].map(|u| u as f64 / 9999.0).unwrap_or_else(|| {
+                                let clamp = self.clamps[index];
+                                clamp.min + values[index].clamp(0.0, 1.0) * (clamp.max - clamp.min)
+                            })
+                        }));
+                    }
+                    let active = pain.testing || media_ctx.playing || !media_ctx.stop_on_pause || media_ctx.estim_manual;
+                    ramped.0[i] = if c.enabled && active { pain.volume.min(c.max) * self.session_scale * self.sensation_scale * self.ramp.value().unwrap_or(1.0) } else { 0.0 };
+                    for (axis, value) in [Axis::E1, Axis::E2, Axis::E3, Axis::E4].into_iter().zip(pain.channels) {
+                        ramped.0[axis.index()] = value;
+                        ramped.1[axis.index()] = true;
+                        clamps[axis.index()].min = 0.0;
+                    }
+                }
+                else if let Some(previous) = self.pain_previous.take() {
+                    for (axis, value) in [Axis::E1, Axis::E2, Axis::E3, Axis::E4].into_iter().zip(previous) {
+                        let index = axis.index();
+                        if !driven[index] {
+                            ramped.0[index] = value.min(self.clamps[index].max);
+                            ramped.1[index] = true;
+                            clamps[index] = AxisClamp { enabled: self.clamps[index].enabled, ..AxisClamp::default() };
+                        }
+                    }
+                }
                 clamps[i] = AxisClamp::default();
                 (&ramped.0, &ramped.1)
             } else {
@@ -436,7 +498,7 @@ impl Output {
             std::array::from_fn(|i| ctx.playing || ctx.manual_axes[i] || !ctx.stop_on_pause);
         let stroke_next = ctx
             .stroke_next
-            .filter(|_| ctx.playing && driven[Axis::L0.index()] && !ctx.manual_axes[Axis::L0.index()] && !shaking);
+            .filter(|_| ctx.playing && driven[Axis::L0.index()] && !ctx.manual_axes[Axis::L0.index()] && !shaking && self.sensation_scale == 1.0);
         let rested: [f64; Axis::COUNT];
         let (values, clamps) = if self.profile == Profile::Stroker
             && matches!(self.state, State::Connected(Link::Lines(_)))
@@ -529,6 +591,10 @@ impl Output {
             }
             State::Connected(Link::Ossm(o)) => {
                 let c = clamps[Axis::L0.index()];
+                if let Err(e) = o.set_sensation_scale(self.sensation_scale) {
+                    self.fail(format!("write: {e}"));
+                    return false;
+                }
                 if muted || !c.enabled {
                     return false;
                 }
@@ -698,8 +764,8 @@ impl Output {
                 toy.test();
                 true
             }
-            State::Connected(Link::OpenShock(o)) => o.pulse(self.session_scale),
-            State::Connected(Link::PiShock(o)) => o.pulse(self.session_scale),
+            State::Connected(Link::OpenShock(o)) => o.pulse(self.session_scale * self.sensation_scale),
+            State::Connected(Link::PiShock(o)) => o.pulse(self.session_scale * self.sensation_scale),
             _ => false,
         }
     }
@@ -815,6 +881,60 @@ mod tests {
 
     fn volume_units(o: &Output) -> u16 {
         o.last[Axis::EV.index()].expect("restim always owns volume")
+    }
+
+    #[test]
+    fn sensation_scales_after_estim_limits_without_restarting_the_onset_fade() {
+        let (mut o, _receiver) = restim();
+        let values = [0.5; Axis::COUNT];
+        let mut driven = [false; Axis::COUNT];
+        driven[Axis::EA.index()] = true;
+        o.session_scale = 0.5;
+        let mut ctx = context();
+        for _ in 0..201 { o.send(&values, &driven, &ctx); }
+        assert_eq!(volume_units(&o), 5000);
+        o.sensation_scale = 0.0;
+        o.send(&values, &driven, &ctx);
+        assert_eq!(volume_units(&o), 0);
+        o.sensation_scale = 0.5;
+        o.send(&values, &driven, &ctx);
+        assert_eq!(volume_units(&o), 2500);
+        o.sensation_scale = 1.0;
+        o.send(&values, &driven, &ctx);
+        assert_eq!(volume_units(&o), 5000);
+        assert_eq!(o.session_scale, 0.5);
+        ctx.playing = false;
+        o.send(&values, &driven, &ctx);
+        assert_eq!(volume_units(&o), 0, "resuming sensation cannot unpause stimulation");
+    }
+
+    #[test]
+    fn pain_respects_caps_pause_and_sensation_and_restores_electrodes() {
+        let (mut o, _receiver) = restim();
+        let values = [0.3; Axis::COUNT];
+        let mut driven = [false; Axis::COUNT];
+        driven[Axis::EA.index()] = true;
+        let mut ctx = context();
+        for _ in 0..201 { o.send(&values, &driven, &ctx); }
+        o.clamps[Axis::EV.index()].max = 0.3;
+        o.pain_frame = Some(crate::pain::Frame { volume: 1.0, channels: [0.8; 4], testing: false });
+        o.send(&values, &driven, &ctx);
+        assert_eq!(volume_units(&o), 3000);
+        assert_eq!(o.last[Axis::E1.index()], Some(7999));
+        ctx.playing = false;
+        o.send(&values, &driven, &ctx);
+        assert_eq!(volume_units(&o), 0, "AI pain obeys pause");
+        o.pain_frame.as_mut().unwrap().testing = true;
+        o.send(&values, &driven, &ctx);
+        assert_eq!(volume_units(&o), 3000, "a user calibration may run paused");
+        o.sensation_scale = 0.0;
+        o.send(&values, &driven, &ctx);
+        assert_eq!(volume_units(&o), 0, "sensation mute wins over tests");
+        o.pain_frame = None;
+        o.send(&values, &driven, &ctx);
+        assert_eq!(o.last[Axis::E1.index()], Some(3000), "undriven electrodes restore their prior value");
+        assert!(o.pain_previous.is_none());
+        assert_eq!(volume_units(&o), 0);
     }
 
     #[test]
@@ -936,11 +1056,12 @@ mod tests {
             let mut driven = [false; Axis::COUNT];
             driven[Axis::EA.index()] = true;
             for _ in 0..201 { o.send(&values, &driven, &context()); }
-            receiver.set_nonblocking(true).unwrap();
             let mut buffer = [0; 1024];
-            while receiver.recv(&mut buffer).is_ok() {}
-            receiver.set_nonblocking(false).unwrap();
             receiver.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+            loop {
+                let n = receiver.recv(&mut buffer).unwrap();
+                if std::str::from_utf8(&buffer[..n]).unwrap().contains("V09999I10") { break; }
+            }
             if disconnect { o.disconnect(); } else { o.set_profile(Profile::Stroker); }
             let n = receiver.recv(&mut buffer).unwrap();
             assert_eq!(&buffer[..n], b"V00000I0\n");
@@ -1155,6 +1276,13 @@ mod toy_tests {
         o.session_scale = 0.5;
         o.send(&values, &driven, &ctx);
         assert_eq!(output_value(&mut rx).1, 0.4);
+        o.sensation_scale = 0.0;
+        o.send(&values, &driven, &ctx);
+        assert!(matches!(rx.try_recv(), Ok(crate::toys::DevCmd::Stop)), "sensation pause cancels all actuators even during manual hold");
+        o.sensation_scale = 0.5;
+        o.send(&values, &driven, &ctx);
+        assert_eq!(output_value(&mut rx).1, 0.2, "the restart multiplies session pacing after the toy map");
+        o.sensation_scale = 1.0;
         o.session_scale = 0.0;
         o.send(&values, &driven, &ctx);
         assert_eq!(output_value(&mut rx).1, 0.0);

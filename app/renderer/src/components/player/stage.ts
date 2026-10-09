@@ -148,6 +148,7 @@ class Stage {
   private drag: { x: number; y: number } | null = null
   private dirty = true
   private hasFrame = false
+  private frameSource: { path: string | null; seekGeneration: number; timeMs: number } | null = null
   private slot: HTMLElement | null = null
   private shown = true
   private presenting = true
@@ -244,6 +245,23 @@ class Stage {
     this.canvas.remove()
     this.slot = null
     this.updatePresenting()
+  }
+
+  capture() {
+    const p = usePlayer.getState()
+    const source = this.frameSource
+    if (!this.hasFrame || this.lost || !this.presenting || !source || !p.path || p.audio || !p.snapshot.loaded || source.path !== p.path || source.seekGeneration !== live.get().seekGeneration) return null
+    const canvas = document.createElement('canvas')
+    const scale = Math.min(1, 960 / Math.max(this.canvas.width, this.canvas.height))
+    canvas.width = Math.max(1, Math.round(this.canvas.width * scale))
+    canvas.height = Math.max(1, Math.round(this.canvas.height * scale))
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    this.applyMask(performance.now())
+    this.draw()
+    ctx.drawImage(this.canvas, 0, 0, canvas.width, canvas.height)
+    const url = canvas.toDataURL('image/jpeg', 0.8)
+    return { url, timeMs: source.timeMs, path: source.path }
   }
 
   private setProjection(p: Projection) {
@@ -422,6 +440,7 @@ class Stage {
         gl.bindTexture(gl.TEXTURE_2D, this.tex)
         gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.texW, this.texH, gl.RGBA, gl.UNSIGNED_BYTE, buffer)
         this.hasFrame = true
+        this.frameSource = { path: usePlayer.getState().path, seekGeneration: live.get().seekGeneration, timeMs: live.get().timeMs }
         this.mips = false
         this.applyMask(now)
         this.draw()
@@ -471,4 +490,8 @@ let stage: Stage | null = null
 export function videoStage(): Stage {
   stage ??= new Stage()
   return stage
+}
+
+export function captureVideo() {
+  return stage?.capture() ?? null
 }
