@@ -1,5 +1,9 @@
 # Release notes
 
+## 1.1.0
+
+- Improved AI dom feature
+
 ## 1.0.0
 
 - Initial Release AI Dom
