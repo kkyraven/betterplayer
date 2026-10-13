@@ -1,10 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createElement } from 'react'
+import { renderToString } from 'react-dom/server'
+import type { IntifaceState } from 'bp-engine'
 import type { BrowserTab } from '@shared/browser'
 import type { Settings } from '@shared/settings'
 import { defaultSettings } from '@shared/settings'
+import type { IntifaceStatus } from './intiface'
 
-const native = vi.hoisted(() => ({ startIntiface: vi.fn(), stopIntiface: vi.fn(), intifaceState: vi.fn() }))
-vi.mock('@/engine/client', () => ({ engine: native }))
+const native = vi.hoisted(() => ({ available: true, startIntiface: vi.fn(), stopIntiface: vi.fn(), intifaceState: vi.fn<() => IntifaceState | null>() }))
+vi.mock('@/engine/client', () => ({ get engine() { return native.available ? native : undefined } }))
 vi.mock('@/state/i18n', () => ({ t: (key: string) => key }))
 vi.mock('./settings', async () => {
   const { create } = await import('zustand')
@@ -17,11 +21,12 @@ vi.mock('./browser', async () => {
 
 let settings: typeof import('./settings')['useSettings']
 let browser: typeof import('./browser')['useBrowser']
+let intiface: typeof import('./intiface')
 let unload: () => void
 
 function tab(id: number, url = 'https://faptap.net/watch/1'): BrowserTab {
   return { id, url, title: 'Page', active: false, loading: false, canGoBack: false, canGoForward: false,
-    blocked: 0, video: null, capturing: false, audible: false, muted: false, favicon: null }
+    blocked: 0, video: null, capturing: false, audible: false, muted: false, favicon: null, topic: null, adBlockingExempt: false }
 }
 
 function configure(change: Partial<Settings['intiface']>) {
@@ -34,13 +39,15 @@ function configure(change: Partial<Settings['intiface']>) {
 beforeEach(async () => {
   vi.useFakeTimers()
   vi.resetAllMocks()
+  native.available = true
+  native.intifaceState.mockReturnValue(null)
   vi.stubGlobal('window', {
     setTimeout, clearTimeout,
     addEventListener: (event: string, listener: () => void) => { if (event === 'beforeunload') unload = listener },
   })
   settings = (await import('./settings')).useSettings
   browser = (await import('./browser')).useBrowser
-  await import('./intiface')
+  intiface = await import('./intiface')
   browser.setState({ tabs: [] })
   settings.setState({ settings: defaultSettings() })
   native.startIntiface.mockClear()
@@ -54,6 +61,38 @@ afterEach(() => {
 })
 
 describe('Intiface activation', () => {
+  it.each([
+    { alwaysOn: true, faptap: false },
+    { alwaysOn: false, faptap: true },
+    { alwaysOn: false, faptap: false },
+  ])('waits for the engine before reading or applying configuration: %o', ({ alwaysOn, faptap }) => {
+    native.available = false
+    configure({ alwaysOn, port: 23456 })
+    browser.setState({ tabs: [tab(1, faptap ? 'https://faptap.net/watch/1' : 'https://example.com')] })
+    const observed: IntifaceStatus[] = []
+    function Status() {
+      observed.push(intiface.useIntifaceStatus())
+      return null
+    }
+    expect(() => renderToString(createElement(Status))).not.toThrow()
+    expect(observed[0]).toEqual({ running: false, state: null, error: null })
+    unload()
+    vi.advanceTimersByTime(15000)
+    expect(native.intifaceState).not.toHaveBeenCalled()
+    expect(native.startIntiface).not.toHaveBeenCalled()
+    expect(native.stopIntiface).not.toHaveBeenCalled()
+
+    native.available = true
+    const state = alwaysOn || faptap ? { port: 23456, clients: 1, client: 'Fixture' } : null
+    native.intifaceState.mockReturnValue(state)
+    intiface.applyIntiface(settings.getState().settings!.intiface)
+    if (alwaysOn || faptap) expect(native.startIntiface).toHaveBeenCalledExactlyOnceWith(23456)
+    else expect(native.stopIntiface).toHaveBeenCalledOnce()
+    renderToString(createElement(Status))
+    expect(native.intifaceState).toHaveBeenCalledOnce()
+    expect(observed[1]).toEqual({ running: state !== null, state, error: null })
+  })
+
   it('leaves the port free at startup and for unrelated or invalid URLs', () => {
     browser.setState({ tabs: [tab(1, 'https://example.com'), tab(2, 'https://faptap.net.example.com'), tab(3, 'invalid'), tab(4, 'file://faptap.net/page')] })
     vi.advanceTimersByTime(15000)

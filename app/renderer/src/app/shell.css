@@ -129,6 +129,8 @@
   min-height: 0;
   display: flex;
 }
+.screen-content { flex: 1; min-width: 0; min-height: 0; display: flex; position: relative; }
+.titlebar .downloads-button { -webkit-app-region: no-drag; }
 
 .page {
   flex: 1;

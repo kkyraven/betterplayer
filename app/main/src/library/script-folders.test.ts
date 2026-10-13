@@ -20,4 +20,14 @@ describe('script folder index', () => {
     expect(folders.forMedia('/videos/scene.mp4')).toEqual([])
     expect(folders.forMedia('/videos/other.part.mp4')).toEqual(['/scripts'])
   })
+
+  it('indexes mixed-case funscript and ZIP extensions while preserving name case', () => {
+    const folders = new ScriptFolders(new Map([
+      ['/scripts/axes', ['scene.MAX.FuNsCrIpT', 'scene.alternative.roll.fUnScRiPt']],
+      ['/scripts/bundle', ['scene.part.ZIP']],
+    ]))
+    expect(folders.forMedia('/videos/scene.mp4')).toEqual(['/scripts/axes'])
+    expect(folders.forMedia('/videos/scene.part.mp4')).toEqual(['/scripts/bundle'])
+    expect(folders.forMedia('/videos/Scene.mp4')).toEqual([])
+  })
 })

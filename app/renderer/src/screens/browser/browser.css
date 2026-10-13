@@ -1,13 +1,12 @@
 .bwrap { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; position: relative; }
 .bchrome { background: var(--glass-strong); border-bottom: 1px solid var(--line); flex: none; }
 .bpage { flex: 1; min-height: 0; background: var(--bg); }
+.bbody { flex: 1; min-width: 0; min-height: 0; display: flex; }
+.bbody .bpage { min-width: 0; }
 
 .tabs { display: flex; align-items: flex-end; gap: 4px; padding: 8px 12px 0; }
 .tab { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 6px 0 12px; border-radius: 9px 9px 0 0; color: var(--text-3); font-size: 12.5px; max-width: 260px; min-width: 0; }
 .tab svg, .tab img { width: 12px; height: 12px; flex: none; }
-.tab-loading { animation: tab-loading-rotate 1s linear infinite; }
-@keyframes tab-loading-rotate { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .tab-loading { animation: none; } }
 .tab > span { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tab:hover { color: var(--text-2); }
 .tab.on { background: rgba(var(--ink), 0.06); color: var(--text); box-shadow: 0 0 0 1px var(--line) inset; }

@@ -34,6 +34,7 @@ export function useIntifaceEnabled(): boolean {
 }
 
 export function applyIntiface(config: Config) {
+  if (!engine) return
   const next = { enabled: config.alwaysOn || hasFaptapTab(useBrowser.getState().tabs), port: config.port }
   if (applied && applied.enabled === next.enabled && applied.port === next.port) return
   applied = next
@@ -110,7 +111,7 @@ export function intifaceStatusLine(enabled: boolean, port: number, status: Intif
 }
 
 function read(): IntifaceStatus {
-  const state = engine.intifaceState()
+  const state = engine ? engine.intifaceState() : null
   return { running: state !== null, state, error: startError }
 }
 

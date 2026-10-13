@@ -537,6 +537,7 @@ export function defaultShortcuts(): Shortcuts {
 
 export interface Settings {
   version: typeof SETTINGS_VERSION
+  downloads: { destination: { rootId: number; relativePath: string } | null }
   general: {
     recent: string[]
     setupDismissed: boolean
@@ -622,6 +623,7 @@ export function defaultAxisSettings(id?: AxisId): AxisSettings {
 export function defaultSettings(): Settings {
   return {
     version: SETTINGS_VERSION,
+    downloads: { destination: null },
     general: { recent: [], setupDismissed: false, setupDone: false, language: 'auto' },
     devices: { outputs: [], stopOnPause: true },
     axesDefault: axisRecord((id) => defaultAxisSettings(id)),

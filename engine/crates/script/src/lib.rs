@@ -8,7 +8,7 @@ pub mod simplify;
 
 pub use axis::{Axis, Kind, Namespace};
 pub use container::{Container, LoadedScript, classify_suffix, find_scripts, find_scripts_with_folders, select_default};
-pub use funscript::{Action, Bookmark, Chapter, Script};
+pub use funscript::{Action, Bookmark, Chapter, MAX_ACTIONS, MAX_SCRIPT_BYTES, Script};
 pub use heatmap::{Heatmap, SpeedStats};
 pub use interp::Interpolation;
 pub use simplify::{rdp_indices, simplify};

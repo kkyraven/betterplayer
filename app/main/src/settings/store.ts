@@ -453,6 +453,13 @@ function readTheme(raw: unknown): ThemeSettings {
 }
 
 function readCurrent(data: Json): Settings {
+  const downloads = isObject(data.downloads) ? data.downloads : {}
+  const destination = isObject(downloads.destination) ? downloads.destination : null
+  const downloadDestination = destination && Number.isSafeInteger(destination.rootId) && typeof destination.rootId === 'number' && destination.rootId > 0 &&
+    typeof destination.relativePath === 'string' && destination.relativePath.length <= 1024 &&
+    !/[\\\u0000:]/.test(destination.relativePath) && !destination.relativePath.startsWith('/') &&
+    !destination.relativePath.split('/').some((part) => part === '..' || part === '.')
+    ? { rootId: destination.rootId, relativePath: destination.relativePath } : null
   const general = isObject(data.general) ? data.general : {}
   const devices = isObject(data.devices) ? data.devices : {}
   const axesDefault = isObject(data.axesDefault) ? data.axesDefault : {}
@@ -477,6 +484,7 @@ function readCurrent(data: Json): Settings {
   const outputs = Array.isArray(devices.outputs) ? devices.outputs.map(readOutput).filter((o) => o !== null) : []
   return {
     version: SETTINGS_VERSION,
+    downloads: { destination: downloadDestination },
     general: { recent: recent.slice(0, RECENT_MAX), setupDismissed: general.setupDismissed === true, setupDone: bool(general.setupDone, true), language: oneOf(general.language, LANGUAGE_PREFERENCES, 'auto') },
     devices: { outputs, stopOnPause: bool(devices.stopOnPause, true) },
     axesDefault: axisRecord((id) => {

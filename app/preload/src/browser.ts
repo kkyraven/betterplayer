@@ -1,5 +1,7 @@
 import { ipcRenderer } from 'electron'
 import { CAPTURE_WIDTH, SNAPSHOT_WIDTH, TAB_CHANNELS, type BrowserVideo, type Rect, type Region, type RegionBox, type TabFrame, type TabHandoff } from '@shared/browser'
+import { observeEroScripts } from './eroscripts'
+import { installDownloadHost } from './download-host'
 
 const MIN_STEP_S = 1 / 45
 const MIN_STEP_MS = 1000 / 45
@@ -447,6 +449,8 @@ ipcRenderer.on(TAB_CHANNELS.zone, (_event, next: Region | null) => {
 })
 
 function start() {
+  observeEroScripts()
+  installDownloadHost()
   useVideo(largestVideo())
   let rescanning = false
   const rescan = () => {

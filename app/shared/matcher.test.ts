@@ -8,6 +8,13 @@ function features(patch: Partial<MatchFeatures>): MatchFeatures {
 }
 
 describe('parseScriptName', () => {
+  it('recognizes explicit hyphen max and plus variants only beside a known video stem', () => {
+    const stems = new Set(['scene', 'scene-other'])
+    expect(parseScriptName('scene-max.funscript', stems)).toEqual({ stem: 'scene', suffix: 'max', axis: 'L0' })
+    expect(parseScriptName('scene-plus.roll.funscript', stems)).toEqual({ stem: 'scene', suffix: 'plus.roll', axis: 'R1' })
+    expect(parseScriptName('scene-other.funscript', stems)).toEqual({ stem: 'scene-other', suffix: '', axis: 'L0' })
+    expect(parseScriptName('scene-other.funscript', new Set(['scene']))).toEqual({ stem: 'scene-other', suffix: '', axis: 'L0' })
+  })
   it('splits a known axis suffix off the stem', () => {
     expect(parseScriptName('scene.sway.funscript')).toEqual({ stem: 'scene', suffix: 'sway', axis: 'L2' })
     expect(parseScriptName('scene.Twist.FUNSCRIPT')).toEqual({ stem: 'scene', suffix: 'Twist', axis: 'R0' })
@@ -15,6 +22,31 @@ describe('parseScriptName', () => {
   it('keeps an unknown suffix as part of the stem and drives the stroke', () => {
     expect(parseScriptName('scene.v2.funscript')).toEqual({ stem: 'scene.v2', suffix: '', axis: 'L0' })
     expect(parseScriptName('scene.funscript')).toEqual({ stem: 'scene', suffix: '', axis: 'L0' })
+  })
+  it('recognizes MAX and numbered axis variants without changing dotted video stems', () => {
+    expect(parseScriptName('scene.MAX.FuNsCrIpT')).toEqual({ stem: 'scene', suffix: 'MAX', axis: 'L0' })
+    expect(parseScriptName('scene.Stroke1.funscript')).toEqual({ stem: 'scene', suffix: 'Stroke1', axis: 'L0' })
+    expect(parseScriptName('scene.Vibe2.funscript')).toEqual({ stem: 'scene', suffix: 'Vibe2', axis: 'V1' })
+    expect(parseScriptName('scene.part.roll.funscript')).toEqual({ stem: 'scene.part', suffix: 'roll', axis: 'R1' })
+  })
+  it('uses the longest known video stem to preserve a full compound suffix', () => {
+    const stems = new Set(['scene', 'scene.part', 'scene.roll'])
+    expect(parseScriptName('scene.alternative.roll.funscript', stems)).toEqual({ stem: 'scene', suffix: 'alternative.roll', axis: 'R1' })
+    expect(parseScriptName('scene.part.alternative.roll.funscript', stems)).toEqual({ stem: 'scene.part', suffix: 'alternative.roll', axis: 'R1' })
+    expect(parseScriptName('scene.roll.funscript', stems)).toEqual({ stem: 'scene.roll', suffix: '', axis: 'L0' })
+    expect(parseScriptName('scene.part.funscript', stems)).toEqual({ stem: 'scene.part', suffix: '', axis: 'L0' })
+  })
+  it('keeps unknown dotted text unless a known stem establishes its variant boundary', () => {
+    expect(parseScriptName('scene.alternative.mouth.a.funscript')).toEqual({ stem: 'scene.alternative.mouth.a', suffix: '', axis: 'L0' })
+    expect(parseScriptName('scene.alternative.mouth.a.funscript', new Set(['scene']))).toEqual({ stem: 'scene', suffix: 'alternative.mouth.a', axis: 'L0' })
+    expect(parseScriptName('scene.part.roll.funscript', new Set(['other']))).toEqual({ stem: 'scene.part', suffix: 'roll', axis: 'R1' })
+  })
+  it('recognizes underscore and parenthesised variants relative to a known stem', () => {
+    const stems = new Set(['scene', 'scene_part'])
+    expect(parseScriptName('scene_part_simple.funscript', stems)).toEqual({ stem: 'scene_part', suffix: 'simple', axis: 'L0' })
+    expect(parseScriptName('scene (Less Vibration).funscript', stems)).toEqual({ stem: 'scene', suffix: 'Less Vibration', axis: 'L0' })
+    expect(parseScriptName('scene (alternative.roll).funscript')).toEqual({ stem: 'scene', suffix: 'alternative.roll', axis: 'R1' })
+    expect(parseScriptName('scene_part.funscript')).toEqual({ stem: 'scene_part', suffix: '', axis: 'L0' })
   })
   it('rejects other files', () => {
     expect(parseScriptName('scene.mp4')).toBeNull()
@@ -78,8 +110,15 @@ describe('scoreMatch', () => {
 })
 
 describe('renamedScript', () => {
+  it('keeps a packed script archive as a ZIP', () => {
+    expect(renamedScript('video', { name: 'source.ZIP', suffix: '', axis: 'L0' })).toBe('video.zip')
+  })
   it('keeps the axis suffix on the new name', () => {
     expect(renamedScript('video', { name: 'x.sway.funscript', suffix: 'sway', axis: 'L2' })).toBe('video.sway.funscript')
     expect(renamedScript('video', { name: 'x.funscript', suffix: '', axis: 'L0' })).toBe('video.funscript')
+  })
+  it('preserves MAX and the named variant before its axis', () => {
+    expect(renamedScript('video', { name: 'source.MAX.funscript', suffix: 'MAX', axis: 'L0' })).toBe('video.MAX.funscript')
+    expect(renamedScript('video', { name: 'source.alternative.roll.funscript', suffix: 'alternative.roll', axis: 'R1' })).toBe('video.alternative.roll.funscript')
   })
 })

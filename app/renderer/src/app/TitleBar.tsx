@@ -13,6 +13,7 @@ import { FOLLOW_LABELS, useFollow } from '@/state/follow'
 import { useRemote } from '@/state/remote'
 import { useUi } from '@/state/ui'
 import { statusDot, statusText } from '@/screens/devices/status'
+import { DownloadButton } from '@/components/downloads/DownloadButton'
 
 export function TitleBar() {
   const t = useT()
@@ -21,11 +22,13 @@ export function TitleBar() {
   const source = useRemote((s) => s.status)
   const chasterLock = useChaster((s) => s.status.lock)
   const setMediaCentre = useUi((s) => s.setMediaCentre)
+  const browser = useUi((s) => s.screen === 'browser')
   return (
     <header className="titlebar">
       <Logo className="logo" variant="lockup" />
       <div className="spacer" />
       <div className="win-status">
+        {!browser && <DownloadButton />}
         {chasterLock && <ChastityTime lock={chasterLock} />}
         {source.source && (
           <span className="win-status-item" title={source.error ?? undefined}>

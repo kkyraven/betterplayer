@@ -8,6 +8,7 @@ import { useUi } from '@/state/ui'
 type FrameListener = (frame: BrowserFrame) => void
 
 const frameListeners = new Set<FrameListener>()
+let tabsRevision = 0
 
 export function subscribeFrames(listener: FrameListener): () => void {
   frameListeners.add(listener)
@@ -51,6 +52,7 @@ interface BrowserState {
   capturing: boolean
   init: () => () => void
   open: (url?: string) => Promise<void>
+  openEroScripts: () => Promise<void>
   close: (id: number) => Promise<void>
   activate: (id: number) => Promise<void>
   reorder: (id: number, toIndex: number) => Promise<void>
@@ -99,7 +101,9 @@ export const useBrowser = create<BrowserState>()((set, get) => ({
     let disposed = false
     let receivedTabs = false
     let receivedStartData = false
+    const requestedTabsRevision = tabsRevision
     const updateTabs = (tabs: BrowserTab[]) => {
+      tabsRevision += 1
       const next = fromTabs(tabs)
       set({
         ...next,
@@ -116,7 +120,7 @@ export const useBrowser = create<BrowserState>()((set, get) => ({
       set({ startData })
     })
     void invoke('browser:tabs').then((tabs) => {
-      if (!disposed && !receivedTabs) updateTabs(tabs)
+      if (!disposed && !receivedTabs && requestedTabsRevision === tabsRevision) updateTabs(tabs)
     })
     void invoke('browser:startData').then((startData) => {
       if (!disposed && !receivedStartData) set({ startData })
@@ -151,6 +155,23 @@ export const useBrowser = create<BrowserState>()((set, get) => ({
 
   open: async (url) => {
     await invoke('browser:open', url)
+    const revision = tabsRevision
+    const tabs = await invoke('browser:tabs')
+    if (revision === tabsRevision) {
+      tabsRevision += 1
+      const next = fromTabs(tabs)
+      set({ ...next, initialized: true, ...(next.activeId !== get().activeId ? { region: null, zone: null, error: null } : {}) })
+    }
+  },
+  openEroScripts: async () => {
+    await invoke('browser:openEroScripts')
+    const revision = tabsRevision
+    const tabs = await invoke('browser:tabs')
+    if (revision === tabsRevision) {
+      tabsRevision += 1
+      const next = fromTabs(tabs)
+      set({ ...next, initialized: true, ...(next.activeId !== get().activeId ? { region: null, zone: null, error: null } : {}) })
+    }
   },
   close: (id) => invoke('browser:close', id),
   activate: (id) => invoke('browser:activate', id),

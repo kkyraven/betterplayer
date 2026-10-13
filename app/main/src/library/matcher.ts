@@ -1,13 +1,18 @@
 import { t } from '../i18n'
-import { readdir, readFile, rename, stat } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { copyFile, link, open, readdir, stat, unlink } from 'node:fs/promises'
 import { basename, dirname, extname, join, relative, sep } from 'node:path'
 import { isVideoPath } from '@shared/ipc'
 import { MIN_CONFIDENCE, nameSimilarity, nameTokens, parseScriptName, renamedScript, scoreMatch, type MatchCandidate, type MatcherReport, type MatcherResolveResult, type OrphanFile, type OrphanSet } from '@shared/matcher'
 import type { LibraryDb, MatchMedia } from './db'
+import { verifiedScriptEntries } from '../downloads/verify'
 
 const SKIP_DIRS = new Set(['@eaDir', '.AppleDouble', 'System Volume Information', '$RECYCLE.BIN', '$Recycle.Bin', 'Config.Msi', 'Recovery'])
 const CANDIDATES_SHOWN = 5
 const DURATION_WINDOW = 0.1
+const MAX_SCRIPT_BYTES = 32 * 1024 * 1024
+const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
+const MAX_ACTIONS = 1_000_000
 
 const warn = (what: string, e: unknown) => process.stderr.write(`${what}: ${e instanceof Error ? e.message : String(e)}\n`)
 
@@ -23,13 +28,14 @@ interface Found {
 }
 
 export async function buildReport(db: LibraryDb): Promise<MatcherReport> {
+  const media = db.mediaForMatching()
+  const knownStems = new Set(media.map((m) => m.stem))
   const found: Found[] = []
   for (const root of db.roots()) {
     const rootStat = await stat(root.path).catch(() => null)
     if (!rootStat?.isDirectory()) continue
-    found.push(...(await findOrphans(root.id, root.path, new Set(db.excludedFolders(root.id)))))
+    found.push(...(await findOrphans(root.id, root.path, new Set(db.excludedFolders(root.id)), knownStems)))
   }
-  const media = db.mediaForMatching()
   const index = tokenIndex(media)
   const sets: OrphanSet[] = []
   for (const set of found) {
@@ -49,7 +55,7 @@ export async function buildReport(db: LibraryDb): Promise<MatcherReport> {
   return { sets, at: Date.now() }
 }
 
-async function findOrphans(rootId: number, rootPath: string, excluded: Set<string>): Promise<Found[]> {
+async function findOrphans(rootId: number, rootPath: string, excluded: Set<string>, libraryStems: ReadonlySet<string>): Promise<Found[]> {
   const out: Found[] = []
   const stack = [rootPath]
   for (let dir = stack.pop(); dir !== undefined; dir = stack.pop()) {
@@ -61,7 +67,8 @@ async function findOrphans(rootId: number, rootPath: string, excluded: Set<strin
       continue
     }
     const videoStems = new Set<string>()
-    const scripts: { name: string; stem: string; suffix: string; axis: OrphanFile['axis'] }[] = []
+    const scriptNames: string[] = []
+    const archiveDurations = new Map<string, number>()
     for (const entry of entries) {
       const name = entry.name
       if (name.startsWith('.') || SKIP_DIRS.has(name)) continue
@@ -71,15 +78,32 @@ async function findOrphans(rootId: number, rootPath: string, excluded: Set<strin
       }
       if (isVideoPath(name)) videoStems.add(basename(name, extname(name)))
       else {
-        const parsed = parseScriptName(name)
-        if (parsed) scripts.push({ name, ...parsed })
+        if (/\.funscript$/i.test(name)) scriptNames.push(name)
+        else if (/\.zip$/i.test(name)) {
+          try {
+            const bytes = await readBoundedFile(join(dir, name), MAX_ARCHIVE_BYTES)
+            if (!bytes) continue
+            const packed = verifiedScriptEntries(bytes)
+            archiveDurations.set(name, Math.max(...packed.map((entry) => scriptBytesDuration(entry.bytes))))
+            scriptNames.push(name)
+          } catch { }
+        }
       }
     }
+    const knownStems = new Set([...libraryStems, ...videoStems])
+    for (const name of archiveDurations.keys()) knownStems.add(basename(name, extname(name)))
+    scriptNames.sort((a, b) => a.length - b.length || a.localeCompare(b))
+    for (const name of scriptNames) {
+      const parsed = parseScriptName(name, knownStems)
+      if (parsed?.suffix === '') knownStems.add(parsed.stem)
+    }
     const byStem = new Map<string, OrphanFile[]>()
-    for (const s of scripts) {
+    for (const name of scriptNames) {
+      const s = archiveDurations.has(name) ? { stem: basename(name, extname(name)), suffix: '', axis: 'L0' as const } : parseScriptName(name, knownStems)
+      if (!s) continue
       if (videoStems.has(s.stem)) continue
       const files = byStem.get(s.stem) ?? []
-      files.push({ name: s.name, suffix: s.suffix, axis: s.axis })
+      files.push({ name, suffix: s.suffix, axis: s.axis })
       byStem.set(s.stem, files)
     }
     const folder = relative(rootPath, dir).split(sep).join('/')
@@ -95,7 +119,7 @@ async function findOrphans(rootId: number, rootPath: string, excluded: Set<strin
           mtime = Math.min(mtime, info.mtimeMs)
           birthtime = Math.min(birthtime, info.birthtimeMs || info.mtimeMs)
         }
-        durationMs = Math.max(durationMs, await scriptDuration(full))
+        durationMs = Math.max(durationMs, archiveDurations.get(file.name) ?? await scriptDuration(full))
       }
       out.push({ rootId, dir, folder, stem, files, durationMs, mtime: Number.isFinite(mtime) ? mtime : 0, birthtime: Number.isFinite(birthtime) ? birthtime : 0 })
     }
@@ -103,25 +127,58 @@ async function findOrphans(rootId: number, rootPath: string, excluded: Set<strin
   return out
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 async function scriptDuration(file: string): Promise<number> {
   try {
-    const raw: unknown = JSON.parse(await readFile(file, 'utf8'))
-    if (typeof raw !== 'object' || raw === null) return 0
-    const { actions, metadata } = raw as { actions?: unknown; metadata?: unknown }
-    let end = 0
-    if (Array.isArray(actions)) {
-      for (const a of actions) {
-        const at = typeof a === 'object' && a !== null ? (a as { at?: unknown }).at : undefined
-        if (typeof at === 'number' && at > end) end = at
-      }
-    }
-    const declared = typeof metadata === 'object' && metadata !== null ? (metadata as { duration?: unknown }).duration : undefined
-    if (typeof declared === 'number' && declared * 1000 > end) end = declared * 1000
-    return Math.round(end)
+    const bytes = await readBoundedFile(file, MAX_SCRIPT_BYTES)
+    return bytes ? scriptBytesDuration(bytes) : 0
   } catch (e) {
     warn(`matcher cannot read ${file}`, e)
     return 0
   }
+}
+
+async function readBoundedFile(file: string, limit: number): Promise<Buffer | null> {
+  const handle = await open(file, 'r')
+  try {
+    const info = await handle.stat()
+    if (!info.isFile() || info.size > limit) return null
+    const bytes = Buffer.alloc(info.size + 1)
+    let length = 0
+    while (length < bytes.length) {
+      const read = await handle.read(bytes, length, bytes.length - length, length)
+      if (read.bytesRead === 0) break
+      length += read.bytesRead
+    }
+    return length === info.size ? bytes.subarray(0, length) : null
+  } finally { await handle.close() }
+}
+
+function scriptBytesDuration(bytes: Buffer): number {
+  try {
+    const raw: unknown = JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/, ''))
+    if (!isRecord(raw)) return 0
+    let end = 0
+    let actionCount = 0
+    const actions = [raw.actions]
+    if (Array.isArray(raw.axes)) for (const axis of raw.axes) if (isRecord(axis)) actions.push(axis.actions)
+    if (isRecord(raw.channels)) for (const channel of Object.values(raw.channels)) if (isRecord(channel)) actions.push(channel.actions)
+    for (const list of actions) {
+      if (!Array.isArray(list)) continue
+      actionCount += list.length
+      if (actionCount > MAX_ACTIONS) return 0
+      for (const action of list) {
+        const at = isRecord(action) ? action.at : undefined
+        if (typeof at === 'number' && Number.isFinite(at) && at > end) end = at
+      }
+    }
+    const declared = isRecord(raw.metadata) ? raw.metadata.duration : undefined
+    if (typeof declared === 'number' && Number.isFinite(declared * 1000) && declared * 1000 > end) end = declared * 1000
+    return Math.round(end)
+  } catch { return 0 }
 }
 
 function tokenIndex(media: MatchMedia[]): Map<string, MatchMedia[]> {
@@ -138,7 +195,6 @@ function tokenIndex(media: MatchMedia[]): Map<string, MatchMedia[]> {
 }
 
 async function score(set: Found, media: MatchMedia[], index: Map<string, MatchMedia[]>): Promise<MatchCandidate[]> {
-  const axes = new Set(set.files.map((f) => f.axis))
   const pool = new Set<MatchMedia>()
   for (const t of new Set(nameTokens(set.stem))) for (const m of index.get(t) ?? []) pool.add(m)
   if (set.durationMs > 0) {
@@ -146,7 +202,6 @@ async function score(set: Found, media: MatchMedia[], index: Map<string, MatchMe
   }
   const scored: { m: MatchMedia; name: number; confidence: number }[] = []
   for (const m of pool) {
-    if (m.axes.some((a) => axes.has(a))) continue
     const name = nameSimilarity(set.stem, m.stem)
     const { confidence } = scoreMatch(baseFeatures(set, m, name, null))
     if (confidence > 0) scored.push({ m, name, confidence })
@@ -154,6 +209,10 @@ async function score(set: Found, media: MatchMedia[], index: Map<string, MatchMe
   scored.sort((a, b) => b.confidence - a.confidence)
   const out: MatchCandidate[] = []
   for (const { m, name } of scored.slice(0, CANDIDATES_SHOWN * 2)) {
+    const existing = await readdir(dirname(m.path)).catch(() => null)
+    if (!existing) continue
+    const taken = new Set(existing.map((file) => file.toLowerCase()))
+    if (set.files.some((file) => taken.has(renamedScript(m.stem, file).toLowerCase()))) continue
     const info = await stat(m.path).catch(() => null)
     const videoTimes = [m.mtime, info?.mtimeMs ?? m.mtime, info?.birthtimeMs || m.mtime]
     const scriptTimes = [set.mtime, set.birthtime].filter((t) => t > 0)
@@ -184,11 +243,17 @@ export async function resolveSet(set: Pick<OrphanSet, 'dir' | 'files'>, videoPat
     const from = join(set.dir, file.name)
     const to = join(videoDir, renamedScript(videoStem, file))
     try {
-      if (await stat(to).then(() => true, () => false)) throw new Error(t('matcher.nameTaken'))
-      await rename(from, to)
+      const occupied = (await readdir(videoDir)).some((name) => name.toLowerCase() === basename(to).toLowerCase())
+      if (occupied) throw new Error(t('matcher.nameTaken'))
+      try { await link(from, to) }
+      catch (error) {
+        if (!(error instanceof Error) || !('code' in error) || error.code !== 'EXDEV') throw error
+        await copyFile(from, to, constants.COPYFILE_EXCL)
+      }
+      await unlink(from)
       result.renamed.push(to)
     } catch (e) {
-      result.failed.push({ name: file.name, error: e instanceof Error ? e.message : String(e) })
+      result.failed.push({ name: file.name, error: e instanceof Error && 'code' in e && e.code === 'EEXIST' ? t('matcher.nameTaken') : e instanceof Error ? e.message : String(e) })
     }
   }
   return result

@@ -10,6 +10,10 @@ import { handoffHeaders, handoffState, mediaUrl } from './handoff'
 import { isBlockedHost } from './blocklist'
 import { showContextMenu } from './context-menu'
 import { mostVisited, readSession, writeSession, webUrl, type SavedTab } from './storage'
+import { ERO_CHANNELS, EROSCRIPTS_HOME, isEroScriptsUrl, isEroTopicUrl, sourceUrl, type EroTopic } from '@shared/eroscripts'
+import { topicReport } from './topic'
+import { BrowserDownloads, type OrdinaryBrowserDownload } from './downloads'
+import type { TransferRequest, TransferResult } from '../downloads/transport'
 
 export type Emit = <E extends IpcEvent>(event: E, payload: IpcEvents[E]) => void
 
@@ -56,6 +60,10 @@ interface Tab {
   favicon: string | null
   attached: boolean
   pending: (() => void) | null
+  generation: number
+  topic: EroTopic | null
+  related: { attemptId: string; fileId: string; sourceUrl: string; topic: EroTopic; approvedUrl: string | null; approvedUntil: number } | null
+  topLevelUrl: string
 }
 
 function sameFrame(ref: FrameRef | null, event: IpcMainEvent): boolean {
@@ -82,6 +90,8 @@ export class BrowserTabs {
   private restoring = true
   private cosmeticPreload: string | null = null
   private pushTimer: NodeJS.Timeout | null = null
+  private readonly downloads: BrowserDownloads
+  private ordinaryDownloadHandler: ((download: OrdinaryBrowserDownload) => void) | null = null
 
   constructor(
     private readonly win: BrowserWindow,
@@ -93,6 +103,29 @@ export class BrowserTabs {
   ) {
     this.lastAdBlocking = this.adBlocking
     this.cookiesReady = this.restoreCookies()
+    this.downloads = new BrowserDownloads(session.fromPartition(PARTITION), ipc, {
+      topic: (id) => this.getTopic(id),
+      contents: (id) => this.find(id)?.view.webContents ?? null,
+      openRelated: (request) => this.openRelatedDownload(request),
+      openTransfer: (request) => this.openRelatedDownload(request, true),
+      activate: (id) => this.activate(id),
+      ordinaryDownload: (item, contents) => {
+        const tab = this.byContents.get(contents.id)
+        if (tab) this.ordinaryDownloadHandler?.({ item, tabId: tab.id, pageUrl: contents.getURL() })
+      },
+      approveNavigation: (contents, url) => {
+        const related = this.byContents.get(contents.id)?.related
+        if (related) { related.approvedUrl = url; related.approvedUntil = Date.now() + 20_000 }
+      },
+      finishNavigation: (contents) => {
+        const tab = this.byContents.get(contents.id)
+        if (!tab?.related) return
+        tab.related.approvedUrl = null
+        tab.related.approvedUntil = 0
+        if (!this.relatedNavigation(tab.related.sourceUrl, contents.getURL())) tab.related = null
+        this.push()
+      },
+    })
     this.blockAds()
     for (const tab of this.saved.tabs) this.open(tab.url, tab)
     const active = this.tabList[this.saved.activeIndex]
@@ -105,6 +138,14 @@ export class BrowserTabs {
     win.webContents.on('render-process-gone', () => this.setBounds(null))
     ipc.on(TAB_CHANNELS.video, (event: IpcMainEvent, video: BrowserVideo) => this.onVideo(event, video))
     ipc.on(TAB_CHANNELS.frame, (event: IpcMainEvent, frame: TabFrame) => this.onFrame(event, frame))
+    ipc.on(ERO_CHANNELS.topic, (event: IpcMainEvent, payload: unknown) => {
+      const tab = this.byContents.get(event.sender.id)
+      if (!tab || event.senderFrame !== tab.view.webContents.mainFrame) return
+      const report = topicReport(payload, tab.id, tab.generation, tab.view.webContents.getURL())
+      if (!report) return
+      tab.topic = report
+      this.push()
+    })
     ipc.on(TAB_CHANNELS.regionEdit, (event: IpcMainEvent, region: Region) => {
       const tab = this.byContents.get(event.sender.id)
       if (!tab) return
@@ -130,7 +171,8 @@ export class BrowserTabs {
   private blockAds() {
     const browser = session.fromPartition(PARTITION)
     browser.webRequest.onBeforeRequest((details, callback) => {
-      if (!this.adBlocking || details.resourceType === 'mainFrame') return callback({})
+      if (!this.downloads.allowRequest(details)) return callback({ cancel: true })
+      if (!this.adBlocking || details.resourceType === 'mainFrame' || this.requestAdExempt(details.webContentsId)) return callback({})
       const host = hostOf(details.url)
       if (!host) return callback({})
       let redirectURL: string | undefined
@@ -164,16 +206,25 @@ export class BrowserTabs {
       this.blocker = blocker
       this.cosmeticPreload = browser.registerPreloadScript({ type: 'frame', filePath: ADBLOCK_PRELOAD })
       this.ipc.handle('@ghostery/adblocker/inject-cosmetic-filters', (...args: Parameters<typeof blocker.onInjectCosmeticFilters>) => {
-        if (this.adBlocking) return blocker.onInjectCosmeticFilters(...args)
+        if (this.adBlocking && !this.requestAdExempt(args[0].sender.id)) return blocker.onInjectCosmeticFilters(...args)
       })
-      this.ipc.handle('@ghostery/adblocker/is-mutation-observer-enabled', (event) => this.adBlocking && blocker.onIsMutationObserverEnabled(event))
+      this.ipc.handle('@ghostery/adblocker/is-mutation-observer-enabled', (event) => this.adBlocking && !this.requestAdExempt(event.sender.id) && blocker.onIsMutationObserverEnabled(event))
       browser.webRequest.onHeadersReceived({ urls: ['<all_urls>'] }, (details, callback) => {
-        if (this.adBlocking) blocker.onHeadersReceived(details, callback)
+        if (this.adBlocking && !this.requestAdExempt(details.webContentsId)) blocker.onHeadersReceived(details, callback)
         else callback({})
       })
     } catch (e) {
       console.warn('adblock: filter lists unavailable, using the static blocklist', e)
     }
+  }
+
+  private requestAdExempt(contentsId: number | undefined): boolean {
+    const tab = contentsId === undefined ? undefined : this.byContents.get(contentsId)
+    return !!tab && this.tabAdExempt(tab)
+  }
+
+  private tabAdExempt(tab: Tab): boolean {
+    return isEroScriptsUrl(tab.topLevelUrl) || tab.related !== null
   }
 
   private async restoreCookies() {
@@ -324,6 +375,9 @@ export class BrowserTabs {
       muted: webContents.isAudioMuted(),
       favicon: tab.favicon,
       active: tab.id === this.activeId,
+      topic: tab.topic,
+      adBlockingExempt: this.tabAdExempt(tab),
+      relatedTopic: tab.related?.topic ?? null,
     }
   }
 
@@ -356,7 +410,8 @@ export class BrowserTabs {
       },
     })
     view.setBackgroundColor('#0a0c10')
-    const tab: Tab = { id: this.nextId++, initial: restored ?? { url: toUrl(url ?? 'about:blank'), title: '', entries: [], index: 0 }, view, blocked: 0, video: null, capturing: false, region: null, zone: null, videoFrame: null, snapshot: null, favicon: null, attached: false, pending: null }
+    const initial = restored ?? { url: toUrl(url ?? 'about:blank'), title: '', entries: [], index: 0 }
+    const tab: Tab = { id: this.nextId++, initial, view, blocked: 0, video: null, capturing: false, region: null, zone: null, videoFrame: null, snapshot: null, favicon: null, attached: false, pending: null, generation: 0, topic: null, related: null, topLevelUrl: initial.url }
     this.tabList.push(tab)
     this.byContents.set(view.webContents.id, tab)
     this.wire(tab)
@@ -397,8 +452,20 @@ export class BrowserTabs {
     })
     webContents.on('did-start-loading', push)
     webContents.on('did-stop-loading', push)
+    webContents.on('did-start-navigation', (_event, url, _inPlace, isMainFrame) => {
+      if (!isMainFrame) return
+      tab.generation += 1
+      tab.topic = null
+      tab.topLevelUrl = url
+      if (tab.related && !(tab.related.approvedUrl === url && tab.related.approvedUntil > Date.now()) && !this.relatedNavigation(tab.related.sourceUrl, url)) tab.related = null
+      this.push()
+    })
+    webContents.on('dom-ready', () => this.observeTopic(tab))
     webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => {
-      if (isMainFrame) this.recordVisit(url, webContents.getTitle())
+      if (isMainFrame) {
+        this.recordVisit(url, webContents.getTitle())
+        this.observeTopic(tab)
+      }
       this.push()
     })
     webContents.on('before-input-event', (event, input) => {
@@ -441,9 +508,94 @@ export class BrowserTabs {
     webContents.setWindowOpenHandler(({ url, disposition }) => {
       const host = hostOf(url)
       const wanted = disposition === 'foreground-tab' || disposition === 'background-tab'
-      if (wanted && host && (!this.adBlocking || !isBlockedHost(host))) this.open(url)
+      if (wanted && host && (!this.adBlocking || this.tabAdExempt(tab) || !isBlockedHost(host))) this.open(url)
       return { action: 'deny' }
     })
+  }
+
+  private observeTopic(tab: Tab) {
+    const contents = tab.view.webContents
+    if (!contents.isDestroyed()) contents.mainFrame.send(ERO_CHANNELS.observe, { generation: tab.generation, url: contents.getURL() })
+  }
+
+  private relatedNavigation(source: string, target: string): boolean {
+    try {
+      const original = new URL(source)
+      const next = new URL(target)
+      if (next.protocol !== 'https:' && next.protocol !== 'http:') return false
+      const mega = /^(?:www\.)?mega\.(?:nz|co\.nz|io)$/
+      if (mega.test(original.hostname) && mega.test(next.hostname)) {
+        const handle = /\/file\/([\w-]+)/.exec(original.pathname)?.[1] ?? /^#!([\w-]+)!/.exec(original.hash)?.[1]
+        if (handle) return next.pathname === `/file/${handle}` || next.hash.startsWith(`#!${handle}!`)
+        return original.pathname === next.pathname && original.hash === next.hash
+      }
+      const gofile = /^(?:www\.)?gofile\.io$/
+      const pixeldrain = /^(?:www\.)?pixeldrain\.com$/
+      if (pixeldrain.test(original.hostname) && pixeldrain.test(next.hostname)) return original.pathname === next.pathname && original.search === next.search
+      return next.pathname === original.pathname && (next.origin === original.origin || gofile.test(original.hostname) && gofile.test(next.hostname))
+    } catch { return false }
+  }
+
+  getTopic(id: number): EroTopic | null {
+    const tab = this.find(id)
+    return tab && isEroTopicUrl(tab.view.webContents.getURL()) ? tab.topic : null
+  }
+
+  openEroScripts(): BrowserTab {
+    const existing = this.tabList.find((tab) => isEroScriptsUrl(tab.view.webContents.getURL() || tab.initial.url))
+    if (existing) { this.activate(existing.id); return this.toTab(existing) }
+    return this.open(EROSCRIPTS_HOME)
+  }
+
+  openSource(url: string): BrowserTab {
+    const safe = sourceUrl(url)
+    if (!safe) throw new Error('Invalid source URL')
+    return this.open(safe)
+  }
+
+  private openRelatedDownload(request: TransferRequest, transferOnly = false): BrowserTab | null {
+    const liveTopic = this.getTopic(request.topic.tabId)
+    const topic: EroTopic = liveTopic?.generation === request.topic.generation && liveTopic.url === request.topic.url ? liveTopic : {
+      ...request.topic, title: request.candidate.label, sources: [request.candidate], scope: 'loaded-posts',
+    }
+    const existing = !transferOnly && this.tabList.find((tab) => tab.related?.fileId === request.fileId && tab.related.sourceUrl === request.candidate.url)
+    if (existing) {
+      existing.related = { attemptId: request.attemptId, fileId: request.fileId, sourceUrl: request.candidate.url, topic, approvedUrl: null, approvedUntil: 0 }
+      this.sizeBackgroundDownload(existing)
+      if (existing.view.webContents.getURL() === 'about:blank') this.navigate(existing.id, request.candidate.url)
+      return this.toTab(existing)
+    }
+    const opened = this.open(transferOnly ? 'about:blank' : request.candidate.url, undefined, true)
+    const tab = this.find(opened.id)
+    if (!tab) return null
+    this.sizeBackgroundDownload(tab)
+    tab.related = { attemptId: request.attemptId, fileId: request.fileId, sourceUrl: request.candidate.url, topic, approvedUrl: null, approvedUntil: 0 }
+    this.push()
+    return this.toTab(tab)
+  }
+
+  private sizeBackgroundDownload(tab: Tab) {
+    if (tab.attached || this.win.isDestroyed()) return
+    const page = this.bounds
+    const viewport = page && Number.isFinite(page.w) && Number.isFinite(page.h) && page.w > 0 && page.h > 0
+      ? { width: page.w, height: page.h } : this.win.getContentBounds()
+    tab.view.setBounds({ x: 0, y: 0, width: Math.max(1, Math.round(viewport.width)), height: Math.max(1, Math.round(viewport.height)) })
+  }
+
+  startDownload(request: TransferRequest): Promise<TransferResult> {
+    return this.downloads.start(request)
+  }
+
+  continueDownload(fileId: string, attemptId: string): void {
+    this.downloads.continue(fileId, attemptId)
+  }
+
+  cancelDownload(attemptId: string): void {
+    this.downloads.cancel(attemptId)
+  }
+
+  setOrdinaryDownloadHandler(handler: (download: OrdinaryBrowserDownload) => void): void {
+    this.ordinaryDownloadHandler = handler
   }
 
   close(id: number) {
@@ -689,6 +841,7 @@ export class BrowserTabs {
   destroy() {
     if (!this.win.isDestroyed()) this.persist()
     this.destroying = true
+    this.downloads.destroy()
     if (this.saveTimer) clearTimeout(this.saveTimer)
     if (this.pushTimer) clearTimeout(this.pushTimer)
     const browser = session.fromPartition(PARTITION)
@@ -702,6 +855,6 @@ export class BrowserTabs {
     this.ipc.removeHandler('@ghostery/adblocker/is-mutation-observer-enabled')
     for (const tab of [...this.tabList]) this.close(tab.id)
     this.byContents.clear()
-    for (const channel of [TAB_CHANNELS.video, TAB_CHANNELS.frame, TAB_CHANNELS.regionEdit, TAB_CHANNELS.zoneEdit, TAB_CHANNELS.error]) this.ipc.removeAllListeners(channel)
+    for (const channel of [TAB_CHANNELS.video, TAB_CHANNELS.frame, TAB_CHANNELS.regionEdit, TAB_CHANNELS.zoneEdit, TAB_CHANNELS.error, ERO_CHANNELS.topic]) this.ipc.removeAllListeners(channel)
   }
 }

@@ -5,6 +5,9 @@ use serde_json::{Map, Value};
 
 use crate::axis::Axis;
 
+pub const MAX_SCRIPT_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_ACTIONS: usize = 1_000_000;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Action {
     pub at: f64,
@@ -71,7 +74,24 @@ pub(crate) struct RawChannel {
 
 impl Raw {
     pub(crate) fn parse(json: &str) -> Result<Raw, String> {
-        serde_json::from_str(json).map_err(|e| e.to_string())
+        Self::parse_with_limits(json, MAX_SCRIPT_BYTES, MAX_ACTIONS)
+    }
+
+    fn parse_with_limits(json: &str, max_bytes: usize, max_actions: usize) -> Result<Raw, String> {
+        if json.len() > max_bytes {
+            return Err(format!("Script exceeds {max_bytes} bytes"));
+        }
+        let raw: Raw = serde_json::from_str(json.strip_prefix('\u{feff}').unwrap_or(json)).map_err(|e| e.to_string())?;
+        if raw.action_count() > max_actions {
+            return Err(format!("Script exceeds {max_actions} actions"));
+        }
+        Ok(raw)
+    }
+
+    pub(crate) fn action_count(&self) -> usize {
+        self.actions.len()
+            + self.axes.iter().flatten().map(|axis| axis.actions.len()).sum::<usize>()
+            + self.channels.iter().flat_map(|channels| channels.values()).map(|channel| channel.actions.len()).sum::<usize>()
     }
 }
 
@@ -264,5 +284,29 @@ mod tests {
         assert_eq!(s.actions[0].pos, 0.9);
         assert!(Script::parse(r#"{"metadata":{}}"#).unwrap().is_empty());
         assert!(Script::parse("nope").is_err());
+    }
+
+    #[test]
+    fn parse_limits_count_all_actions_before_normalization() {
+        let json = r#"{"actions":[{"at":0,"pos":10}],"axes":[{"id":"R1","actions":[{"at":0,"pos":20}]}],"channels":{"stroke":{"actions":[{"at":0,"pos":30}]}}}"#;
+        assert!(Raw::parse_with_limits(json, json.len(), 3).is_ok());
+        assert!(Raw::parse_with_limits(json, json.len() - 1, 3).is_err());
+        assert!(Raw::parse_with_limits(json, json.len(), 2).is_err());
+        let duplicates = r#"{"actions":[{"at":0,"pos":10},{"at":0,"pos":20}]}"#;
+        assert!(Raw::parse_with_limits(duplicates, duplicates.len(), 1).is_err());
+    }
+
+    #[test]
+    fn utf8_bom_is_accepted_without_excluding_it_from_byte_limits() {
+        let json = "\u{feff}{\"actions\":[{\"at\":1000,\"pos\":75}]}";
+        let script = Script::parse(json).unwrap();
+        assert_eq!(script.actions, vec![Action { at: 1000.0, pos: 0.75 }]);
+        assert!(Raw::parse_with_limits(json, json.len(), 1).is_ok());
+        assert!(Raw::parse_with_limits(json, json.len() - 1, 1).is_err());
+    }
+
+    #[test]
+    fn public_parser_rejects_excessive_bytes() {
+        assert!(Script::parse(&" ".repeat(MAX_SCRIPT_BYTES + 1)).unwrap_err().contains("bytes"));
     }
 }

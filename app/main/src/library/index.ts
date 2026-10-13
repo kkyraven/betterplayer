@@ -1,6 +1,6 @@
 import { t } from '../i18n'
 import { statSync, watch, type FSWatcher } from 'node:fs'
-import { access, copyFile, readdir, rename, stat, unlink } from 'node:fs/promises'
+import { access, copyFile, readdir, realpath, rename, stat, unlink } from 'node:fs/promises'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { net } from 'electron'
@@ -100,6 +100,7 @@ export class Library {
   private readonly tagger: TagQueue
   private readonly jobs: JobSink
   private readonly scanner: Scanner
+  private readonly scriptScanner: ScriptScanner
   private closed = false
   private emit: Emitter = () => {}
   private watchers = new Map<number, FSWatcher>()
@@ -121,7 +122,7 @@ export class Library {
     this.writeBack = new RemoteWrites(this.db, (root) => this.adapter(root), () => this.changed({ kind: 'meta' }))
     this.editor = new EditorStore(this.db)
     this.thumbs = new ThumbQueue(options.dataDir, this.db, { done: (id) => this.thumbsDone.add(id), progress: this.progressChanged })
-    const scripts = new ScriptScanner(options.enginePath)
+    const scripts = this.scriptScanner = new ScriptScanner(options.enginePath)
     this.servers = new ServerSync(this.db, scripts, join(options.dataDir, 'remote'), (id) => this.thumbs.file('thumb', id), (id) => this.thumbs.file('strip', id), {
       changed: this.serverChanged,
       image: (id) => this.thumbsDone.add(id),
@@ -361,6 +362,35 @@ export class Library {
 
   scan(rootId?: number) {
     this.scanner.scan(rootId)
+  }
+
+  async importDownloads(rootId: number, paths: string[]): Promise<{ mediaId: number | null }> {
+    const root = this.db.root(rootId)
+    if (!root || root.kind !== 'folder') throw new Error('The library folder is unavailable')
+    const physicalRoot = await realpath(root.path)
+    const logicalPaths: string[] = []
+    for (const path of paths) {
+      const physicalPath = await realpath(path)
+      if (!contains(physicalRoot, physicalPath)) throw new Error('The download folder is excluded from the library')
+      const logicalPath = join(root.path, relative(physicalRoot, physicalPath))
+      if (this.excluded(root, logicalPath)) throw new Error('The download folder is excluded from the library')
+      if (!(await stat(physicalPath)).isFile()) throw new Error('The downloaded file is unavailable')
+      logicalPaths.push(logicalPath)
+    }
+    await this.scanner.scanAndWait(rootId)
+    const videos = logicalPaths.filter(isVideoPath).map((path) => this.byPath(path))
+    if (videos.some((video) => !video || video.rootId !== rootId)) throw new Error('The downloaded video could not be indexed')
+    const scripts = logicalPaths.filter((path) => /\.(funscript|zip)$/i.test(path))
+    const unmatched = scripts.filter((path) => !videos.some((video) => video?.scripts.some((script) => script.source === path)))
+    if (videos.length > 0 && unmatched.length > 0) {
+      const sources = new Set((await Promise.all(videos.map(async (video) => {
+        if (!video) return []
+        return this.scriptScanner.sourcesFor(video.path, await this.scriptFolders(video.path))
+      }))).flat())
+      if (unmatched.some((path) => !sources.has(path))) throw new Error('The downloaded scripts could not be matched')
+    }
+    this.changed({ kind: 'scan' })
+    return { mediaId: videos[0]?.id ?? null }
   }
 
   progress(): ScanProgress {

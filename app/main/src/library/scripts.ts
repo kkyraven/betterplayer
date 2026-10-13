@@ -86,6 +86,10 @@ export class ScriptScanner {
     return rows
   }
 
+  async sourcesFor(path: string, folders: string[] = []): Promise<string[]> {
+    return [...new Set((await this.scan(path, folders)).map((script) => script.source))]
+  }
+
   private scan(path: string, folders: string[]): Promise<ScriptInfo[]> {
     if (this.inMain) return Promise.resolve(this.inMain(path, folders))
     const worker = this.worker ?? this.spawn()

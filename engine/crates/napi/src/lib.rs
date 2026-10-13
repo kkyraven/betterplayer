@@ -1896,6 +1896,17 @@ impl Engine {
         Ok(self.inner.set_output_profile(id, profile(&profile_name)?))
     }
 
+    #[napi(ts_args_type = "id: number, mode: 'auto' | 'single-axis' | 'multi-axis'")]
+    pub fn set_output_script_mode(&self, id: u32, mode: String) -> Result<bool> {
+        let mode = match mode.as_str() {
+            "auto" => bp_core::OutputScriptMode::Auto,
+            "single-axis" => bp_core::OutputScriptMode::SingleAxis,
+            "multi-axis" => bp_core::OutputScriptMode::MultiAxis,
+            _ => return Err(err("unknown output script mode".into())),
+        };
+        Ok(self.inner.set_output_script_mode(id, mode))
+    }
+
     #[napi]
     pub fn take_inputs(&self) -> Vec<DeviceInput> {
         self.inner
@@ -3748,6 +3759,12 @@ impl Task for AnalyseRange {
 }
 
 #[napi(object)]
+pub struct EditorActions {
+    pub at: Float64Array,
+    pub pos: Float64Array,
+}
+
+#[napi(object)]
 pub struct EditorScript {
     pub axis: String,
     pub variant: Option<String>,
@@ -3755,6 +3772,7 @@ pub struct EditorScript {
     pub container: String,
     pub at: Float64Array,
     pub pos: Float64Array,
+    pub multi_axis: Option<EditorActions>,
     pub chapters: Vec<Chapter>,
     pub bookmarks: Vec<Bookmark>,
     pub metadata: String,
@@ -3783,6 +3801,10 @@ impl Task for ReadScripts {
                 container: s.container.as_str().to_string(),
                 at: Float64Array::new(s.script.actions.iter().map(|a| a.at).collect()),
                 pos: Float64Array::new(s.script.actions.iter().map(|a| a.pos).collect()),
+                multi_axis: s.multi_axis.map(|script| EditorActions {
+                    at: Float64Array::new(script.actions.iter().map(|a| a.at).collect()),
+                    pos: Float64Array::new(script.actions.iter().map(|a| a.pos).collect()),
+                }),
                 chapters: s
                     .script
                     .chapters

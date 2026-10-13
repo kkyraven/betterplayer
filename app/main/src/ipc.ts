@@ -7,6 +7,9 @@ import { join } from 'node:path'
 import { HERO_FILE_SUFFIX } from '@shared/tracking'
 import { AUDIO_EXTENSIONS, isMediaPath, VIDEO_EXTENSIONS, type IpcChannel, type IpcContract, type IpcEvent, type IpcEvents, type ScriptFile } from '@shared/ipc'
 import { BrowserTabs } from './browser'
+import { DownloadQueue } from './downloads'
+import { checkDestination } from './downloads/files'
+import { downloadDestination, downloadSelection } from './download-selection'
 import { syncLanguage, t } from './i18n'
 import type { Library } from './library'
 import { logEvent } from './log'
@@ -38,7 +41,10 @@ export function send<E extends IpcEvent>(win: BrowserWindow, event: E, payload: 
 export function registerIpc(win: BrowserWindow, store: SettingsStore, library: Library, remote: RemoteServer, client: RemoteClient, account: Account, updater: Updater, ytdlp: string | null, dom: Dom) {
   function handle<C extends IpcChannel>(channel: C, handler: Handler<C>) {
     handlers.set(channel, handler as (...args: never[]) => unknown)
-    ipcMain.handle(channel, (_event: IpcMainInvokeEvent, ...args: Parameters<IpcContract[C]>) => {
+    ipcMain.handle(channel, (event: IpcMainInvokeEvent, ...args: Parameters<IpcContract[C]>) => {
+      if ((channel.startsWith('downloads:') || channel === 'browser:openEroScripts' || channel === 'browser:openSource') && event.sender !== win.webContents) {
+        throw new Error('This action is only available in BetterPlayer')
+      }
       if (client.active && isForwarded(channel)) return client.call(channel, args)
       return handler(...args)
     })
@@ -382,7 +388,32 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   const browser = new BrowserTabs(win, join(__dirname, '../preload/browser.js'), (event, payload) => {
     if (!win.isDestroyed()) send(win, event, payload)
   }, ipcMain, () => account.get().me?.premium === true, toggleFullscreen)
-  win.on('closed', () => browser.destroy())
+  const queueReady = DownloadQueue.open({
+    journalDir: join(app.getPath('userData'), 'downloads'),
+    getRoot: (id) => library.roots().find((root) => root.id === id) ?? null,
+    transport: (request) => browser.startDownload(request),
+    importPublished: (batch) => library.importDownloads(batch.destination.rootId, batch.paths),
+    onState: (state) => send(win, 'downloads:state', state),
+    continueAttempt: (fileId, attemptId) => browser.continueDownload(fileId, attemptId),
+    openOrdinarySource: (url) => { browser.openSource(url) },
+  })
+  browser.setOrdinaryDownloadHandler((download) => {
+    void queueReady.then((queue) => queue.adoptOrdinary(download)).catch(() => {
+      logEvent({ processType: 'main', reason: 'error', message: 'Browser download could not be added to Downloads' })
+    })
+  })
+  void queueReady.catch((error: unknown) => logEvent({ processType: 'main', reason: 'error', message: `Download recovery: ${error instanceof Error ? error.message : 'failed'}` }))
+  let downloadsClosed = false
+  app.on('before-quit', (event) => {
+    if (downloadsClosed) return
+    event.preventDefault()
+    downloadsClosed = true
+    void queueReady.then((queue) => queue.destroy()).catch(() => {}).finally(() => app.quit())
+  })
+  win.on('closed', () => {
+    browser.destroy()
+    void queueReady.then((queue) => queue.destroy()).catch(() => {})
+  })
   account.setEmitter((status) => {
     if (!win.isDestroyed()) send(win, 'account:status', status)
     browser.accountChanged()
@@ -394,6 +425,30 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   handle('browser:toggleBookmark', (url, title) => browser.toggleBookmark(url, title))
   handle('browser:setAdBlockEnabled', (enabled) => browser.setAdBlockEnabled(enabled))
   handle('browser:open', (url) => browser.open(url))
+  handle('browser:openEroScripts', () => browser.openEroScripts())
+  handle('browser:openSource', (url) => browser.openSource(url))
+  handle('downloads:state', async () => (await queueReady).state())
+  handle('downloads:enqueue', async (request) => {
+    const selection = downloadSelection(request, browser.getTopic(request?.tabId))
+    return (await queueReady).enqueue(selection)
+  })
+  handle('downloads:pause', async (id) => { await (await queueReady).pause(id) })
+  handle('downloads:resume', async (id) => { await (await queueReady).resume(id) })
+  handle('downloads:retry', async (id) => { await (await queueReady).retry(id) })
+  handle('downloads:cancel', async (id) => { await (await queueReady).cancel(id) })
+  handle('downloads:continue', async (id) => { await (await queueReady).continue(id) })
+  handle('downloads:clear', async () => { await (await queueReady).clear() })
+  handle('downloads:cancelAll', async () => { await (await queueReady).cancelAll() })
+  handle('downloads:videoOnly', async (id) => { await (await queueReady).videoOnly(id) })
+  handle('downloads:unlock', async (id, password) => { await (await queueReady).unlock(id, password) })
+  handle('downloads:selectArchive', async (id, entryIds) => { await (await queueReady).selectArchive(id, entryIds) })
+  handle('downloads:default', () => store.get().downloads.destination)
+  handle('downloads:setDefault', async (value) => {
+    const destination = value === null ? null : downloadDestination(value)
+    if (destination) await checkDestination(library.roots().find((root) => root.id === destination.rootId) ?? null, destination)
+    const settings = store.get()
+    store.set({ ...settings, downloads: { destination } })
+  })
   handle('browser:close', (id) => browser.close(id))
   handle('browser:activate', (id) => browser.activate(id))
   handle('browser:navigate', (id, url) => browser.navigate(id, url))

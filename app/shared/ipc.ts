@@ -17,6 +17,7 @@ import type { PerVideoSettings, Settings } from './settings'
 import type { Cue, SubtitleTrack } from './subtitles'
 import type { UpdateState } from './update'
 import type { SavedSession, SessionHistory, SessionRun, SessionSetup } from './session'
+import type { DownloadDestination, DownloadEnqueue, DownloadState } from './downloads'
 
 export const VIDEO_EXTENSIONS = [
   'mp4', 'm4v', 'mkv', 'mk3d', 'webm', 'mov', 'avi', 'divx', 'wmv', 'asf',
@@ -201,6 +202,22 @@ export interface IpcContract {
   'browser:toggleBookmark': (url: string, title?: string) => BrowserStartData
   'browser:setAdBlockEnabled': (enabled: boolean) => BrowserStartData
   'browser:open': (url?: string) => BrowserTab
+  'browser:openEroScripts': () => BrowserTab
+  'browser:openSource': (url: string) => BrowserTab
+  'downloads:state': () => DownloadState
+  'downloads:enqueue': (request: DownloadEnqueue) => string
+  'downloads:pause': (id: string) => void
+  'downloads:resume': (id: string) => void
+  'downloads:retry': (id: string) => void
+  'downloads:cancel': (id: string) => void
+  'downloads:continue': (id: string) => void
+  'downloads:clear': () => void
+  'downloads:cancelAll': () => void
+  'downloads:videoOnly': (id: string) => void
+  'downloads:unlock': (id: string, password: string) => void
+  'downloads:selectArchive': (id: string, entryIds: string[]) => void
+  'downloads:default': () => DownloadDestination | null
+  'downloads:setDefault': (destination: DownloadDestination | null) => void
   'browser:close': (id: number) => void
   'browser:activate': (id: number) => void
   'browser:navigate': (id: number, url: string) => void
@@ -296,6 +313,7 @@ export interface IpcEvents {
   'browser:region': BrowserRegionEdit
   'browser:zone': BrowserRegionEdit
   'browser:error': BrowserError
+  'downloads:state': DownloadState
   'models:progress': ModelProgress
   'update:state': UpdateState
 }

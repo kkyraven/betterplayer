@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import type { ReadableStream } from 'node:stream/web'
+import { net } from 'electron'
 import type { ModelFileInfo, ModelFileStatus, ModelProgress } from '@shared/tracking'
 
 export class Models {
@@ -56,7 +57,7 @@ export class Models {
   }
 
   private async fetchFile(id: string, file: ModelFileInfo, tmp: string, target: string, signal: AbortSignal): Promise<void> {
-    const res = await fetch(file.url, { headers: { Accept: 'application/octet-stream', 'User-Agent': 'BetterPlayer' }, redirect: 'follow', signal })
+    const res = await net.fetch(file.url, { headers: { Accept: 'application/octet-stream', 'User-Agent': 'BetterPlayer' }, redirect: 'follow', signal })
     if (!res.ok || !res.body) throw new Error(t('settings.models.httpError', { file: file.file, status: res.status }))
     const total = Number(res.headers.get('content-length') ?? 0)
     const hash = createHash('sha256')
@@ -89,7 +90,7 @@ export class Models {
 
   async licence(file: string, url: string): Promise<void> {
     try {
-      const licence = await fetch(url)
+      const licence = await net.fetch(url)
       if (licence.ok) await writeFile(join(this.dir, `${file}.LICENSE.txt`), await licence.text())
     } catch {
     }

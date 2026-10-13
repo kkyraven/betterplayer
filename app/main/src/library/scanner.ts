@@ -75,7 +75,13 @@ export class Scanner {
   readonly state: ScanState = { scanning: false, done: 0, total: 0 }
   private closed = false
   private readonly abort = new AbortController()
-  close() { this.closed = true; this.queued = null; this.abort.abort() }
+  private idleWaiters: { resolve: () => void; reject: (error: Error) => void }[] = []
+  close() {
+    this.closed = true
+    this.queued = null
+    this.abort.abort()
+    for (const waiter of this.idleWaiters.splice(0)) waiter.reject(new Error('Library closed'))
+  }
 
   private queued: number | 'all' | null = null
   private matchOtherFolders = true
@@ -131,33 +137,49 @@ export class Scanner {
     void this.loop(want)
   }
 
+  scanAndWait(rootId: number): Promise<void> {
+    if (this.closed) return Promise.reject(new Error('Library closed'))
+    return new Promise((resolve, reject) => {
+      this.idleWaiters.push({ resolve, reject })
+      this.scan(rootId)
+    })
+  }
+
   private async loop(want: number | 'all') {
     this.state.scanning = true
-    let next: number | 'all' | null = want
-    while (next !== null && !this.closed) {
-      const inventory = this.matchOtherFolders ? await this.getInventory(true) : null
-      if (this.closed) return
-      const requested = next === 'all' ? null : this.db.root(next)
-      const roots = next === 'all' ? this.db.roots()
-        : this.matchOtherFolders && requested?.kind === 'folder' ? this.db.roots().filter((root) => root.kind === 'folder')
-        : requested ? [requested] : []
-      this.state.done = 0
-      this.state.total = 0
-      this.hooks.progress()
-      for (const root of roots) {
+    try {
+      let next: number | 'all' | null = want
+      while (next !== null && !this.closed) {
+        const inventory = this.matchOtherFolders ? await this.getInventory(true) : null
         if (this.closed) return
-        try {
-          if (root.kind === 'folder') await this.scanRoot(root.id, root.path, inventory)
-          else await this.syncServer(root.id)
-        } catch (e) {
-          warn(`scan failed for ${root.path}`, e)
+        const requested = next === 'all' ? null : this.db.root(next)
+        const roots = next === 'all' ? this.db.roots()
+          : this.matchOtherFolders && requested?.kind === 'folder' ? this.db.roots().filter((root) => root.kind === 'folder')
+          : requested ? [requested] : []
+        this.state.done = 0
+        this.state.total = 0
+        this.hooks.progress()
+        for (const root of roots) {
+          if (this.closed) return
+          try {
+            if (root.kind === 'folder') await this.scanRoot(root.id, root.path, inventory)
+            else await this.syncServer(root.id)
+          } catch (e) {
+            warn(`scan failed for ${root.path}`, e)
+          }
         }
+        next = this.queued
+        this.queued = null
       }
-      next = this.queued
-      this.queued = null
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error))
+      for (const waiter of this.idleWaiters.splice(0)) waiter.reject(failure)
+      warn('scan failed', failure)
+    } finally {
+      this.state.scanning = false
+      this.hooks.progress()
+      for (const waiter of this.idleWaiters.splice(0)) waiter.resolve()
     }
-    this.state.scanning = false
-    this.hooks.progress()
   }
 
   private async syncServer(rootId: number) {

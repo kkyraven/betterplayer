@@ -7,10 +7,11 @@ export class ScriptFolders {
     for (const [dir, names] of siblings) {
       for (const name of names) {
         const extension = extname(name)
-        if (!['.funscript', '.FUNSCRIPT', '.zip'].includes(extension)) continue
+        const kind = extension.toLowerCase()
+        if (kind !== '.funscript' && kind !== '.zip') continue
         const base = basename(name, extension)
         const stems = [base]
-        if (extension !== '.zip') {
+        if (kind !== '.zip') {
           for (let i = 1; i < base.length; i++) {
             if (base[i] === '.' || base[i] === '_' || (base.slice(i, i + 2) === ' (' && base.endsWith(')') && base.length > i + 3)) stems.push(base.slice(0, i))
           }

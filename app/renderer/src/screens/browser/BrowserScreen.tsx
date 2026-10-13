@@ -20,6 +20,12 @@ import { FAPTAP_HOST } from '@shared/tracking'
 import { FaptapDialog } from './FaptapDialog'
 import { useSettings } from '@/state/settings'
 import { useTracking } from '@/state/tracking'
+import { useDownloads } from '@/state/downloads'
+import { DownloadButton } from '@/components/downloads/DownloadButton'
+import { DownloadManager } from '@/components/downloads/DownloadManager'
+import { isEroScriptsUrl } from '@shared/eroscripts'
+import { EroScriptsSearch } from './EroScriptsSearch'
+import { DownloadsDock } from '@/components/downloads/DownloadsDock'
 import './browser.css'
 
 type Overlay = `site:${string}` | 'adblock' | 'faptap'
@@ -34,6 +40,8 @@ export function BrowserScreen() {
   const opening = useRef(false)
   const fullscreen = useUi((s) => s.fullscreen)
   const active = tabs.find((tab) => tab.active)
+  const managerOpen = useDownloads((s) => s.managerOpen)
+  const topic = active?.topic ?? active?.relatedTopic ?? null
   const startPage = !active || active.url === 'about:blank' || !active.url
   const chrome = useRef<HTMLDivElement>(null)
   const [revealed, setRevealed] = useState(false)
@@ -141,9 +149,13 @@ export function BrowserScreen() {
         <AddressRow adBlockOpen={overlay === 'adblock'} onAdBlockOpen={(open) => void openMenu(open ? 'adblock' : null)} />
         {(startPage || bookmarksBar) && <BookmarksBar openSite={menuSite} onOpenSite={(site) => void openMenu(site === null ? null : `site:${site}`)} />}
         <TrackBar variant="browser" />
+        {active && isEroScriptsUrl(active.url) && <EroScriptsSearch key={active.id} tabId={active.id} url={active.url} topic={topic} />}
       </div>
-      <div ref={page} className="bpage">
-        {startPage ? <StartPage key={active?.id} /> : preview && overlay !== null ? <img className="bpreview" src={preview} alt="" /> : null}
+      <div className="bbody">
+        <div ref={page} className="bpage">
+          {startPage ? <StartPage key={active?.id} /> : preview && overlay !== null ? <img className="bpreview" src={preview} alt="" /> : null}
+        </div>
+        {topic && topic.sources.length > 0 ? <DownloadsDock topic={topic} related={active?.id !== topic.tabId} /> : managerOpen && <DownloadManager />}
       </div>
       <FaptapDialog open={overlay === 'faptap'} onClose={closeFaptap} />
     </div>
@@ -346,6 +358,7 @@ function AddressRow({ adBlockOpen, onAdBlockOpen }: { adBlockOpen: boolean; onAd
         {tab?.loading ? <X /> : <RefreshCw />}
       </IconButton>
       <IconButton label={t('browser.addr.startPage')} onClick={() => void navigate('about:blank')}><Home /></IconButton>
+      <DownloadButton />
       <label className="url">
         <Lock />
         <input
@@ -388,14 +401,15 @@ function AdBlockButton({ open, onOpenChange }: { open: boolean; onOpenChange: (o
   const setAdBlockEnabled = useBrowser((s) => s.setAdBlockEnabled)
   const premium = useAccount(isPremium)
   const signedOut = useAccount((s) => s.status.state === 'out')
-  const on = premium && data?.adBlockEnabled === true
+  const exempt = useBrowser((s) => s.tabs.find((tab) => tab.active)?.adBlockingExempt ?? false)
+  const on = !exempt && premium && data?.adBlockEnabled === true
   const button = (
-    <button type="button" className="badblock" aria-label={t('browser.adBlock.label')} aria-pressed={on} disabled={!data} onClick={premium ? () => data && void setAdBlockEnabled(!data.adBlockEnabled) : undefined}>
+    <button type="button" className="badblock" aria-label={exempt ? t('eroscripts.originalAds') : t('browser.adBlock.label')} title={exempt ? t('eroscripts.originalAds') : undefined} aria-pressed={on} disabled={!data || exempt} onClick={premium ? () => data && void setAdBlockEnabled(!data.adBlockEnabled) : undefined}>
       {on ? <Shield /> : <ShieldOff />}
       <span>{on ? t('browser.adBlock.on') : t('browser.adBlock.off')}</span>
     </button>
   )
-  if (premium) return button
+  if (premium || exempt) return button
   return (
     <Popover.Root open={open} onOpenChange={onOpenChange}>
       <Popover.Trigger asChild>{button}</Popover.Trigger>

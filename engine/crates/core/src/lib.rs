@@ -9,6 +9,7 @@ mod motion;
 mod params;
 mod pass;
 mod range;
+mod script_mixer;
 mod sensation;
 mod track;
 mod zones;
@@ -20,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use bp_axes::{AxisSettings, Fallback, Frame, Mixer, ScriptTable};
+use bp_axes::{AxisSettings, Fallback, Frame, ScriptTable};
 use bp_devices::{
     AxisClamp, IntifaceServer, IntifaceStatus, Media, OpenShockTrigger, Output, OutputSnapshot,
     Keyframe, OutputStats, Pace, PercentilesUs, Profile, TickContext, Transport, Vibration, deadline,
@@ -36,6 +37,8 @@ use follow::{Follow, FollowEvent, FollowSink};
 use hero::HeroState;
 use lookahead::Lookahead;
 use motion::{Cadence, MotionFeed, box_run};
+use script_mixer::{ScriptMixer, multi_axis_output};
+pub use script_mixer::OutputScriptMode;
 use track::{Timeline, Track};
 
 pub use beat::{BeatOptions, BeatSnapshot, BeatStatus, MusicStatus};
@@ -114,6 +117,7 @@ pub struct PoolEntry {
     pub axis: Axis,
     pub variant: Option<String>,
     pub script: Arc<Script>,
+    pub multi_axis: Option<Arc<Script>>,
     info: ScriptInfo,
 }
 
@@ -458,6 +462,8 @@ struct Mixed {
     at: Instant,
     frame: Frame,
     driven: [bool; Axis::COUNT],
+    multi_frame: Frame,
+    multi_driven: [bool; Axis::COUNT],
 }
 
 struct History {
@@ -489,10 +495,12 @@ struct Shared {
     playback_ended: AtomicBool,
     browser_tracking: AtomicBool,
     browser_clock: Mutex<Clock>,
-    mixer: Mutex<Mixer>,
+    mixer: Mutex<ScriptMixer>,
     outputs: Mutex<Vec<Output>>,
+    output_script_modes: Mutex<Vec<(u32, OutputScriptMode)>>,
     history: Mutex<History>,
     scripts: Mutex<Vec<(Axis, Arc<Script>)>>,
+    multi_scripts: Mutex<Vec<(Axis, Arc<Script>)>>,
     generated: Mutex<Vec<(Axis, Arc<Script>)>>,
     pool: Mutex<Vec<PoolEntry>>,
     prepared: Mutex<Option<(String, Vec<PoolEntry>)>>,
@@ -568,10 +576,12 @@ impl Engine {
             playback_ended: AtomicBool::new(false),
             browser_tracking: AtomicBool::new(false),
             browser_clock: Mutex::new(Clock::new()),
-            mixer: Mutex::new(Mixer::new()),
+            mixer: Mutex::new(ScriptMixer::new()),
             outputs: Mutex::new(Vec::new()),
+            output_script_modes: Mutex::new(Vec::new()),
             history: Mutex::new(History { frames: VecDeque::new(), expected_ms: 0.0, lead: 0.0 }),
             scripts: Mutex::new(Vec::new()),
+            multi_scripts: Mutex::new(Vec::new()),
             generated: Mutex::new(Vec::new()),
             pool: Mutex::new(Vec::new()),
             prepared: Mutex::new(None),
@@ -711,6 +721,7 @@ impl Engine {
         self.shared.beat_live_installed.store(false, Ordering::Relaxed);
         *self.shared.lookahead.lock().unwrap() = None;
         self.shared.pool.lock().unwrap().clear();
+        self.shared.multi_scripts.lock().unwrap().clear();
         self.shared.generated.lock().unwrap().clear();
         self.shared.draft.lock().unwrap().clear();
         if let Ok(mut a) = self.shared.analyser.try_lock() {
@@ -815,7 +826,7 @@ impl Engine {
 
     pub fn set_global_offset_ms(&self, ms: f64) {
         let mut m = self.shared.mixer.lock().unwrap();
-        m.global_offset_ms = ms;
+        m.set_global_offset(ms);
         m.resync();
     }
 
@@ -1467,11 +1478,13 @@ impl Engine {
             .iter()
             .find(|(a, _)| *a == axis)
             .map(|(_, s)| s.clone());
+        let multi_file = self.shared.multi_scripts.lock().unwrap().iter()
+            .find(|(a, _)| *a == axis).map(|(_, s)| s.clone()).or_else(|| file.clone());
         self.shared
             .mixer
             .lock()
             .unwrap()
-            .set_script_live(axis, script.or(file));
+            .set_script_pair_live(axis, script.clone().or(file), script.or(multi_file));
     }
 
     pub fn clear_draft(&self) {
@@ -1568,6 +1581,7 @@ impl Engine {
         };
         outputs.remove(i).disconnect();
         drop(outputs);
+        self.shared.output_script_modes.lock().unwrap().retain(|(output, _)| *output != id);
         self.shared.update_expand();
         true
     }
@@ -1580,6 +1594,18 @@ impl Engine {
         o.set_profile(profile);
         drop(outputs);
         self.shared.update_expand();
+        true
+    }
+
+    pub fn set_output_script_mode(&self, id: u32, mode: OutputScriptMode) -> bool {
+        if !self.shared.outputs.lock().unwrap().iter().any(|o| o.id == id) {
+            return false;
+        }
+        let mut modes = self.shared.output_script_modes.lock().unwrap();
+        modes.retain(|(output, _)| *output != id);
+        if mode != OutputScriptMode::Auto {
+            modes.push((id, mode));
+        }
         true
     }
 
@@ -1911,6 +1937,7 @@ impl Engine {
         for o in self.shared.outputs.lock().unwrap().drain(..) {
             o.disconnect();
         }
+        self.shared.output_script_modes.lock().unwrap().clear();
         self.player.close();
     }
 }
@@ -2134,7 +2161,7 @@ impl Shared {
         };
         if let Some(loaded) = loaded {
             let table = ScriptTable::build(loaded, any);
-            self.mixer.lock().unwrap().install(table);
+            self.mixer.lock().unwrap().install_single(table);
         }
         self.apply_param_sources();
     }
@@ -2341,6 +2368,9 @@ impl Shared {
             .filter(|_| !browser)
             .map(|&i| (pool[i].axis, pool[i].script.clone()))
             .collect();
+        let mut multi: Vec<(Axis, Arc<Script>)> = chosen.iter().filter(|_| !browser)
+            .filter_map(|&i| pool[i].multi_axis.as_ref().map(|s| (pool[i].axis, s.clone())))
+            .collect();
         drop(pool);
         if self.timeline.lock().unwrap().active {
             let axes = *self.track_axes.lock().unwrap();
@@ -2381,10 +2411,12 @@ impl Shared {
                         self.beat_live_installed.store(true, Ordering::Relaxed);
                     }
                     loaded.retain(|(ax, _)| *ax != axis);
+                    multi.retain(|(ax, _)| *ax != axis);
                     loaded.push((axis, Arc::new(script)));
                 }
             }
         }
+        *self.multi_scripts.lock().unwrap() = multi;
         self.set_scripts(loaded);
         infos
     }
@@ -2535,10 +2567,15 @@ impl Shared {
         } else {
             overlay(&scripts, &self.draft.lock().unwrap())
         };
+        let multi = self.multi_scripts.lock().unwrap().clone();
+        let for_multi = if browser { scripts.clone() } else {
+            overlay(&overlay(&scripts, &multi), &self.draft.lock().unwrap())
+        };
+        let multi_table = ScriptTable::build(for_multi, false);
         let table = ScriptTable::build(for_mixer, expand);
         {
             let mut mixer = self.mixer.lock().unwrap();
-            mixer.install(table);
+            mixer.install(table, multi_table);
             mixer.resync();
         }
         *self.scripts.lock().unwrap() = scripts;
@@ -2722,7 +2759,7 @@ impl Shared {
         } else {
             Vec::new()
         };
-        let (frame, driven, flags, keyframes) = {
+        let (frame, driven, multi_frame, multi_driven, flags, keyframes) = {
             let mut mixer = self.mixer.lock().unwrap();
             for axis in Axis::ALL {
                 mixer.set_script_effect(axis, effects[axis.index()]);
@@ -2758,7 +2795,7 @@ impl Shared {
                 mixer.set_source(Axis::L0, value);
                 from_live[Axis::L0.index()] = true;
             }
-            let frame = mixer.tick(media_ms, t.dt_ms);
+            let (frame, multi_frame) = mixer.tick(media_ms, t.dt_ms);
             let flags: [u8; Axis::COUNT] = std::array::from_fn(|i| {
                 let a = Axis::ALL[i];
                 (mixer.has_script(a) as u8 * FLAG_SCRIPT)
@@ -2771,20 +2808,22 @@ impl Shared {
             {
                 from_live[i] = from_live[Axis::L0.index()];
             }
-            let keyframes: Vec<(f64, Option<Keyframe>)> = delays
+            let keyframes: Vec<(f64, [Option<Keyframe>; 2])> = delays
                 .iter()
                 .filter(|_| rate > 0.0)
                 .map(|d| {
                     let at = video_ms - d * rate;
-                    let k = mixer.next_keyframe(Axis::L0, at).map(|k| Keyframe {
-                        at_ms: k.at,
-                        pos: k.pos,
-                        in_ms: ((k.at - at) / rate).max(0.0),
+                    let keys = [false, true].map(|multi| {
+                        mixer.for_output(multi).next_keyframe(Axis::L0, at).map(|k| Keyframe {
+                            at_ms: k.at,
+                            pos: k.pos,
+                            in_ms: ((k.at - at) / rate).max(0.0),
+                        })
                     });
-                    (*d, k)
+                    (*d, keys)
                 })
                 .collect();
-            (frame, *mixer.driven(), flags, keyframes)
+            (frame, *mixer.driven(), multi_frame, *mixer.for_output(true).driven(), flags, keyframes)
         };
         let driven = if self.params_enabled.load(Ordering::Relaxed) {
             driven
@@ -2813,6 +2852,7 @@ impl Shared {
         };
         let sensation_scale = self.sensation.lock().unwrap().scale(t.fired);
         let pain_frame = self.pain.lock().unwrap().sample(t.fired);
+        let script_modes = self.output_script_modes.lock().unwrap().clone();
         let (connected, wrote, shown) = {
             let mut outputs = self.outputs.lock().unwrap();
             let (mut connected, mut wrote) = (false, false);
@@ -2822,7 +2862,7 @@ impl Shared {
             }
             h.expected_ms = video_ms + if playing { t.dt_ms * rate } else { 0.0 };
             h.lead = lead;
-            h.frames.push_back(Mixed { at: t.fired, frame, driven });
+            h.frames.push_back(Mixed { at: t.fired, frame, driven, multi_frame, multi_driven });
             let keep = Duration::from_secs_f64((latest - earliest) / 1000.0 + 0.05);
             while h.frames.front().is_some_and(|m| t.fired.duration_since(m.at) > keep) {
                 h.frames.pop_front();
@@ -2837,18 +2877,21 @@ impl Shared {
                 o.pain_frame = pain_frame;
                 o.poll();
                 connected |= o.connected();
-                let stroke_next = keyframes.iter().find(|(d, _)| *d == o.delay_ms).and_then(|(_, k)| *k);
+                let mode = script_modes.iter().find(|(id, _)| *id == o.id).map_or(OutputScriptMode::Auto, |(_, mode)| *mode);
+                let multi = multi_axis_output(&o.transport, o.profile, &o.clamps, mode);
+                let (output_frame, output_driven) = if multi { (multi_frame, multi_driven) } else { (frame, driven) };
+                let stroke_next = keyframes.iter().find(|(d, _)| *d == o.delay_ms).and_then(|(_, k)| k[usize::from(multi)]);
                 let ctx = TickContext { stroke_next, ..ctx };
                 wrote |= match back(o.delay_ms - earliest) {
                     Some(m) => {
-                        let (mut f, mut d) = (m.frame, m.driven);
+                        let (mut f, mut d) = if multi { (m.multi_frame, m.multi_driven) } else { (m.frame, m.driven) };
                         for i in (0..Axis::COUNT).filter(|i| flags[*i] & FLAG_LIVE != 0 || (flags[*i] & FLAG_TRACKED != 0 && from_live[*i])) {
-                            f[i] = frame[i];
-                            d[i] = driven[i];
+                            f[i] = output_frame[i];
+                            d[i] = output_driven[i];
                         }
                         o.send(&f, &d, &ctx)
                     }
-                    None => o.send(&frame, &driven, &ctx),
+                    None => o.send(&output_frame, &output_driven, &ctx),
                 };
             }
             let shown = back(lead).map_or(frame, |m| m.frame);
@@ -2973,6 +3016,7 @@ pub fn scan_pool_with_folders(media: &Path, folders: &[String]) -> Vec<PoolEntry
                 axis: s.axis,
                 variant: s.variant,
                 script: Arc::new(s.script),
+                multi_axis: s.multi_axis.map(Arc::new),
                 info,
             }
         })
@@ -3062,7 +3106,7 @@ mod tests {
     #[test]
     fn frame_back_picks_the_newest_frame_old_enough() {
         let start = Instant::now();
-        let mixed = |ms: u64| Mixed { at: start + Duration::from_millis(ms), frame: [ms as f64; Axis::COUNT], driven: [false; Axis::COUNT] };
+        let mixed = |ms: u64| Mixed { at: start + Duration::from_millis(ms), frame: [ms as f64; Axis::COUNT], driven: [false; Axis::COUNT], multi_frame: [ms as f64; Axis::COUNT], multi_driven: [false; Axis::COUNT] };
         let history: VecDeque<Mixed> = (0..=5).map(|i| mixed(i * 10)).collect();
         let now = start + Duration::from_millis(50);
         let at = |delay| frame_back(&history, now, Duration::from_millis(delay)).map(|m| m.frame[0]);
@@ -3203,5 +3247,30 @@ mod tests {
             vec![(Axis::L0, None, true), (Axis::L0, Some("mouth"), false)]
         );
         let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn v2_pool_and_library_keep_one_stroke_identity_and_root_metadata() {
+        let d = std::env::temp_dir().join(format!("bp-core-v2-scan-{}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("v.funscript"), r#"{
+            "version":"2.0", "inverted":true,
+            "actions":[{"at":0,"pos":20},{"at":1000,"pos":80}],
+            "metadata":{"creator":"synthetic", "chapters":[{"name":"Start","startTime":"0","endTime":"1"}], "bookmarks":[{"name":"Middle","time":"0.5"}]},
+            "channels":{"stroke":{"actions":[{"at":0,"pos":10},{"at":2000,"pos":90}]},"roll":{"actions":[{"at":0,"pos":50}]}}
+        }"#).unwrap();
+        let pool = scan_pool(&d.join("v.mp4"));
+        assert_eq!(pool.len(), 2);
+        let stroke = pool.iter().find(|e| e.axis == Axis::L0).unwrap();
+        assert_eq!(stroke.variant, None);
+        assert_eq!(stroke.script.actions[0].pos, 0.8);
+        assert_eq!(stroke.multi_axis.as_ref().unwrap().actions[0].pos, 0.1);
+        assert_eq!(stroke.script.metadata["creator"], "synthetic");
+        let infos = describe(&pool, &default_selection(&pool));
+        assert_eq!(infos.iter().filter(|s| s.axis == Axis::L0 && s.selected).count(), 1);
+        assert_eq!(infos[0].chapters[0].name, "Start");
+        assert_eq!(infos[0].bookmarks[0].at_ms, 500.0);
+        assert_eq!(infos[0].duration_ms, 1000.0);
+        fs::remove_dir_all(d).unwrap();
     }
 }

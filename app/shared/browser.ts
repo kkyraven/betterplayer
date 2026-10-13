@@ -1,3 +1,5 @@
+import type { EroTopic } from './eroscripts'
+
 export interface Rect {
   x: number
   y: number
@@ -54,6 +56,9 @@ export interface BrowserTab {
   muted: boolean
   favicon: string | null
   active: boolean
+  topic: EroTopic | null
+  adBlockingExempt: boolean
+  relatedTopic?: EroTopic | null
 }
 
 export interface BrowserFrame {

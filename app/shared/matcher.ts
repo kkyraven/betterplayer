@@ -81,15 +81,55 @@ const SUFFIX_AXIS: ReadonlyMap<string, AxisId> = new Map<string, AxisId>([
   ['s0', 'S0'],
 ])
 
-export function parseScriptName(name: string): { stem: string; suffix: string; axis: AxisId } | null {
+function suffixAxis(suffix: string): AxisId {
+  for (const part of suffix.split('.').filter(Boolean)) {
+    const lower = part.toLowerCase()
+    const direct = SUFFIX_AXIS.get(lower)
+    if (direct) return direct
+    const base = lower.replace(/\d+$/, '')
+    const digits = lower.slice(base.length)
+    if (digits) {
+      if (['vib', 'vibe', 'vibrate'].includes(base)) return digits === '2' ? 'V1' : 'V0'
+      const numbered = SUFFIX_AXIS.get(base)
+      if (numbered) return numbered
+    }
+    if (lower === 'vibe' || lower === 'vibrate') return 'V0'
+  }
+  return 'L0'
+}
+
+export function parseScriptName(name: string, knownStems?: ReadonlySet<string>): { stem: string; suffix: string; axis: AxisId } | null {
   const m = /^(.*)\.funscript$/i.exec(name)
   if (!m || !m[1]) return null
   const base = m[1]
+  if (knownStems?.has(base)) return { stem: base, suffix: '', axis: 'L0' }
+  let known: { stem: string; suffix: string; axis: AxisId } | null = null
+  if (knownStems) {
+    for (let i = 1; i < base.length; i++) {
+      const stem = base.slice(0, i)
+      if (!knownStems.has(stem)) continue
+      let suffix: string | undefined
+      if (base[i] === '.' || base[i] === '_') suffix = base.slice(i + 1)
+      else if (base[i] === '-' && /^(?:max|plus)(?:\.|$)/i.test(base.slice(i + 1))) suffix = base.slice(i + 1)
+      else if (base.slice(i, i + 2) === ' (' && base.endsWith(')')) suffix = base.slice(i + 2, -1)
+      if (suffix) known = { stem, suffix, axis: suffixAxis(suffix) }
+    }
+  }
+  if (known) return known
+  const parenthesis = base.lastIndexOf(' (')
+  if (parenthesis > 0 && base.endsWith(')') && parenthesis + 3 < base.length) {
+    const suffix = base.slice(parenthesis + 2, -1)
+    return { stem: base.slice(0, parenthesis), suffix, axis: suffixAxis(suffix) }
+  }
   const dot = base.lastIndexOf('.')
   if (dot > 0) {
     const suffix = base.slice(dot + 1)
-    const axis = SUFFIX_AXIS.get(suffix.toLowerCase())
-    if (axis) return { stem: base.slice(0, dot), suffix, axis }
+    const lower = suffix.toLowerCase()
+    const axis = suffixAxis(suffix)
+    const numbered = lower.replace(/\d+$/, '')
+    if (lower === 'max' || SUFFIX_AXIS.has(lower) || SUFFIX_AXIS.has(numbered) || ['vib', 'vibe', 'vibrate'].includes(numbered)) {
+      return { stem: base.slice(0, dot), suffix, axis }
+    }
   }
   return { stem: base, suffix: '', axis: 'L0' }
 }
@@ -189,5 +229,6 @@ export function scoreMatch(f: MatchFeatures): { confidence: number; reasons: Mat
 }
 
 export function renamedScript(videoStem: string, file: OrphanFile): string {
+  if (/\.zip$/i.test(file.name)) return `${videoStem}.zip`
   return `${videoStem}${file.suffix ? `.${file.suffix}` : ''}.funscript`
 }

@@ -1,5 +1,5 @@
-import { ArrowDownToLine, BarChart3, Cable, Crown, Gamepad2, Globe, Library, MonitorPlay, Settings, Shuffle, Volume2, Wrench, type LucideIcon } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { ArrowDownToLine, BarChart3, Cable, Crown, Gamepad2, Globe, Library, MonitorPlay, Plus, Settings, Shuffle, Volume2, Wrench, type LucideIcon } from 'lucide-react'
+import { Fragment, useEffect, useState } from 'react'
 import { TooltipGroup } from '@/components/ui/TooltipGroup'
 import { isAdmin } from '@shared/account'
 import { useAccount } from '@/state/account'
@@ -13,6 +13,8 @@ import { SCREEN_LABEL, useUi, type Screen } from '@/state/ui'
 import { useUpdate } from '@/state/update'
 import { UpdatePanel } from './UpdatePanel'
 import { AccountPanel } from '@/components/account/AccountPanel'
+import { useDownloads } from '@/state/downloads'
+import { isEroScriptsUrl } from '@shared/eroscripts'
 
 const ITEMS: ReadonlyArray<{ id: Screen; icon: LucideIcon }> = [
   { id: 'library', icon: Library },
@@ -25,8 +27,9 @@ const ITEMS: ReadonlyArray<{ id: Screen; icon: LucideIcon }> = [
 
 const GAME_SCREENS: ReadonlySet<Screen> = new Set<Screen>(['game', 'settings'])
 
-function RailButton({ id, icon: Icon, badge = false, sound = false }: { id: Screen; icon: LucideIcon; badge?: boolean; sound?: boolean }) {
-  const active = useUi((s) => s.screen === id)
+function RailButton({ id, icon: Icon, badge = false, sound = false, activeOverride }: { id: Screen; icon: LucideIcon; badge?: boolean; sound?: boolean; activeOverride?: boolean }) {
+  const selected = useUi((s) => s.screen === id)
+  const active = activeOverride ?? selected
   const setScreen = useUi((s) => s.setScreen)
   const disabled = useGame((s) => s.running && !GAME_SCREENS.has(id))
   const label = useT()(SCREEN_LABEL[id])
@@ -65,11 +68,22 @@ export function Rail() {
   const gameRunning = useGame((s) => s.running)
   const domRunning = useDom((s) => s.running)
   const browserSound = useBrowser((s) => s.tabs.some((tab) => tab.audible && !tab.muted))
+  const browserSelected = useUi((s) => s.screen === 'browser')
+  const eroContext = useBrowser((s) => {
+    const tab = s.tabs.find((candidate) => candidate.active)
+    return !!tab && (isEroScriptsUrl(tab.url) || !!tab.relatedTopic)
+  })
+  const eroSelected = browserSelected && eroContext
   const admin = useAccount((s) => isAdmin(s.status.me))
   return (
     <TooltipGroup as="nav" side="right" className="rail" aria-label={t('app.rail.screens')}>
       {ITEMS.map((item) => (
-        <RailButton key={item.id} {...item} badge={(item.id === 'player' && hasMedia) || (item.id === 'game' && gameRunning) || (item.id === 'dom' && domRunning)} sound={item.id === 'browser' && browserSound} />
+        <Fragment key={item.id}>
+          <RailButton {...item} activeOverride={item.id === 'browser' ? browserSelected && !eroContext : undefined} badge={(item.id === 'player' && hasMedia) || (item.id === 'game' && gameRunning) || (item.id === 'dom' && domRunning)} sound={item.id === 'browser' && browserSound} />
+          {item.id === 'dom' && <button type="button" className={cx('rail-btn', eroSelected && 'active')} aria-label="EroScripts" aria-current={eroSelected ? 'page' : undefined} disabled={gameRunning} onClick={() => {
+            void useBrowser.getState().openEroScripts().then(() => useUi.getState().setScreen('browser')).catch((error: unknown) => useDownloads.setState({ error: error instanceof Error ? error.message : String(error), managerOpen: true }))
+          }}><Plus size={18} strokeWidth={2} /></button>}
+        </Fragment>
       ))}
       <div className="spacer" />
       <UpdateButton />
