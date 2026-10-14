@@ -15,6 +15,7 @@ import { topicReport } from './topic'
 import { BrowserDownloads, type OrdinaryBrowserDownload } from './downloads'
 import { downloadContextForNavigation, relatedNavigation, reusableDownload, type DownloadOwner, type RelatedDownloadContext } from './download-context'
 import type { TransferRequest, TransferResult } from '../downloads/transport'
+import { nextZoom, zoomStep } from './zoom'
 
 export type Emit = <E extends IpcEvent>(event: E, payload: IpcEvents[E]) => void
 
@@ -474,7 +475,15 @@ export class BrowserTabs {
       if (input.key === 'F11' && input.type === 'keyDown' && !input.isAutoRepeat) {
         event.preventDefault()
         this.toggleFullscreen()
+        return
       }
+      const step = zoomStep(input)
+      if (step === null) return
+      event.preventDefault()
+      webContents.setZoomFactor(nextZoom(webContents.getZoomFactor(), step))
+    })
+    webContents.on('zoom-changed', (_event, direction) => {
+      webContents.setZoomFactor(nextZoom(webContents.getZoomFactor(), direction === 'in' ? 1 : -1))
     })
     webContents.on('did-fail-load', push)
     webContents.on('audio-state-changed', push)

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, crashReporter, dialog, nativeTheme, protocol, screen } from 'electron'
+import { app, BrowserWindow, crashReporter, dialog, Menu, nativeTheme, protocol, screen } from 'electron'
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { delimiter, join, resolve } from 'node:path'
 import { isMediaPath } from '@shared/ipc'
@@ -202,6 +202,13 @@ if (!app.requestSingleInstanceLock()) {
   nativeTheme.themeSource = 'dark'
   void app.whenReady().then(() => {
     if (!app.isPackaged) app.dock?.setIcon(iconPath)
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+      ...(process.platform === 'darwin' ? [{ role: 'appMenu' as const }] : []),
+      { role: 'fileMenu' },
+      { role: 'editMenu' },
+      { role: 'viewMenu', submenu: [{ role: 'reload' }, { role: 'forceReload' }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'togglefullscreen' }] },
+      { role: 'windowMenu' },
+    ]))
     const userData = app.getPath('userData')
     logEvent({ processType: 'main', reason: 'start', os: process.getSystemVersion(), arch: process.arch, packaged: app.isPackaged, userData })
     const store = new SettingsStore(join(userData, 'settings.json'))

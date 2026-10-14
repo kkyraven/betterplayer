@@ -1,5 +1,9 @@
 # Release notes
 
+## 1.2.1
+
+- Fix issue with zoom in browser
+
 ## 1.2.0
 
 - Add eroscripts download assistant
