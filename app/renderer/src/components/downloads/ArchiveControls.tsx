@@ -7,7 +7,7 @@ import { useT } from '@/state/i18n'
 import { extractionProgress, selectedIds, toggleKind, type ArchiveView } from './archiveView'
 import { formatDownloadBytes } from './downloadPresentation'
 
-export function ArchiveControls({ id, view, onBackToTopic, active = true }: { id: string; view: ArchiveView; onBackToTopic: () => void; active?: boolean }) {
+export function ArchiveControls({ id, view, onBackToTopic, active = true }: { id: string; view: ArchiveView; onBackToTopic?: () => void; active?: boolean }) {
   const t = useT()
   if (view.kind === 'password') return <ArchivePassword key={`${id}:${view.wrong}`} id={id} wrong={view.wrong} active={active} onBackToTopic={onBackToTopic} />
   if (view.kind === 'select') return <ArchiveSelection key={id} id={id} entries={view.entries} />
@@ -24,7 +24,7 @@ export function ArchiveControls({ id, view, onBackToTopic, active = true }: { id
   )
 }
 
-function ArchivePassword({ id, wrong, onBackToTopic, active }: { id: string; wrong: boolean; onBackToTopic: () => void; active: boolean }) {
+function ArchivePassword({ id, wrong, onBackToTopic, active }: { id: string; wrong: boolean; onBackToTopic?: () => void; active: boolean }) {
   const t = useT()
   const unlock = useDownloads((store) => store.unlock)
   const [password, setPassword] = useState('')
@@ -51,7 +51,7 @@ function ArchivePassword({ id, wrong, onBackToTopic, active }: { id: string; wro
         <Button type="submit" variant="primary" disabled={password.length === 0 || pending}>{t('downloads.unlock')}</Button>
       </div>
       {wrong && <p className="download-password-error" id={`archive-password-error-${id}`} role="alert">{t('settings.source.wrongPassword')}</p>}
-      <Button variant="ghost" className="download-password-back" onClick={onBackToTopic}><ArrowLeft />{t('eroscripts.backToTopic')}</Button>
+      {onBackToTopic && <Button variant="ghost" className="download-password-back" onClick={onBackToTopic}><ArrowLeft />{t('eroscripts.backToTopic')}</Button>}
     </form>
   )
 }

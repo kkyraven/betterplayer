@@ -1,5 +1,7 @@
 import { create } from 'zustand'
-import type { DownloadDestination, DownloadEnqueue, DownloadState } from '@shared/downloads'
+import type { DownloadBatch, DownloadDestination, DownloadEnqueue, DownloadState } from '@shared/downloads'
+import type { EroTopic } from '@shared/eroscripts'
+import { isTopicBatch } from '@/components/downloads/topicTab'
 import { invoke, on } from '@/ipc'
 
 const EMPTY: DownloadState = {
@@ -16,10 +18,12 @@ interface DownloadsStore {
   initialized: boolean
   error: string | null
   managerOpen: boolean
+  topicCard: Pick<EroTopic, 'tabId' | 'url'> | null
   destination: DownloadDestination | null
   defaultDestination: DownloadDestination | null
   init: () => () => void
   setManagerOpen: (open: boolean, trigger?: HTMLElement) => void
+  setTopicCard: (topic: Pick<EroTopic, 'tabId' | 'url'> | null) => void
   setDestination: (destination: DownloadDestination) => Promise<void>
   setDefault: (destination: DownloadDestination | null) => Promise<void>
   enqueue: (request: DownloadEnqueue) => Promise<string | null>
@@ -36,21 +40,22 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function archiveAttentionIds(state: DownloadState): Set<string> {
-  return new Set(state.batches.flatMap((batch) => batch.files.flatMap((file) =>
+function archiveAttention(state: DownloadState): Map<string, DownloadBatch> {
+  return new Map(state.batches.flatMap((batch) => batch.files.flatMap((file) =>
     file.phase === 'waiting' && file.archive && ['password-required', 'wrong-password', 'selection-required'].includes(file.archive.state)
-      ? [`${file.id}:${file.archive.state}`] : [])))
+      ? [[`${file.id}:${file.archive.state}`, batch] as const] : [])))
 }
 
 export const useDownloads = create<DownloadsStore>()((set, get) => ({
-  state: EMPTY, initialized: false, error: null, managerOpen: false, destination: null, defaultDestination: null,
+  state: EMPTY, initialized: false, error: null, managerOpen: false, topicCard: null, destination: null, defaultDestination: null,
   init: () => {
     let disposed = false
     let pushed = false
     const requestedDefaultRevision = defaultRevision
     const receive = (state: DownloadState) => set((previous) => {
-      const existing = archiveAttentionIds(previous.state)
-      const needsInput = [...archiveAttentionIds(state)].some((id) => !existing.has(id))
+      const existing = archiveAttention(previous.state)
+      const card = previous.topicCard
+      const needsInput = [...archiveAttention(state)].some(([id, batch]) => !existing.has(id) && !(card && isTopicBatch(card, batch)))
       return { state, initialized: true, managerOpen: previous.managerOpen || needsInput }
     })
     const off = on('downloads:state', (state) => {
@@ -74,6 +79,7 @@ export const useDownloads = create<DownloadsStore>()((set, get) => ({
       queueMicrotask(() => { if (target?.isConnected) target.focus() })
     }
   },
+  setTopicCard: (topicCard) => set({ topicCard }),
   setDestination: async (destination) => {
     set({ destination })
     if (get().defaultDestination === null) await get().setDefault(destination)

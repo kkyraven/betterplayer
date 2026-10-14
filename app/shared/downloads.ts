@@ -49,6 +49,7 @@ export interface DownloadFile {
   canContinue: boolean
   mediaId: number | null
   canRetry?: boolean
+  canOpenSource?: boolean
   archive?: DownloadArchive
 }
 export interface DownloadBatch {

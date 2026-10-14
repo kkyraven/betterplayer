@@ -45,3 +45,29 @@ export function orderedBatches(batches: DownloadBatch[]): DownloadBatch[] {
 export function sessionTransferProgress(state: DownloadState): number | null {
   return state.batches.some((batch) => batch.files.some((file) => file.phase === 'downloading')) ? state.session.progress : null
 }
+
+export interface FilesSummary {
+  tone: 'idle' | 'active' | 'attention' | 'done'
+  lead: DownloadFile | null
+  receivedBytes: number
+  totalBytes: number | null
+  progress: number | null
+}
+
+export function summarizeFiles(files: readonly DownloadFile[]): FilesSummary {
+  const live = files.filter((file) => file.phase !== 'cancelled')
+  const attention = live.find((file) => file.phase === 'waiting' || file.phase === 'failed')
+  const unfinished = live.filter((file) => file.phase !== 'complete')
+  const receivedBytes = live.reduce((sum, file) => sum + file.receivedBytes, 0)
+  const known = live.every((file) => file.phase === 'complete' || file.totalBytes !== null)
+  const totalBytes = known ? live.reduce((sum, file) => sum + (file.totalBytes ?? file.receivedBytes), 0) : null
+  const transferring = live.some((file) => file.phase === 'downloading')
+  const tone = !live.length ? 'idle' : attention ? 'attention' : unfinished.length ? 'active' : 'done'
+  return {
+    tone,
+    lead: attention ?? unfinished[0] ?? live[0] ?? null,
+    receivedBytes,
+    totalBytes,
+    progress: transferring && totalBytes ? Math.min(1, receivedBytes / totalBytes) : null,
+  }
+}

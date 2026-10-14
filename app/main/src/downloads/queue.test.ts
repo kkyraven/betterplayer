@@ -5,7 +5,7 @@ import { createServer } from 'node:http'
 import { EventEmitter } from 'node:events'
 import type { DownloadItem } from 'electron'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { DownloadQueue } from './index'
+import { DownloadQueue, type DownloadQueueOptions } from './index'
 import type { DownloadCandidate, DownloadTransport, TransferRequest, TrustedDownloadSelection } from './transport'
 import type { SecretCodec } from './journal'
 import { checkDestination, safeFileName } from './files'
@@ -21,10 +21,10 @@ afterEach(async () => { for (const item of resources.splice(0)) { await item.que
 function candidate(id: string, kind: DownloadCandidate['kind'] = 'script', host = 'fixture.example', mirrorKey: string | null = null): DownloadCandidate {
   return { id, kind, host, mirrorKey, url: `https://${host}/${id}?signature=private-${id}`, fileName: kind === 'video' ? 'scene.mp4' : 'scene.alternative.roll.funscript', label: id, postNumber: 1, controlId: null }
 }
-async function setup(transport: DownloadTransport, importPublished = vi.fn(async () => ({ mediaId: 42 })), privateCodec = codec) {
+async function setup(transport: DownloadTransport, importPublished = vi.fn(async () => ({ mediaId: 42 })), privateCodec = codec, openOrdinarySource?: DownloadQueueOptions['openOrdinarySource']) {
   const directory = await mkdtemp(join(tmpdir(), 'bp-download-test-'))
   const root = { id: 1, kind: 'folder', path: directory, name: 'Fixtures' }
-  const options = { journalDir: join(directory, '.journal'), getRoot: () => root, transport, importPublished, onState: vi.fn(), codec: privateCodec }
+  const options = { journalDir: join(directory, '.journal'), getRoot: () => root, transport, importPublished, onState: vi.fn(), codec: privateCodec, openOrdinarySource }
   const queue = await DownloadQueue.open(options)
   resources.push({ directory, queue })
   const selection = (sources: DownloadCandidate[], availableSources = sources): TrustedDownloadSelection => ({ topic: { tabId: 1, generation: 2, title: 'Fixture topic', url: 'https://discuss.eroscripts.com/t/fixture/1?token=secret' }, sources, availableSources, destination: { rootId: 1, relativePath: '' } })
@@ -58,6 +58,51 @@ describe('durable download queue', () => {
     expect(calls).toEqual(['preferred', 'mirror'])
     expect(context.queue.state().session).toMatchObject({ completed: 1, total: 1 })
     expect(context.queue.state().batches[0]?.files[0]?.attempts).toHaveLength(2)
+  })
+
+  it.each(['continue', 'retry'] as const)('clears a superseded login wait on %s so the matching viewer fallback can complete', async command => {
+    const requests: TransferRequest[] = []
+    let removed = false
+    const context = await setup(async request => {
+      requests.push(request)
+      if (request.candidate.id === 'preferred') return removed
+        ? { status: 'failed', reason: 'The file was removed', scope: 'remote', unavailable: true }
+        : { status: 'waiting', reason: 'Sign in to download', tabId: 9 }
+      return request.directUrl ? { status: 'failed', reason: 'HTTP 403 hotlink_detected', scope: 'remote' } : complete(request)
+    })
+    const preferred = candidate('preferred', 'script', 'one.example', 'mirror:1')
+    const mirror = { ...candidate('mirror', 'script', 'pixeldrain.com', 'mirror:1'), url: 'https://pixeldrain.com/u/Synthetic' }
+    const id = await context.queue.enqueue(context.selection([preferred], [preferred, mirror]))
+    await settled(context.queue)
+    expect(context.queue.state().batches[0]?.files[0]).toMatchObject({ phase: 'waiting', sourceId: 'preferred', reason: 'Sign in to download', canContinue: true })
+    expect(requests).toHaveLength(2)
+
+    removed = true
+    await context.queue[command](id)
+    await expect.poll(() => context.queue.state().session.completed).toBe(1)
+    expect(requests.map(request => request.candidate.id)).toEqual(['preferred', 'mirror', 'preferred', 'mirror', 'mirror'])
+    expect(requests.at(-1)?.directUrl).toBeNull()
+    expect(new Set(requests.map(request => request.fileId)).size).toBe(1)
+    expect(context.queue.state().batches[0]?.files[0]?.attempts.map(attempt => attempt.outcome)).toEqual(['waiting', 'failed', 'failed', 'failed', 'complete'])
+    expect(context.queue.state().session).toMatchObject({ completed: 1, total: 1 })
+  })
+
+  it('fails a removed source and its dead mirror after Continue instead of restoring the old login wait', async () => {
+    let removed = false
+    const context = await setup(async request => request.candidate.id === 'preferred' && !removed
+      ? { status: 'waiting', reason: 'Sign in to download', tabId: 9 }
+      : { status: 'failed', reason: 'The file was removed', scope: 'remote', unavailable: true })
+    const preferred = candidate('preferred', 'script', 'one.example', 'mirror:1')
+    const mirror = candidate('mirror', 'script', 'two.example', 'mirror:1')
+    const id = await context.queue.enqueue(context.selection([preferred], [preferred, mirror]))
+    await settled(context.queue)
+    expect(context.queue.state().batches[0]?.files[0]).toMatchObject({ phase: 'waiting', sourceId: 'preferred', canContinue: true })
+
+    removed = true
+    await context.queue.continue(id)
+    await settled(context.queue)
+    expect(context.queue.state().batches[0]?.files[0]).toMatchObject({ phase: 'failed', reason: 'The file was removed', canContinue: false })
+    expect(context.queue.state().batches[0]?.files[0]?.attempts.map(attempt => attempt.outcome)).toEqual(['waiting', 'failed', 'failed', 'failed'])
   })
 
   it('retains a staged sibling on partial failure, clear preserves recovery, retry downloads only missing work', async () => {
@@ -220,6 +265,52 @@ describe('durable download queue', () => {
     expect(await readFile(join(context.directory, 'SCENE.MP4'), 'utf8')).toBe('existing')
   })
 
+  it.each([false, true])('keeps the other scene script beside one selected WebM with a video collision of %s', async collision => {
+    const webm = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0, 0, 0, 0])
+    const context = await setup(async request => {
+      const bytes = request.candidate.kind === 'video' ? webm : SCRIPT
+      await writeFile(request.stagingPath, bytes)
+      return { status: 'complete', fileName: request.candidate.fileName!, totalBytes: bytes.length }
+    })
+    if (collision) await writeFile(join(context.directory, '1641647055994.webm'), Buffer.from('existing'))
+    await context.queue.enqueue(context.selection([
+      { ...candidate('video', 'video'), fileName: '1641647055994.webm' },
+      { ...candidate('paired'), fileName: '1641647055994.funscript' },
+      { ...candidate('other'), fileName: '1645668234609.funscript' },
+    ]))
+    await expect.poll(() => context.queue.state().session.completed).toBe(3)
+    const stem = `1641647055994${collision ? ' (2)' : ''}`
+    expect(await readFile(join(context.directory, `${stem}.webm`))).toEqual(webm)
+    expect(await readFile(join(context.directory, `${stem}.funscript`))).toEqual(SCRIPT)
+    expect(await readFile(join(context.directory, '1645668234609.funscript'))).toEqual(SCRIPT)
+    expect(context.importPublished).toHaveBeenCalledWith(expect.objectContaining({ files: expect.arrayContaining([
+      expect.objectContaining({ kind: 'video', name: `${stem}.webm` }),
+      expect.objectContaining({ kind: 'script', name: `${stem}.funscript` }),
+      expect.objectContaining({ kind: 'script', name: '1645668234609.funscript' }),
+    ]) }))
+  })
+
+  it('coordinates matching compound axes while leaving an unrelated script name unchanged', async () => {
+    const context = await setup(complete)
+    await writeFile(join(context.directory, 'scene.mp4'), Buffer.from('existing'))
+    await context.queue.enqueue(context.selection([
+      candidate('video', 'video'),
+      { ...candidate('stroke'), fileName: 'scene.funscript' },
+      candidate('roll'),
+      { ...candidate('other'), fileName: 'other.funscript' },
+    ]))
+    await expect.poll(() => context.queue.state().session.completed).toBe(4)
+    expect(await readdir(context.directory)).toEqual(expect.arrayContaining(['scene (2).mp4', 'scene (2).funscript', 'scene (2).alternative.roll.funscript', 'other.funscript']))
+  })
+
+  it('retains explicit pairing of one video with one differently named script', async () => {
+    const context = await setup(complete)
+    await context.queue.enqueue(context.selection([candidate('video', 'video'), { ...candidate('script'), fileName: 'original.funscript' }]))
+    await expect.poll(() => context.queue.state().session.completed).toBe(2)
+    expect(await readFile(join(context.directory, 'scene.funscript'))).toEqual(SCRIPT)
+    await expect(readFile(join(context.directory, 'original.funscript'))).rejects.toThrow()
+  })
+
   it('bounds concurrency and does not manufacture aggregate byte progress for unknown sizes', async () => {
     const releases: (() => void)[] = []
     let count = 0
@@ -259,14 +350,84 @@ describe('durable download queue', () => {
   })
 
   it('keeps private URLs out of disk when secure storage is unavailable', async () => {
-    const context = await setup(async () => ({ status: 'waiting', reason: 'Sign in' }), vi.fn(async () => ({ mediaId: 42 })), { seal: () => null, unseal: () => null })
+    const openOrdinarySource = vi.fn()
+    const context = await setup(async () => ({ status: 'waiting', reason: 'Sign in' }), vi.fn(async () => ({ mediaId: 42 })), { seal: () => null, unseal: () => null }, openOrdinarySource)
     await context.queue.enqueue(context.selection([candidate('secret')]))
     await settled(context.queue)
     expect(await readFile(join(context.directory, '.journal', 'queue.json'), 'utf8')).not.toContain('signature=private')
     await context.queue.destroy()
     const recovered = await DownloadQueue.open(context.options)
     resources.push({ directory: context.directory, queue: recovered })
-    expect(recovered.state().batches[0]?.files[0]).toMatchObject({ phase: 'waiting', canContinue: false, reason: 'Source details unavailable after restart' })
+    const file = recovered.state().batches[0]?.files[0]
+    expect(file).toMatchObject({ phase: 'waiting', canContinue: false, canOpenSource: false, reason: 'Source details unavailable after restart' })
+    await expect(recovered.openSource(file!.id)).rejects.toThrow('Browser download source is unavailable')
+    expect(openOrdinarySource).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { host: 'mega.nz', url: 'https://mega.nz/file/SANITIZED#Exact_Key%2FWith%2BBytes' },
+    { host: 'files.example', url: 'https://files.example/scene.mp4?signature=%2fExact%2B&token=value&token=second#kept' },
+  ])('opens the original $host source without retrying its download', async ({ host, url }) => {
+    const transport = vi.fn(async () => ({ status: 'waiting' as const, reason: 'Sign in' }))
+    const openOrdinarySource = vi.fn()
+    const context = await setup(transport, vi.fn(async () => ({ mediaId: 42 })), codec, openOrdinarySource)
+    await context.queue.enqueue(context.selection([{ ...candidate('source', 'video', host), url }]))
+    await settled(context.queue)
+    const before = context.queue.state()
+    const file = before.batches[0]!.files[0]!
+    expect(file.canOpenSource).toBe(true)
+    await context.queue.openSource(file.id)
+    expect(openOrdinarySource).toHaveBeenCalledExactlyOnceWith(url)
+    expect(transport).toHaveBeenCalledOnce()
+    expect(context.queue.state()).toEqual(before)
+  })
+
+  it('rejects unknown file and batch IDs when opening a source', async () => {
+    const openOrdinarySource = vi.fn()
+    const context = await setup(async () => ({ status: 'waiting', reason: 'Sign in' }), vi.fn(async () => ({ mediaId: 42 })), codec, openOrdinarySource)
+    const batchId = await context.queue.enqueue(context.selection([candidate('source')]))
+    await settled(context.queue)
+    const before = context.queue.state()
+    await expect(context.queue.openSource('missing-file')).rejects.toThrow('Browser download source is unavailable')
+    await expect(context.queue.openSource(batchId)).rejects.toThrow('Browser download source is unavailable')
+    expect(openOrdinarySource).not.toHaveBeenCalled()
+    expect(context.queue.state()).toEqual(before)
+  })
+
+  it('disables source opening when no browser opener is available', async () => {
+    const context = await setup(async () => ({ status: 'waiting', reason: 'Sign in' }))
+    await context.queue.enqueue(context.selection([candidate('source')]))
+    await settled(context.queue)
+    const file = context.queue.state().batches[0]!.files[0]!
+    expect(file.canOpenSource).toBe(false)
+    await expect(context.queue.openSource(file.id)).rejects.toThrow('Browser download source is unavailable')
+  })
+
+  it.each([
+    { original: 'Example: ride.mp4', saved: 'Example- ride.mp4' },
+    { original: 'PRN.mp4', saved: '!PRN.mp4' },
+  ])('accepts the original MEGA name $original saved as $saved', async ({ original, saved }) => {
+    const context = await setup(async request => {
+      await writeFile(request.stagingPath, VIDEO)
+      return { status: 'complete', fileName: saved, totalBytes: VIDEO.length }
+    })
+    const source = { ...candidate('source', 'video', 'mega.nz'), url: 'https://mega.nz/file/SANITIZED#Exact_Key', fileName: original }
+    await context.queue.enqueue(context.selection([source]))
+    await expect.poll(() => context.queue.state().session.completed).toBe(1)
+    expect(await readFile(join(context.directory, saved))).toEqual(VIDEO)
+    expect(context.queue.state().batches[0]?.files[0]).toMatchObject({ fileName: saved, publishedName: saved, phase: 'complete' })
+  })
+
+  it('rejects a MEGA-style filename replacement returned by another host', async () => {
+    const context = await setup(async request => {
+      await writeFile(request.stagingPath, VIDEO)
+      return { status: 'complete', fileName: 'Example- ride.mp4', totalBytes: VIDEO.length }
+    })
+    await context.queue.enqueue(context.selection([{ ...candidate('source', 'video'), fileName: 'Example: ride.mp4' }]))
+    await settled(context.queue)
+    expect(context.queue.state().batches[0]?.files[0]).toMatchObject({ phase: 'failed', reason: 'The source returned a different file' })
+    expect(context.importPublished).not.toHaveBeenCalled()
+    await expect(readFile(join(context.directory, 'Example- ride.mp4'))).rejects.toThrow()
   })
 
   it('refuses recovery metadata that would escape its staging directory', async () => {
@@ -291,6 +452,18 @@ describe('durable download queue', () => {
     expect(requests[0]?.candidate.url).toBe(source.url)
     expect(requests[0]?.topic.url).toBe('https://discuss.eroscripts.com/t/fixture/1?token=secret')
     expect(await readFile(join(context.directory, '.journal', 'queue.json'), 'utf8')).not.toContain('token=secret')
+  })
+
+  it('passes only selected script source names as video pairing hints', async () => {
+    const requests: TransferRequest[] = []
+    const context = await setup(async request => { requests.push(request); return { status: 'waiting', reason: 'Fixture' } })
+    const video = { ...candidate('video', 'video', 'gofile.io'), url: 'https://gofile.io/d/folder', fileName: null }
+    const selected = { ...candidate('selected'), fileName: '1641647055994.funscript' }
+    const unselected = { ...candidate('unselected'), fileName: '1645668234609.funscript' }
+    await context.queue.enqueue(context.selection([video, selected], [video, selected, unselected]))
+    await settled(context.queue)
+    expect(requests.find(request => request.candidate.id === video.id)?.scriptFileNames).toEqual(['1641647055994.funscript'])
+    expect(await readFile(join(context.directory, '.journal', 'queue.json'), 'utf8')).not.toContain('scriptFileNames')
   })
 
   it('does not try another host for a local failure', async () => {

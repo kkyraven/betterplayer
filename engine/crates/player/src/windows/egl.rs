@@ -4,6 +4,9 @@ use std::ptr;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use libloading::{Library, Symbol};
+use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+use windows::Win32::Graphics::Direct3D11::{D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION};
+use windows::core::Interface;
 
 type EGLDisplay = *mut c_void;
 type EGLConfig = *mut c_void;
@@ -25,12 +28,14 @@ const EGL_ALPHA_SIZE: EGLint = 0x3021;
 const EGL_WIDTH: EGLint = 0x3057;
 const EGL_HEIGHT: EGLint = 0x3056;
 const EGL_CONTEXT_CLIENT_VERSION: EGLint = 0x3098;
-const EGL_PLATFORM_ANGLE_ANGLE: u32 = 0x3202;
-const EGL_PLATFORM_ANGLE_TYPE_ANGLE: EGLint = 0x3203;
-const EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE: EGLint = 0x3208;
+const EGL_PLATFORM_DEVICE_EXT: u32 = 0x313F;
+const EGL_D3D11_DEVICE_ANGLE: EGLint = 0x33A1;
 
 type GetPlatformDisplayFn = unsafe extern "system" fn(u32, *mut c_void, *const EGLint) -> EGLDisplay;
 type InitializeFn = unsafe extern "system" fn(EGLDisplay, *mut EGLint, *mut EGLint) -> EGLBoolean;
+type TerminateFn = unsafe extern "system" fn(EGLDisplay) -> EGLBoolean;
+type CreateDeviceFn = unsafe extern "system" fn(EGLint, *mut c_void, *const isize) -> *mut c_void;
+type ReleaseDeviceFn = unsafe extern "system" fn(*mut c_void) -> EGLBoolean;
 type ChooseConfigFn = unsafe extern "system" fn(EGLDisplay, *const EGLint, *mut EGLConfig, EGLint, *mut EGLint) -> EGLBoolean;
 type CreatePbufferFn = unsafe extern "system" fn(EGLDisplay, EGLConfig, *const EGLint) -> EGLSurface;
 type CreateContextFn = unsafe extern "system" fn(EGLDisplay, EGLConfig, EGLContext, *const EGLint) -> EGLContext;
@@ -47,6 +52,7 @@ const EGL_VERSION: EGLint = 0x3054;
 
 struct Egl {
     initialize: InitializeFn,
+    terminate: TerminateFn,
     choose_config: ChooseConfigFn,
     create_pbuffer: CreatePbufferFn,
     create_context: CreateContextFn,
@@ -73,6 +79,7 @@ impl Egl {
         unsafe {
             Ok(Egl {
                 initialize: sym(&lib, b"eglInitialize\0")?,
+                terminate: sym(&lib, b"eglTerminate\0")?,
                 choose_config: sym(&lib, b"eglChooseConfig\0")?,
                 create_pbuffer: sym(&lib, b"eglCreatePbufferSurface\0")?,
                 create_context: sym(&lib, b"eglCreateContext\0")?,
@@ -102,6 +109,9 @@ pub struct Context {
     display: EGLDisplay,
     surface: EGLSurface,
     context: EGLContext,
+    device: *mut c_void,
+    release_device: ReleaseDeviceFn,
+    _d3d: ID3D11Device,
 }
 
 static GPU: Mutex<()> = Mutex::new(());
@@ -168,6 +178,11 @@ impl Context {
         if !client_exts.split(' ').any(|e| e == "EGL_ANGLE_platform_angle_d3d") {
             return Err(format!("libEGL.dll is not ANGLE with a D3D11 backend (client extensions: {client_exts:?})"));
         }
+        for required in ["EGL_ANGLE_device_creation", "EGL_EXT_platform_device"] {
+            if !client_exts.split_whitespace().any(|e| e == required) {
+                return Err(format!("ANGLE missing {required}; reinstall the bundled ANGLE DLLs"));
+            }
+        }
         let get_platform_display: GetPlatformDisplayFn = unsafe {
             let p = (egl.get_proc_address)(c"eglGetPlatformDisplayEXT".as_ptr());
             if p.is_null() {
@@ -175,11 +190,30 @@ impl Context {
             }
             std::mem::transmute(p)
         };
-        let display_attribs = [EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE, EGL_NONE];
-        let display = unsafe { get_platform_display(EGL_PLATFORM_ANGLE_ANGLE, ptr::null_mut(), display_attribs.as_ptr()) };
+        let (create_device, release_device): (CreateDeviceFn, ReleaseDeviceFn) = unsafe {
+            let create = (egl.get_proc_address)(c"eglCreateDeviceANGLE".as_ptr());
+            let release = (egl.get_proc_address)(c"eglReleaseDeviceANGLE".as_ptr());
+            if create.is_null() || release.is_null() {
+                return Err("ANGLE device creation entry points unavailable".into());
+            }
+            (std::mem::transmute(create), std::mem::transmute(release))
+        };
+        let mut d3d = None;
+        unsafe {
+            D3D11CreateDevice(None, D3D_DRIVER_TYPE_HARDWARE, Default::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+                None, D3D11_SDK_VERSION, Some(&mut d3d), None, None)
+        }.map_err(|e| format!("D3D11CreateDevice: {e}"))?;
+        let d3d = d3d.ok_or("D3D11CreateDevice returned no device")?;
+        let device = unsafe { create_device(EGL_D3D11_DEVICE_ANGLE, d3d.as_raw(), ptr::null()) };
+        if device.is_null() { return Err(egl.err("eglCreateDeviceANGLE")); }
+        let mut c = Context { egl, display: ptr::null_mut(), surface: ptr::null_mut(),
+            context: ptr::null_mut(), device, release_device, _d3d: d3d };
+        let display = unsafe { get_platform_display(EGL_PLATFORM_DEVICE_EXT, device, ptr::null()) };
         if display.is_null() {
             return Err(egl.err("eglGetPlatformDisplayEXT"));
         }
+        c.display = display;
         let (mut major, mut minor) = (0, 0);
         if unsafe { (egl.initialize)(display, &mut major, &mut minor) } != EGL_TRUE {
             return Err(egl.err("eglInitialize"));
@@ -209,14 +243,13 @@ impl Context {
         if surface.is_null() {
             return Err(egl.err("eglCreatePbufferSurface"));
         }
+        c.surface = surface;
         let context_attribs = [EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE];
         let context = unsafe { (egl.create_context)(display, config, ptr::null_mut(), context_attribs.as_ptr()) };
         if context.is_null() {
-            let e = egl.err("eglCreateContext");
-            unsafe { (egl.destroy_surface)(display, surface) };
-            return Err(e);
+            return Err(egl.err("eglCreateContext"));
         }
-        let c = Context { egl, display, surface, context };
+        c.context = context;
         c.make_current()?;
         Ok(c)
     }
@@ -244,9 +277,15 @@ impl Context {
 impl Drop for Context {
     fn drop(&mut self) {
         unsafe {
-            (self.egl.make_current)(self.display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
-            (self.egl.destroy_context)(self.display, self.context);
-            (self.egl.destroy_surface)(self.display, self.surface);
+            if !self.display.is_null() {
+                if !self.context.is_null() {
+                    (self.egl.make_current)(self.display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
+                    (self.egl.destroy_context)(self.display, self.context);
+                }
+                if !self.surface.is_null() { (self.egl.destroy_surface)(self.display, self.surface); }
+                (self.egl.terminate)(self.display);
+            }
+            (self.release_device)(self.device);
         }
     }
 }

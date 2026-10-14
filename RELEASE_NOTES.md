@@ -1,5 +1,9 @@
 # Release notes
 
+## 1.2.0
+
+- Add eroscripts download assistant
+
 ## 1.1.0
 
 - Improved AI dom feature

@@ -26,6 +26,7 @@ export interface TransferRequest {
   batchId: string
   topic: { tabId: number; generation: number; url: string }
   candidate: DownloadCandidate
+  scriptFileNames?: readonly string[]
   directUrl: string | null
   stagingPath: string
   signal: AbortSignal

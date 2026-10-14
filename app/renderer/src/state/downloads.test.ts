@@ -25,7 +25,7 @@ let dispose: (() => void) | undefined
 beforeEach(() => {
   ipc.invoke.mockReset().mockResolvedValue(undefined)
   ipc.listeners.clear()
-  useDownloads.setState({ state: empty, initialized: false, error: null, destination: null, defaultDestination: null, managerOpen: false })
+  useDownloads.setState({ state: empty, initialized: false, error: null, destination: null, defaultDestination: null, managerOpen: false, topicCard: null })
 })
 afterEach(() => { dispose?.(); dispose = undefined })
 
@@ -105,6 +105,18 @@ describe('downloads renderer state', () => {
     cancelled.batches[0]!.files[0]!.phase = 'cancelled'
     push(cancelled)
     expect(useDownloads.getState().managerOpen).toBe(false)
+  })
+
+  it('leaves archive prompts to the topic card that shows them', () => {
+    ipc.invoke.mockImplementation((channel) => Promise.resolve(channel === 'downloads:state' ? empty : null))
+    dispose = useDownloads.getState().init()
+    const push = ipc.listeners.get('downloads:state')!
+    useDownloads.getState().setTopicCard({ tabId: 1, url: 'https://discuss.eroscripts.com/t/grid/123/4' })
+    push(archiveAttention('password-required'))
+    expect(useDownloads.getState().managerOpen).toBe(false)
+    useDownloads.getState().setTopicCard({ tabId: 2, url: 'https://discuss.eroscripts.com/t/grid/123' })
+    push(archiveAttention('wrong-password'))
+    expect(useDownloads.getState().managerOpen).toBe(true)
   })
 
   it('sends literal archive passwords without storing them and leaves a rejected request recoverable', async () => {

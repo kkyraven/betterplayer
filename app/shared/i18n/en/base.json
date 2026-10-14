@@ -2499,7 +2499,7 @@
   "update.status.upToDate": "Up to date",
   "update.to": "Update to {version}",
   "upscaler.apple": "Apple AI",
-  "upscaler.dlss": "DLSS 5",
+  "upscaler.dlss": "DLSS 5 (Experimental)",
   "upscaler.fsr": "FSR 1.0",
   "upscaler.off": "Off",
   "upscaler.rtx": "RTX Video",
@@ -2914,5 +2914,11 @@
   "downloads.changeFolder": "Change folder",
   "downloads.fileCount": "{count} files",
   "downloads.oneFile": "1 file",
-  "eroscripts.noVideo": "No video"
+  "eroscripts.noVideo": "No video",
+  "eroscripts.change": "Change",
+  "eroscripts.scriptCount": "{count} scripts",
+  "eroscripts.oneScript": "1 script",
+  "eroscripts.mirrors": "{host} +{count}",
+  "downloads.via": "via {host}",
+  "downloads.other": "Other downloads"
 }

@@ -211,6 +211,7 @@ export interface IpcContract {
   'downloads:retry': (id: string) => void
   'downloads:cancel': (id: string) => void
   'downloads:continue': (id: string) => void
+  'downloads:openSource': (id: string) => void
   'downloads:clear': () => void
   'downloads:cancelAll': () => void
   'downloads:videoOnly': (id: string) => void

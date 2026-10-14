@@ -25,7 +25,7 @@ import { DownloadButton } from '@/components/downloads/DownloadButton'
 import { DownloadManager } from '@/components/downloads/DownloadManager'
 import { isEroScriptsUrl } from '@shared/eroscripts'
 import { EroScriptsSearch } from './EroScriptsSearch'
-import { DownloadsDock } from '@/components/downloads/DownloadsDock'
+import { TopicCard } from './TopicCard'
 import './browser.css'
 
 type Overlay = `site:${string}` | 'adblock' | 'faptap'
@@ -155,7 +155,8 @@ export function BrowserScreen() {
         <div ref={page} className="bpage">
           {startPage ? <StartPage key={active?.id} /> : preview && overlay !== null ? <img className="bpreview" src={preview} alt="" /> : null}
         </div>
-        {topic && topic.sources.length > 0 ? <DownloadsDock topic={topic} related={active?.id !== topic.tabId} /> : managerOpen && <DownloadManager />}
+        {topic && topic.sources.length > 0 && <TopicCard key={`${topic.tabId}-${topic.generation}`} topic={topic} related={active?.id !== topic.tabId} hidden={managerOpen} />}
+        {managerOpen && <DownloadManager />}
       </div>
       <FaptapDialog open={overlay === 'faptap'} onClose={closeFaptap} />
     </div>

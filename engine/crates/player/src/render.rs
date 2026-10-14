@@ -56,6 +56,17 @@ impl ResizeReply {
 const POLL: Duration = Duration::from_micros(500);
 const WAIT_NS: u64 = 200_000_000;
 
+fn wait_for_gpu(mut poll: impl FnMut() -> u32, timeout: Duration) -> u32 {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let result = poll();
+        if result != gl::TIMEOUT_EXPIRED { return result; }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { return result; }
+        thread::sleep(POLL.min(remaining));
+    }
+}
+
 unsafe extern "C" fn on_update(ctx: *mut c_void) {
     let tx = unsafe { &*(ctx as *const Sender<Msg>) };
     let _ = tx.send(Msg::Update);
@@ -213,8 +224,8 @@ impl Target {
         while let Some(&f) = self.inflight.front() {
             let block = wait && !waited;
             waited = true;
-            let (flags, timeout) = if block { (gl::SYNC_FLUSH_COMMANDS_BIT, WAIT_NS) } else { (0, 0) };
-            let r = unsafe { gl::ClientWaitSync(f.fence, flags, timeout) };
+            let timeout = if block { Duration::from_nanos(WAIT_NS) } else { Duration::ZERO };
+            let r = wait_for_gpu(|| unsafe { gl::ClientWaitSync(f.fence, 0, 0) }, timeout);
             let done = r == gl::ALREADY_SIGNALED || r == gl::CONDITION_SATISFIED;
             if r == gl::TIMEOUT_EXPIRED && !block && f.issued.elapsed() < Duration::from_nanos(WAIT_NS) {
                 break;
@@ -659,6 +670,31 @@ fn ms(d: Duration) -> f32 {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn early_gpu_timeouts_do_not_discard_a_pending_copy() {
+        let mut calls = 0;
+        let result = wait_for_gpu(|| {
+            calls += 1;
+            if calls < 3 { gl::TIMEOUT_EXPIRED } else { gl::CONDITION_SATISFIED }
+        }, Duration::from_secs(1));
+        assert_eq!(result, gl::CONDITION_SATISFIED);
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn gpu_poll_is_nonblocking_and_failed_waits_return_immediately() {
+        for expected in [gl::TIMEOUT_EXPIRED, gl::WAIT_FAILED, gl::ALREADY_SIGNALED] {
+            let mut calls = 0;
+            let timeout = if expected == gl::TIMEOUT_EXPIRED { Duration::ZERO } else { Duration::from_secs(1) };
+            assert_eq!(wait_for_gpu(|| { calls += 1; expected }, timeout), expected);
+            assert_eq!(calls, 1);
+        }
+        let start = Instant::now();
+        let timeout = Duration::from_millis(3);
+        assert_eq!(wait_for_gpu(|| gl::TIMEOUT_EXPIRED, timeout), gl::TIMEOUT_EXPIRED);
+        assert!(start.elapsed() >= timeout);
+    }
 
     #[test]
     fn timed_out_resize_never_attaches_released_buffers() {

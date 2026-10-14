@@ -1,5 +1,5 @@
 import { ipcRenderer } from 'electron'
-import { ERO_CHANNELS, MAX_TOPIC_SOURCES, explicitMirrorKind, isEroTopicUrl, sourceId, sourceKind, sourceUrl, type EroSource, type EroTopicReport } from '@shared/eroscripts'
+import { ERO_CHANNELS, MAX_TOPIC_SOURCES, explicitMirrorKind, isEroTopicUrl, sectionSourceKind, sourceId, sourceKind, sourceUrl, type EroSource, type EroTopicReport } from '@shared/eroscripts'
 import { archivePasswordsForPost } from './archive-passwords'
 
 export function observeEroScripts() {
@@ -23,7 +23,7 @@ export function observeEroScripts() {
     if (generation < 0 || location.href !== pageUrl || !isEroTopicUrl(pageUrl)) return
     controls.clear()
     const sources: EroSource[] = []
-    const seen = new Set<string>()
+    const seen = new Map<string, EroSource>()
     const sourceElements = new Map<HTMLAnchorElement, EroSource>()
     for (const cooked of Array.from(document.querySelectorAll('.topic-post .cooked, article .cooked, .crawler-post > .post[itemprop="text"]')).slice(0, 200)) {
       const post = cooked.closest('article, .topic-post, .crawler-post')
@@ -34,6 +34,7 @@ export function observeEroScripts() {
       if (!Number.isSafeInteger(postNumber) || postNumber < 1) continue
       for (const link of Array.from(cooked.querySelectorAll<HTMLAnchorElement>('a[href]')).slice(0, 500)) {
         if (sources.length >= MAX_TOPIC_SOURCES) break
+        if (link.matches('.anchor') || link.getAttribute('href')?.startsWith('#')) continue
         if (link.matches('.funscript-link-container:not(.funscript-link-merged)')) continue
         if (link.closest('.quote, aside.quote, blockquote, .onebox .onebox-avatar, .lightbox, .advertisement, [data-ad-slot]')) continue
         const merged = link.matches('a.funscript-link-container.funscript-link-merged[download]')
@@ -60,16 +61,34 @@ export function observeEroScripts() {
         for (const candidate of [download, label, pathName]) {
           if (sourceKind(candidate) !== 'unknown' && !/[/\\]/.test(candidate) && candidate.length <= 256) { fileName = candidate; break }
         }
-        const kind = merged ? 'script' : sourceKind(fileName ?? pathName)
+        let kind = merged ? 'script' : sourceKind(fileName ?? pathName)
         const host = new URL(url).hostname
+        if (kind === 'unknown') {
+          if (new URL(url).origin === location.origin || /(?:^|\.)(?:clips4sale\.com|patreon\.com|manyvids\.com|iwantclips\.com)$/.test(host)) continue
+          let block: Element | null = link
+          while (block?.parentElement && block.parentElement !== cooked) block = block.parentElement
+          for (let sibling = block?.previousElementSibling; sibling; sibling = sibling.previousElementSibling) {
+            if (!sibling.matches('h1, h2, h3, h4, h5, h6')) continue
+            kind = sectionSourceKind(sibling.textContent ?? '')
+            break
+          }
+        }
         const fileHost = /^(?:www\.)?(?:pixeldrain\.com|mega\.nz|mega\.co\.nz|gofile\.io|mediafire\.com|dropbox\.com|drive\.google\.com|workupload\.com|catbox\.moe|files\.catbox\.moe|bunkr\.(?:fi|si|site|cr|ru|is|black))$/.test(host)
         const attachment = link.matches('a.attachment, a.funscript-link-container') && kind !== 'unknown'
         if (kind === 'unknown' && !fileHost && !attachment && !/\b(?:download|mirror)\b/i.test(label)) continue
         if (/\b(?:buy|purchase|subscribe|donate|support me|patreon)\b/i.test(label)) continue
         const id = sourceId(postNumber, url, controlId)
-        if (seen.has(id)) continue
-        seen.add(id)
+        const previous = seen.get(id)
+        if (previous) {
+          if (previous.fileName === null && fileName !== null) {
+            previous.fileName = fileName
+            previous.kind = kind
+          }
+          sourceElements.set(link, previous)
+          continue
+        }
         const source: EroSource = { id, url, label: label || fileName || host, host, kind, fileName, postNumber, controlId, mirrorKey: null }
+        seen.set(id, source)
         sources.push(source)
         sourceElements.set(link, source)
       }

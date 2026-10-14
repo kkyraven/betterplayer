@@ -1,5 +1,9 @@
 import { isEroTopicUrl, type EroSource, type EroTopic } from '@shared/eroscripts'
 import type { DownloadBatch, DownloadFile } from '@shared/downloads'
+import type { AxisId } from '@shared/axes'
+import { parseScriptName } from '@shared/matcher'
+
+const VIDEO_EXTENSION = /\.(?:mp4|mkv|webm|mov|m4v|avi|wmv|mpeg|mpg)$/i
 
 function topicId(url: string): string | null {
   if (!isEroTopicUrl(url)) return null
@@ -40,14 +44,37 @@ export function topicFileSources(file: EroSource, sources: EroSource[]): EroSour
 export function initialTopicSelection(sources: EroSource[]): string[] {
   const files = distinctTopicFiles(sources)
   const videos = files.filter((source) => source.kind === 'video')
-  const scripts = files.filter((source) => source.kind === 'script')
-  if (videos.length > 1 || scripts.length > 1) return []
-  if (videos.length === 1 && scripts.length === 1) {
-    const video = videos[0]!
-    const script = scripts[0]!
-    const stem = (name: string | null) => name?.replace(/\.(?:mp4|mkv|webm|mov|m4v|avi|wmv|mpeg|mpg|funscript)$/i, '').toLowerCase()
-    if (stem(video.fileName) && stem(video.fileName) === stem(script.fileName)) return [video.id, script.id]
-    return []
+  const sets = scriptSets(files.filter((source) => source.kind === 'script'), videos)
+  if (videos.length > 1 || sets.length > 1) return []
+  const scripts = sets[0]?.scripts.map((script) => script.source.id) ?? []
+  const video = videos[0]
+  if (video && sets[0]) return video.fileName?.replace(VIDEO_EXTENSION, '').toLowerCase() === sets[0].key ? [video.id, ...scripts] : []
+  return video ? [video.id] : scripts
+}
+
+export interface ScriptSet {
+  key: string
+  name: string
+  scripts: Array<{ source: EroSource; axis: AxisId; variant: string | null }>
+}
+
+export function scriptSets(scripts: readonly EroSource[], videos: readonly EroSource[] = []): ScriptSet[] {
+  const stems = new Set(videos.flatMap((video) => video.fileName ? [video.fileName.replace(VIDEO_EXTENSION, '')] : []))
+  const sets = new Map<string, ScriptSet & { suffixes: string[] }>()
+  for (const source of scripts) {
+    const parsed = parseScriptName(source.fileName ?? source.label, stems)
+    const key = parsed ? parsed.stem.toLowerCase() : `source:${source.id}`
+    const set = sets.get(key) ?? { key, name: parsed?.stem ?? source.label, scripts: [], suffixes: [] }
+    set.scripts.push({ source, axis: parsed?.axis ?? 'L0', variant: null })
+    set.suffixes.push(parsed?.suffix ?? '')
+    sets.set(key, set)
   }
-  return [...videos, ...scripts].map((source) => source.id)
+  return [...sets.values()].map(({ suffixes, ...set }) => {
+    const scripts = set.scripts.map((script, index) => {
+      const repeated = set.scripts.filter((other) => other.axis === script.axis).length > 1
+      return { ...script, variant: repeated ? suffixes[index] || null : null }
+    })
+    const stroke = scripts.filter((script) => script.axis === 'L0')
+    return { ...set, scripts: [...stroke, ...scripts.filter((script) => script.axis !== 'L0')] }
+  })
 }

@@ -437,6 +437,7 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   handle('downloads:retry', async (id) => { await (await queueReady).retry(id) })
   handle('downloads:cancel', async (id) => { await (await queueReady).cancel(id) })
   handle('downloads:continue', async (id) => { await (await queueReady).continue(id) })
+  handle('downloads:openSource', async (id) => { await (await queueReady).openSource(id) })
   handle('downloads:clear', async () => { await (await queueReady).clear() })
   handle('downloads:cancelAll', async () => { await (await queueReady).cancelAll() })
   handle('downloads:videoOnly', async (id) => { await (await queueReady).videoOnly(id) })

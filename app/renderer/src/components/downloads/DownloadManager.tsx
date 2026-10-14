@@ -1,25 +1,21 @@
-import { ArrowUpRight, FolderOpen, Link, MoreHorizontal, Pause, Play, RotateCcw, X } from 'lucide-react'
+import { ArrowUpRight, ExternalLink, FolderOpen, Link, MoreHorizontal, Pause, Play, RotateCcw, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { DownloadBatch, DownloadFile } from '@shared/downloads'
 import { Button } from '@/components/ui/Button'
 import { IconButton } from '@/components/ui/IconButton'
 import { invoke } from '@/ipc'
-import { useBrowser } from '@/state/browser'
 import { useDownloads } from '@/state/downloads'
 import { useT } from '@/state/i18n'
-import { useLibrary } from '@/state/library'
-import { usePlayer } from '@/state/player'
 import { useUi } from '@/state/ui'
-import { useMatcher } from '@/state/matcher'
 import { electron } from '@/node'
 import { cx } from '@/lib/cx'
 import { canCancelDownload, downloadBatchGroup, fileProgress, formatDownloadBytes, orderedBatches, sessionTransferProgress } from './downloadPresentation'
 import { ArchiveControls } from './ArchiveControls'
 import { archiveView } from './archiveView'
-import { topicTab } from './topicTab'
+import { matchVideo, openBatchLibrary, openBatchTopic, playMedia } from './batchActions'
 import './downloads.css'
 
-export function DownloadManager({ embedded = false, active = true }: { embedded?: boolean; active?: boolean }) {
+export function DownloadManager() {
   const t = useT()
   const state = useDownloads((store) => store.state)
   const initialized = useDownloads((store) => store.initialized)
@@ -31,14 +27,10 @@ export function DownloadManager({ embedded = false, active = true }: { embedded?
   const [confirmCancel, setConfirmCancel] = useState(false)
   const [videoOnlyFor, setVideoOnlyFor] = useState<string | null>(null)
   const title = useRef<HTMLHeadingElement>(null)
-  const wasActive = useRef(false)
   const wrongPassword = state.batches.some((batch) => batch.files.some((file) => file.phase === 'waiting' && file.archive?.state === 'wrong-password'))
+  const focusOnOpen = useRef(!wrongPassword)
+  useEffect(() => { if (focusOnOpen.current) title.current?.focus() }, [])
   useEffect(() => {
-    if (active && !wasActive.current && !embedded && !wrongPassword) title.current?.focus()
-    wasActive.current = active
-  }, [active, embedded, wrongPassword])
-  useEffect(() => {
-    if (!active) return
     const escape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.defaultPrevented) return
       event.preventDefault()
@@ -50,7 +42,7 @@ export function DownloadManager({ embedded = false, active = true }: { embedded?
     }
     window.addEventListener('keydown', escape, true)
     return () => window.removeEventListener('keydown', escape, true)
-  }, [active, close, confirmCancel, overflow, videoOnlyFor])
+  }, [close, confirmCancel, overflow, videoOnlyFor])
   const { session } = state
   const progress = sessionTransferProgress(state)
   const batches = orderedBatches(state.batches)
@@ -60,12 +52,12 @@ export function DownloadManager({ embedded = false, active = true }: { embedded?
     { kind: 'finished', label: t('downloads.finished') },
   ] as const
   return (
-    <aside className={embedded ? 'download-manager-embedded' : 'downloads-dock'} id="downloads-manager" aria-labelledby={embedded ? undefined : 'downloads-heading'} aria-label={embedded ? t('downloads.title') : undefined}>
+    <aside className="downloads-dock" id="downloads-manager" aria-labelledby="downloads-heading">
       <header className="download-panel-header">
-        {!embedded && <h2 id="downloads-heading" tabIndex={-1} ref={title}>{t('downloads.title')}</h2>}
+        <h2 id="downloads-heading" tabIndex={-1} ref={title}>{t('downloads.title')}</h2>
         <Button variant="ghost" disabled={!state.canClear} title={t('downloads.clearFinished')} onClick={() => void clear()}>{t('downloads.clearFinished')}</Button>
         <IconButton size="sm" label={t('common.more')} aria-expanded={overflow} onClick={() => setOverflow(!overflow)}><MoreHorizontal /></IconButton>
-        {!embedded && <IconButton size="sm" label={t('common.close')} onClick={() => close(false)}><X /></IconButton>}
+        <IconButton size="sm" label={t('common.close')} onClick={() => close(false)}><X /></IconButton>
       </header>
       {overflow && <div className="download-inline-menu"><Button variant="ghost" className="btn-danger" disabled={state.cancellable === 0} onClick={() => { setOverflow(false); setConfirmCancel(true) }}>{t('downloads.cancelAll')}</Button></div>}
       {confirmCancel && <div className="download-confirm"><p>{t('downloads.cancelCount', { count: state.cancellable })}</p><div><Button variant="ghost" onClick={() => setConfirmCancel(false)}>{t('common.cancel')}</Button><Button className="btn-danger" disabled={state.cancellable === 0} onClick={() => { setConfirmCancel(false); void cancelAll() }}>{t('downloads.cancelAll')}</Button></div></div>}
@@ -83,7 +75,7 @@ export function DownloadManager({ embedded = false, active = true }: { embedded?
           if (!matching.length) return null
           return <section key={group.kind} className={cx('download-group', group.kind === 'attention' && 'download-group-attention')} aria-labelledby={`download-group-${group.kind}`}>
             <h3 className="download-group-heading" id={`download-group-${group.kind}`}>{group.label}<span>{matching.length}</span></h3>
-            {matching.map((batch) => <Batch key={batch.id} batch={batch} active={active} confirmVideoOnly={videoOnlyFor === batch.id} onConfirmVideoOnly={(confirm) => setVideoOnlyFor(confirm ? batch.id : null)} />)}
+            {matching.map((batch) => <Batch key={batch.id} batch={batch} confirmVideoOnly={videoOnlyFor === batch.id} onConfirmVideoOnly={(confirm) => setVideoOnlyFor(confirm ? batch.id : null)} />)}
           </section>
         })}
       </div>
@@ -91,41 +83,25 @@ export function DownloadManager({ embedded = false, active = true }: { embedded?
   )
 }
 
-function Batch({ batch, active, confirmVideoOnly, onConfirmVideoOnly }: { batch: DownloadBatch; active: boolean; confirmVideoOnly: boolean; onConfirmVideoOnly: (confirm: boolean) => void }) {
+function Batch({ batch, confirmVideoOnly, onConfirmVideoOnly }: { batch: DownloadBatch; confirmVideoOnly: boolean; onConfirmVideoOnly: (confirm: boolean) => void }) {
   const t = useT()
   const complete = batch.files.every((file) => file.phase === 'complete')
   const library = batch.origin !== 'browser'
-  const media = batch.files.find((file) => file.phase === 'complete' && file.mediaId !== null)
-  const openTopic = async () => {
-    const tab = topicTab(batch, useBrowser.getState().tabs)
-    if (tab !== null) await useBrowser.getState().activate(tab)
-    else await useBrowser.getState().open(batch.topicUrl)
-    useUi.getState().setScreen('browser')
-  }
-  const openLibrary = () => {
-    useLibrary.getState().setSearch('')
-    useLibrary.getState().setFilters({})
-    useLibrary.getState().setFolder({ rootId: batch.destination.rootId, folder: batch.destination.relativePath })
-    useUi.getState().setScreen('library')
-  }
-  const play = async () => {
-    if (media?.mediaId === null || media?.mediaId === undefined) return
-    const detail = await invoke('library:media', media.mediaId)
-    if (detail) await usePlayer.getState().open(detail.path)
-  }
+  const mediaId = batch.files.find((file) => file.phase === 'complete' && file.mediaId !== null)?.mediaId ?? null
+  const openTopic = () => openBatchTopic(batch)
   return (
     <section className="download-batch">
       <div className="download-batch-heading"><h3 title={batch.title}>{batch.title}</h3><IconButton size="sm" label={t('downloads.openTopic')} onClick={() => void openTopic()}><ArrowUpRight /></IconButton></div>
       <p className="download-batch-destination" title={batch.destinationName}>{batch.destinationName}</p>
-      {(complete || media) && <div className="download-batch-actions">{media && <Button variant="primary" onClick={() => void play()}><Play />{t('common.play')}</Button>}{library && <Button variant="ghost" onClick={openLibrary}><FolderOpen />{t('downloads.openLibrary')}</Button>}{!library && batch.savedPath && <Button variant="ghost" onClick={() => batch.savedPath && electron.shell.showItemInFolder(batch.savedPath)}><FolderOpen />{t('downloads.showFolder')}</Button>}{library && complete && !media && batch.files.some((file) => file.kind === 'script' || file.kind === 'archive') && <Button variant="ghost" onClick={() => { useUi.getState().setScreen('utilities'); void useMatcher.getState().scan() }}><Link />{t('downloads.matchVideo')}</Button>}</div>}
+      {(complete || mediaId !== null) && <div className="download-batch-actions">{mediaId !== null && <Button variant="primary" onClick={() => void playMedia(mediaId)}><Play />{t('common.play')}</Button>}{library && <Button variant="ghost" onClick={() => openBatchLibrary(batch)}><FolderOpen />{t('downloads.openLibrary')}</Button>}{!library && batch.savedPath && <Button variant="ghost" onClick={() => batch.savedPath && electron.shell.showItemInFolder(batch.savedPath)}><FolderOpen />{t('downloads.showFolder')}</Button>}{library && complete && mediaId === null && batch.files.some((file) => file.kind === 'script' || file.kind === 'archive') && <Button variant="ghost" onClick={matchVideo}><Link />{t('downloads.matchVideo')}</Button>}</div>}
       {confirmVideoOnly && <div className="download-confirm"><p>{t('downloads.skipScripts')}</p><div><Button variant="ghost" onClick={() => onConfirmVideoOnly(false)}>{t('common.cancel')}</Button><Button disabled={!batch.canImportVideoOnly} onClick={() => { onConfirmVideoOnly(false); void useDownloads.getState().videoOnly(batch.id) }}>{t('downloads.videoOnly')}</Button></div></div>}
-      {batch.files.map((file) => <File key={file.id} file={file} active={active} onOpenTopic={() => void openTopic()} />)}
+      {batch.files.map((file) => <File key={file.id} file={file} onOpenTopic={() => void openTopic()} />)}
       {batch.canImportVideoOnly && !confirmVideoOnly && <Button variant="ghost" onClick={() => onConfirmVideoOnly(true)}>{t('downloads.videoOnly')}</Button>}
     </section>
   )
 }
 
-function File({ file, active, onOpenTopic }: { file: DownloadFile; active: boolean; onOpenTopic: () => void }) {
+function File({ file, onOpenTopic }: { file: DownloadFile; onOpenTopic: () => void }) {
   const t = useT()
   const command = useDownloads((state) => state.command)
   const progress = fileProgress(file)
@@ -141,12 +117,13 @@ function File({ file, active, onOpenTopic }: { file: DownloadFile; active: boole
       {file.reason && step !== 'password' && step !== 'select' && <p className="download-file-reason">{file.reason}</p>}
       {transferred && <div className="download-bytes">{formatDownloadBytes(file.receivedBytes)}{file.totalBytes !== null && ` / ${formatDownloadBytes(file.totalBytes)}`}</div>}
       {file.phase === 'downloading' && progress !== null && <div className="download-progress" role="progressbar" aria-label={file.fileName} aria-valuenow={Math.round(progress * 100)} aria-valuemin={0} aria-valuemax={100}><span style={{ width: `${progress * 100}%` }} /></div>}
-      {archive && <ArchiveControls id={file.id} view={archive} active={active} onBackToTopic={onOpenTopic} />}
+      {archive && <ArchiveControls id={file.id} view={archive} onBackToTopic={onOpenTopic} />}
       <div className="download-file-actions">
         {file.canPause && file.phase === 'downloading' && <Button variant="ghost" onClick={() => void command('pause', file.id)}><Pause />{t('common.pause')}</Button>}
         {file.phase === 'paused' && <Button variant="ghost" onClick={() => void command('resume', file.id)}><Play />{t('downloads.resume')}</Button>}
         {file.canContinue && <Button variant="ghost" onClick={() => { useUi.getState().setScreen('browser'); void command('continue', file.id) }}><ArrowUpRight />{t('common.continue')}</Button>}
         {file.phase === 'failed' && file.canRetry !== false && <Button variant="ghost" onClick={() => void command('retry', file.id)}><RotateCcw />{t('common.retry')}</Button>}
+        {file.canOpenSource === true && <Button variant="ghost" className="download-source-link" onClick={() => { useUi.getState().setScreen('browser'); void invoke('downloads:openSource', file.id) }}><ExternalLink />{t('eroscripts.openSource')}</Button>}
         {canCancelDownload(file) && <IconButton size="sm" label={t('common.cancel')} onClick={() => void command('cancel', file.id)}><X /></IconButton>}
       </div>
       {file.attempts.length > 1 && <details className="download-attempts"><summary>{t('downloads.sources')}</summary><ol>{file.attempts.map((attempt, index) => <li key={`${attempt.at}-${index}`}><span>{attempt.host}</span><span>{attempt.reason ?? t(`downloads.attempt.${attempt.outcome}`)}</span></li>)}</ol></details>}

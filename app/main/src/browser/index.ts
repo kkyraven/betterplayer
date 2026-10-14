@@ -13,6 +13,7 @@ import { mostVisited, readSession, writeSession, webUrl, type SavedTab } from '.
 import { ERO_CHANNELS, EROSCRIPTS_HOME, isEroScriptsUrl, isEroTopicUrl, sourceUrl, type EroTopic } from '@shared/eroscripts'
 import { topicReport } from './topic'
 import { BrowserDownloads, type OrdinaryBrowserDownload } from './downloads'
+import { downloadContextForNavigation, relatedNavigation, reusableDownload, type DownloadOwner, type RelatedDownloadContext } from './download-context'
 import type { TransferRequest, TransferResult } from '../downloads/transport'
 
 export type Emit = <E extends IpcEvent>(event: E, payload: IpcEvents[E]) => void
@@ -62,7 +63,8 @@ interface Tab {
   pending: (() => void) | null
   generation: number
   topic: EroTopic | null
-  related: { attemptId: string; fileId: string; sourceUrl: string; topic: EroTopic; approvedUrl: string | null; approvedUntil: number } | null
+  related: RelatedDownloadContext | null
+  downloadOwner: DownloadOwner | null
   topLevelUrl: string
 }
 
@@ -122,7 +124,7 @@ export class BrowserTabs {
         if (!tab?.related) return
         tab.related.approvedUrl = null
         tab.related.approvedUntil = 0
-        if (!this.relatedNavigation(tab.related.sourceUrl, contents.getURL())) tab.related = null
+        if (!relatedNavigation(tab.related.sourceUrl, contents.getURL())) tab.related = null
         this.push()
       },
     })
@@ -411,7 +413,7 @@ export class BrowserTabs {
     })
     view.setBackgroundColor('#0a0c10')
     const initial = restored ?? { url: toUrl(url ?? 'about:blank'), title: '', entries: [], index: 0 }
-    const tab: Tab = { id: this.nextId++, initial, view, blocked: 0, video: null, capturing: false, region: null, zone: null, videoFrame: null, snapshot: null, favicon: null, attached: false, pending: null, generation: 0, topic: null, related: null, topLevelUrl: initial.url }
+    const tab: Tab = { id: this.nextId++, initial, view, blocked: 0, video: null, capturing: false, region: null, zone: null, videoFrame: null, snapshot: null, favicon: null, attached: false, pending: null, generation: 0, topic: null, related: null, downloadOwner: null, topLevelUrl: initial.url }
     this.tabList.push(tab)
     this.byContents.set(view.webContents.id, tab)
     this.wire(tab)
@@ -457,7 +459,7 @@ export class BrowserTabs {
       tab.generation += 1
       tab.topic = null
       tab.topLevelUrl = url
-      if (tab.related && !(tab.related.approvedUrl === url && tab.related.approvedUntil > Date.now()) && !this.relatedNavigation(tab.related.sourceUrl, url)) tab.related = null
+      tab.related = downloadContextForNavigation(tab.downloadOwner, tab.related, url, Date.now())
       this.push()
     })
     webContents.on('dom-ready', () => this.observeTopic(tab))
@@ -518,24 +520,6 @@ export class BrowserTabs {
     if (!contents.isDestroyed()) contents.mainFrame.send(ERO_CHANNELS.observe, { generation: tab.generation, url: contents.getURL() })
   }
 
-  private relatedNavigation(source: string, target: string): boolean {
-    try {
-      const original = new URL(source)
-      const next = new URL(target)
-      if (next.protocol !== 'https:' && next.protocol !== 'http:') return false
-      const mega = /^(?:www\.)?mega\.(?:nz|co\.nz|io)$/
-      if (mega.test(original.hostname) && mega.test(next.hostname)) {
-        const handle = /\/file\/([\w-]+)/.exec(original.pathname)?.[1] ?? /^#!([\w-]+)!/.exec(original.hash)?.[1]
-        if (handle) return next.pathname === `/file/${handle}` || next.hash.startsWith(`#!${handle}!`)
-        return original.pathname === next.pathname && original.hash === next.hash
-      }
-      const gofile = /^(?:www\.)?gofile\.io$/
-      const pixeldrain = /^(?:www\.)?pixeldrain\.com$/
-      if (pixeldrain.test(original.hostname) && pixeldrain.test(next.hostname)) return original.pathname === next.pathname && original.search === next.search
-      return next.pathname === original.pathname && (next.origin === original.origin || gofile.test(original.hostname) && gofile.test(next.hostname))
-    } catch { return false }
-  }
-
   getTopic(id: number): EroTopic | null {
     const tab = this.find(id)
     return tab && isEroTopicUrl(tab.view.webContents.getURL()) ? tab.topic : null
@@ -558,18 +542,21 @@ export class BrowserTabs {
     const topic: EroTopic = liveTopic?.generation === request.topic.generation && liveTopic.url === request.topic.url ? liveTopic : {
       ...request.topic, title: request.candidate.label, sources: [request.candidate], scope: 'loaded-posts',
     }
-    const existing = !transferOnly && this.tabList.find((tab) => tab.related?.fileId === request.fileId && tab.related.sourceUrl === request.candidate.url)
+    const owner: DownloadOwner = { attemptId: request.attemptId, fileId: request.fileId, sourceUrl: request.candidate.url, topic }
+    const existing = !transferOnly && this.tabList.find((tab) => reusableDownload(tab.downloadOwner, request.fileId, request.candidate.url, tab.view.webContents.getURL()))
     if (existing) {
-      existing.related = { attemptId: request.attemptId, fileId: request.fileId, sourceUrl: request.candidate.url, topic, approvedUrl: null, approvedUntil: 0 }
+      existing.downloadOwner = owner
+      existing.related = { ...owner, approvedUrl: null, approvedUntil: 0 }
       this.sizeBackgroundDownload(existing)
-      if (existing.view.webContents.getURL() === 'about:blank') this.navigate(existing.id, request.candidate.url)
+      this.push()
       return this.toTab(existing)
     }
     const opened = this.open(transferOnly ? 'about:blank' : request.candidate.url, undefined, true)
     const tab = this.find(opened.id)
     if (!tab) return null
     this.sizeBackgroundDownload(tab)
-    tab.related = { attemptId: request.attemptId, fileId: request.fileId, sourceUrl: request.candidate.url, topic, approvedUrl: null, approvedUntil: 0 }
+    tab.downloadOwner = owner
+    tab.related = { ...owner, approvedUrl: null, approvedUntil: 0 }
     this.push()
     return this.toTab(tab)
   }

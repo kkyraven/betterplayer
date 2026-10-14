@@ -38,6 +38,7 @@ export const ERO_CHANNELS = {
   hostRelease: 'bp:download-host-release',
   hostCancel: 'bp:download-host-cancel',
   hostWaiting: 'bp:download-host-waiting',
+  hostActivity: 'bp:download-host-activity',
 } as const
 
 export const MAX_TOPIC_SOURCES = 200
@@ -71,6 +72,14 @@ export function sourceKind(fileName: string): EroSource['kind'] {
   if (/\.funscript$/.test(name)) return 'script'
   if (/\.(?:mp4|mkv|webm|mov|m4v|avi|wmv|mpeg|mpg)$/.test(name)) return 'video'
   if (/\.(?:zip|7z|rar)$/.test(name)) return 'archive'
+  return 'unknown'
+}
+
+export function sectionSourceKind(heading: string): EroSource['kind'] {
+  const label = heading.replace(/[\p{Extended_Pictographic}\uFE0F]/gu, '').trim()
+  if (/^videos?(?:\s+(?:links?|downloads?|mirrors?))?\s*:?$/i.test(label)) return 'video'
+  if (/^(?:fun)?scripts?(?:\s+(?:links?|downloads?|mirrors?))?\s*:?$/i.test(label)) return 'script'
+  if (/^archives?(?:\s+(?:links?|downloads?|mirrors?))?\s*:?$/i.test(label)) return 'archive'
   return 'unknown'
 }
 

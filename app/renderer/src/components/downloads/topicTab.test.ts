@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { topicTab } from './topicTab'
+import { isTopicBatch, topicTab } from './topicTab'
 
 const batch = { topicTabId: 4, topicUrl: 'https://discuss.eroscripts.com/t/test-files/123' }
 
@@ -21,5 +21,13 @@ describe('download topic tab', () => {
     const browser = { topicTabId: 2, topicUrl: 'https://example.org/files' }
     expect(topicTab(browser, [{ id: 2, url: 'https://example.org/files' }])).toBe(2)
     expect(topicTab(browser, [{ id: 2, url: 'https://example.org/other' }])).toBeNull()
+  })
+
+  it('recognises batches from this topic in this tab only', () => {
+    const topic = { tabId: 4, url: 'https://discuss.eroscripts.com/t/renamed/123/9' }
+    expect(isTopicBatch(topic, batch)).toBe(true)
+    expect(isTopicBatch({ ...topic, tabId: 5 }, batch)).toBe(false)
+    expect(isTopicBatch(topic, { ...batch, topicUrl: 'https://discuss.eroscripts.com/t/other/124' })).toBe(false)
+    expect(isTopicBatch(topic, { ...batch, origin: 'browser' })).toBe(false)
   })
 })

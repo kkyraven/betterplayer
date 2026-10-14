@@ -10,6 +10,7 @@ import { ArchiveError, extractArchive, inspectArchive } from './archive'
 import type { DownloadCandidate, DownloadTransport, OrdinaryBrowserDownload, TransferRequest, TrustedDownloadSelection } from './transport'
 import { resolveCloudSource } from './providers/cloud'
 import { resolveWebSource } from './providers/web'
+import { megaDownloadName } from '@shared/mega'
 
 const TERMINAL = new Set(['complete', 'failed', 'cancelled'])
 const FINISHING = new Set(['publishing', 'importing'])
@@ -121,6 +122,10 @@ function browserFallback(source: DownloadCandidate): boolean {
   if (!cloud?.directUrl || source.controlId) return false
   const url = new URL(source.url)
   return /^(?:www\.)?pixeldrain\.com$/.test(url.hostname) ? /^\/u\//.test(url.pathname) : /^(?:www\.)?dropbox\.com$/.test(url.hostname)
+}
+function candidateFileName(source: DownloadCandidate): string {
+  const name = source.fileName || 'Download'
+  return /^(?:www\.)?mega\.(?:nz|co\.nz|io)$/.test(new URL(source.url).hostname) ? megaDownloadName(name) : name
 }
 function originalScriptStem(name: string, lowercaseStems: ReadonlySet<string>): string {
   const base = basename(name, extname(name))
@@ -275,7 +280,7 @@ export class DownloadQueue {
     const totalBytes = unknown ? null : group.reduce((sum, file) => sum + (file.totalBytes ?? file.receivedBytes), 0)
     const receivedBytes = group.reduce((sum, file) => sum + Math.min(file.receivedBytes, file.totalBytes ?? file.receivedBytes), 0)
     return {
-      batches: this.batches.filter(batch => batch.files.some(file => !file.dismissed)).map(batch => ({ id: batch.id, origin: batch.origin ?? 'topic', savedPath: batch.savedPath ?? null, canImportVideoOnly: batch.origin !== 'browser' && !this.committing.has(batch.id) && batch.files.some(file => file.kind === 'video' && file.verified && file.phase === 'staged') && batch.files.some(file => file.kind !== 'video' && ['failed', 'waiting', 'paused', 'cancelled'].includes(file.phase)), title: batch.title, topicUrl: batch.topicUrl, topicTabId: batch.topicTabId, topicGeneration: batch.topicGeneration, destination: { ...batch.destination }, destinationName: batch.destinationName, createdAt: batch.createdAt, files: batch.files.filter(file => !file.dismissed).map(file => ({ id: file.id, batchId: file.batchId, sourceId: file.sourceId, fileName: file.fileName, publishedName: file.publishedName, kind: file.kind, phase: file.phase, host: file.host, receivedBytes: file.receivedBytes, totalBytes: file.totalBytes, reason: file.reason, attempts: file.attempts.map(attempt => ({ ...attempt })), canPause: file.canPause, canContinue: file.canContinue, canRetry: batch.origin !== 'browser', mediaId: file.mediaId, archive: file.archive ? { ...file.archive, entries: file.archive.entries.map(entry => ({ ...entry })) } : undefined })) })),
+      batches: this.batches.filter(batch => batch.files.some(file => !file.dismissed)).map(batch => ({ id: batch.id, origin: batch.origin ?? 'topic', savedPath: batch.savedPath ?? null, canImportVideoOnly: batch.origin !== 'browser' && !this.committing.has(batch.id) && batch.files.some(file => file.kind === 'video' && file.verified && file.phase === 'staged') && batch.files.some(file => file.kind !== 'video' && ['failed', 'waiting', 'paused', 'cancelled'].includes(file.phase)), title: batch.title, topicUrl: batch.topicUrl, topicTabId: batch.topicTabId, topicGeneration: batch.topicGeneration, destination: { ...batch.destination }, destinationName: batch.destinationName, createdAt: batch.createdAt, files: batch.files.filter(file => !file.dismissed).map(file => ({ id: file.id, batchId: file.batchId, sourceId: file.sourceId, fileName: file.fileName, publishedName: file.publishedName, kind: file.kind, phase: file.phase, host: file.host, receivedBytes: file.receivedBytes, totalBytes: file.totalBytes, reason: file.reason, attempts: file.attempts.map(attempt => ({ ...attempt })), canPause: file.canPause, canContinue: file.canContinue, canRetry: batch.origin !== 'browser', canOpenSource: !!this.options.openOrdinarySource && file.candidates.some(candidate => candidate.id === file.sourceId), mediaId: file.mediaId, archive: file.archive ? { ...file.archive, entries: file.archive.entries.map(entry => ({ ...entry })) } : undefined })) })),
       session: { id: this.sessionId, completed: session.filter(file => file.phase === 'complete').length, total: session.length, failed: session.filter(file => file.phase === 'failed').length, cancelled: session.filter(file => file.phase === 'cancelled').length, active: session.filter(file => !TERMINAL.has(file.phase)).length, attention: all.filter(file => !file.dismissed && (file.phase === 'failed' || file.phase === 'waiting')).length, receivedBytes, totalBytes, progress: totalBytes === null || totalBytes === 0 ? null : Math.min(1, receivedBytes / totalBytes) },
       canClear: this.batches.some(batch => batch.files.every(file => TERMINAL.has(file.phase)) && batch.files.some(file => !file.dismissed)),
       cancellable: this.batches.filter(batch => batch.files.some(file => !TERMINAL.has(file.phase))).flatMap(batch => batch.files).filter(file => file.phase !== 'complete' && file.phase !== 'cancelled' && !FINISHING.has(file.phase)).length,
@@ -301,7 +306,7 @@ export class DownloadQueue {
       const id = randomUUID()
       const directory = await stagingDirectory(checked, id)
       if (!this.batches.flatMap(batch => batch.files).some(file => file.sessionId === this.sessionId && !TERMINAL.has(file.phase))) this.groupId = randomUUID()
-      const files = chosen.map((source): FileRecord => ({ id: randomUUID(), batchId: id, sourceId: source.id, fileName: source.fileName ? safeFileName(source.fileName) : 'Download', publishedName: null, kind: source.kind, phase: 'queued', host: source.host, receivedBytes: 0, totalBytes: null, reason: null, attempts: [], canPause: false, canContinue: false, mediaId: null, candidates: [copiedSource(source), ...selection.availableSources.filter(candidate => eligible(source, candidate)).slice(0, MAX_CANDIDATES - 1).map(copiedSource)], candidateIndex: 0, stageName: randomUUID(), sessionId: this.sessionId, groupId: this.groupId, verified: false, published: false, dismissed: false, browserOnly: false, browserTriedSources: [] }))
+      const files = chosen.map((source): FileRecord => ({ id: randomUUID(), batchId: id, sourceId: source.id, fileName: safeFileName(candidateFileName(source)), publishedName: null, kind: source.kind, phase: 'queued', host: source.host, receivedBytes: 0, totalBytes: null, reason: null, attempts: [], canPause: false, canContinue: false, mediaId: null, candidates: [copiedSource(source), ...selection.availableSources.filter(candidate => eligible(source, candidate)).slice(0, MAX_CANDIDATES - 1).map(copiedSource)], candidateIndex: 0, stageName: randomUUID(), sessionId: this.sessionId, groupId: this.groupId, verified: false, published: false, dismissed: false, browserOnly: false, browserTriedSources: [] }))
       this.batches.push({ id, title: selection.topic.title.slice(0, 500), topicUrl: cleanTopic(selection.topic.url), sourceTopicUrl: selection.topic.url, topicTabId: selection.topic.tabId, topicGeneration: selection.topic.generation, destination: { ...selection.destination }, destinationName: root?.name || basename(checked.directory), createdAt: Date.now(), files, checked, stageDirectory: directory })
       await this.persist()
       this.emit()
@@ -510,6 +515,14 @@ export class DownloadQueue {
       await this.changed(); this.schedule()
     })
   }
+  openSource(id: string): Promise<void> {
+    return this.command(async () => {
+      const file = this.batches.flatMap(batch => batch.files).find(file => file.id === id)
+      const source = file?.candidates.find(candidate => candidate.id === file.sourceId)
+      if (!source || !this.options.openOrdinarySource) throw new Error('Browser download source is unavailable')
+      await this.options.openOrdinarySource(source.url)
+    })
+  }
   cancel(id: string): Promise<void> {
     return this.command(async () => {
       await this.cancelFiles(this.findFiles(id)); await this.changed(); this.schedule()
@@ -648,6 +661,9 @@ export class DownloadQueue {
       const attemptId = active.attemptId
       const request: TransferRequest = {
         attemptId: active.attemptId, fileId: file.id, batchId: batch.id, topic: { tabId: batch.topicTabId, generation: batch.topicGeneration, url: batch.sourceTopicUrl }, candidate: source, directUrl, stagingPath: stagePath, signal,
+        scriptFileNames: batch.files.filter(sibling => sibling.kind === 'script' && sibling.phase !== 'cancelled')
+          .map(sibling => sibling.candidates[sibling.candidateIndex]?.fileName)
+          .filter((name): name is string => typeof name === 'string' && name.length > 0).slice(0, 100),
         onProgress: progress => {
           if (signal.aborted || this.closed || this.active.get(file.id) !== active || active.attemptId !== attemptId || !['resolving', 'attempting', 'downloading'].includes(file.phase)) return
           if (!Number.isSafeInteger(progress.receivedBytes) || progress.receivedBytes < 0 || (progress.totalBytes !== null && (!Number.isSafeInteger(progress.totalBytes) || progress.totalBytes < 0))) return
@@ -666,7 +682,7 @@ export class DownloadQueue {
         try {
           file.originalName = fullFileName(result.fileName)
           file.fileName = safeFileName(file.originalName)
-          if (source.fileName && safeFileName(source.fileName).toLowerCase() !== file.fileName.toLowerCase()) throw new VerificationError('The source returned a different file')
+          if (source.fileName && safeFileName(candidateFileName(source)).toLowerCase() !== file.fileName.toLowerCase()) throw new VerificationError('The source returned a different file')
           const size = (await stat(stagePath)).size
           if (result.totalBytes > 0 && result.totalBytes !== size) throw new VerificationError('Incomplete download')
           if (await zipDownload(stagePath, file.fileName, result.mimeType)) {
@@ -698,7 +714,12 @@ export class DownloadQueue {
       }
       const next = file.candidateIndex + 1
       if (!file.browserOnly && next < file.candidates.length) { file.candidateIndex = next; file.reason = `Trying ${file.candidates[next]!.host}`; await this.changed(); continue }
-      const waiting = [...file.attempts].reverse().find(entry => entry.outcome === 'waiting')
+      const checkedSources = new Set<string>()
+      const waiting = [...file.attempts].reverse().find(entry => {
+        if (entry.outcome === 'starting' || checkedSources.has(entry.sourceId)) return false
+        checkedSources.add(entry.sourceId)
+        return entry.outcome === 'waiting'
+      })
       if (waiting) {
         file.candidateIndex = Math.max(0, file.candidates.findIndex(candidate => candidate.id === waiting.sourceId))
         file.phase = 'waiting'; file.reason = waiting.reason; file.canContinue = true
@@ -882,30 +903,39 @@ export class DownloadQueue {
     if (files.some(file => file.archiveParentId)) { await this.reserveArchiveNames(batch, files); return }
     const video = files.find(file => file.kind === 'video')
     const stem = video ? basename(video.originalName ?? video.fileName, extname(video.originalName ?? video.fileName)) : null
+    const scripts = files.filter(file => file.kind === 'script')
     const names = files.map(file => {
-      if (!stem || file.kind === 'video') return file.originalName ?? file.fileName
-      if (file.kind === 'archive') return `${stem}.zip`
       const originalName = file.originalName ?? file.fileName
+      if (!stem || file.kind === 'video') return { file, name: originalName, paired: file === video }
+      if (file.kind === 'archive') return { file, name: `${stem}.zip`, paired: true }
       const originalBase = basename(originalName, extname(originalName))
       const parsedStem = originalScriptStem(originalName, new Set([stem.toLowerCase()]))
+      if (scripts.length > 1 && parsedStem.toLowerCase() !== stem.toLowerCase()) return { file, name: originalName, paired: false }
       const suffix = originalBase.slice(parsedStem.length)
-      return `${stem}${suffix}.funscript`
+      return { file, name: `${stem}${suffix}.funscript`, paired: true }
     })
+    if (new Set(names.map(item => item.name.toLowerCase())).size !== names.length) throw new Error('Selected scripts have conflicting names')
+    const groups = [names.filter(item => item.paired), ...names.filter(item => !item.paired).map(item => [item])].filter(group => group.length)
     const existing = new Set((await readdir(batch.checked.directory)).map(name => name.toLowerCase()))
-    const maximumSuffix = stem ? Math.max(...names.filter(name => name.startsWith(stem)).map(name => Buffer.byteLength(name.slice(stem.length)))) : 0
-    for (let number = 0; number < 10_000; number++) {
-      const suffix = number ? ` (${number + 1})` : ''
-      const proposed = names.map(name => {
-        if (stem && name.startsWith(stem)) return safeFileName(`${truncateFileStem(stem, 220 - maximumSuffix - Buffer.byteLength(suffix))}${suffix}${name.slice(stem.length)}`)
-        const ext = extname(name)
-        return safeFileName(`${basename(name, ext)}${suffix}${ext}`)
-      })
-      if (new Set(proposed.map(name => name.toLowerCase())).size !== proposed.length) throw new Error('Selected scripts have conflicting names')
-      if (proposed.some(name => existing.has(name.toLowerCase()))) continue
-      files.forEach((file, index) => { file.publishedName = proposed[index]! })
-      await this.persist(); return
+    for (const group of groups) {
+      const pairedStem = group[0]?.paired ? stem : null
+      const maximumSuffix = pairedStem ? Math.max(...group.map(item => Buffer.byteLength(item.name.slice(pairedStem.length)))) : 0
+      let reserved = false
+      for (let number = 0; number < 10_000; number++) {
+        const collision = number ? ` (${number + 1})` : ''
+        const proposed = group.map(({ name }) => {
+          if (pairedStem) return safeFileName(`${truncateFileStem(pairedStem, 220 - maximumSuffix - Buffer.byteLength(collision))}${collision}${name.slice(pairedStem.length)}`)
+          const parts = scriptNameParts(name)
+          return safeFileName(`${parts.stem}${collision}${parts.suffix}`)
+        })
+        if (new Set(proposed.map(name => name.toLowerCase())).size !== proposed.length) throw new Error('Selected scripts have conflicting names')
+        if (proposed.some(name => existing.has(name.toLowerCase()))) continue
+        group.forEach((item, index) => { item.file.publishedName = proposed[index]!; existing.add(proposed[index]!.toLowerCase()) })
+        reserved = true; break
+      }
+      if (!reserved) throw new Error('Could not reserve unused file names')
     }
-    throw new Error('Could not reserve unused file names')
+    await this.persist()
   }
   private async reserveArchiveNames(batch: BatchRecord, files: PublicationFile[]): Promise<void> {
     const groups = new Map<string, { stem: string; files: { file: PublicationFile; suffix: string }[] }>()

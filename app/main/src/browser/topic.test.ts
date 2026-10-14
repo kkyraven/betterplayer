@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { MAX_TOPIC_SOURCES, explicitMirrorKind, sourceId, type EroSource } from '@shared/eroscripts'
+import { MAX_TOPIC_SOURCES, explicitMirrorKind, sectionSourceKind, sourceId, type EroSource } from '@shared/eroscripts'
 import { topicReport } from './topic'
 
 const url = 'https://discuss.eroscripts.com/t/test/123'
@@ -58,5 +58,22 @@ describe('explicit creator mirror labels', () => {
     expect(explicitMirrorKind('Video mirrors', [mirrors[0]!, source({ label: '1080p edit', kind: 'unknown', fileName: null })])).toBeNull()
     expect(explicitMirrorKind('Video mirrors', [source(), source({ kind: 'script', fileName: 'test.funscript' })])).toBeNull()
     expect(explicitMirrorKind('Video mirrors', [mirrors[0]!, source({ url: 'https://mega.nz/folder/id#key', kind: 'unknown', fileName: null })])).toBeNull()
+  })
+})
+
+describe('creator file sections', () => {
+  it('recognizes the Video link headings used by both reported topics', () => {
+    for (const heading of [' Video link', '🎥 Video link', 'Video links:', 'Videos', 'Video mirrors']) {
+      expect(sectionSourceKind(heading)).toBe('video')
+    }
+    expect(sectionSourceKind('📁 Script')).toBe('script')
+    expect(sectionSourceKind('Funscripts')).toBe('script')
+    expect(sectionSourceKind('Archive downloads')).toBe('archive')
+  })
+
+  it('does not infer file types from previews, prose or mixed downloads', () => {
+    for (const heading of ['Preview', 'Length and Heatmap', 'Details', 'Video and scripts', 'This video is good', 'Download links']) {
+      expect(sectionSourceKind(heading)).toBe('unknown')
+    }
   })
 })

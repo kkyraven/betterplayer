@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { DownloadBatch, DownloadFile, DownloadSession } from '@shared/downloads'
-import { canCancelDownload, downloadBatchGroup, downloadCountGeometry, downloadTone, fileProgress, orderedBatches, sessionTransferProgress } from './downloadPresentation'
+import { canCancelDownload, downloadBatchGroup, downloadCountGeometry, downloadTone, fileProgress, orderedBatches, sessionTransferProgress, summarizeFiles } from './downloadPresentation'
 
 const session: DownloadSession = { id: 'session', total: 6, completed: 2, failed: 0, cancelled: 0, active: 1, attention: 0, receivedBytes: 500, totalBytes: 1000, progress: .5 }
 const file: DownloadFile = { id: 'file', batchId: 'batch', sourceId: 'source', fileName: 'test.mp4', publishedName: null, kind: 'video', phase: 'downloading', host: 'example.test', receivedBytes: 500, totalBytes: 1000, reason: null, attempts: [], canPause: true, canContinue: false, mediaId: null }
@@ -55,5 +55,15 @@ describe('download indicators', () => {
     expect(sessionTransferProgress({ ...state, batches: [batch('archive', 0, ['extracting', 'importing'])] })).toBeNull()
     expect(sessionTransferProgress({ ...state, batches: [batch('transfer', 0, ['downloading'])], session })).toBe(.5)
     expect(sessionTransferProgress({ ...state, batches: [batch('transfer', 0, ['downloading'])], session: { ...session, progress: null } })).toBeNull()
+  })
+
+  it('summarises a script set as one row: attention first, bytes only while transferring', () => {
+    const done = { ...file, id: 'done', phase: 'complete' as const, receivedBytes: 100, totalBytes: 100 }
+    expect(summarizeFiles([])).toMatchObject({ tone: 'idle', lead: null, progress: null })
+    expect(summarizeFiles([done, file])).toMatchObject({ tone: 'active', lead: file, receivedBytes: 600, totalBytes: 1100 })
+    expect(summarizeFiles([done, file]).progress).toBeCloseTo(600 / 1100)
+    expect(summarizeFiles([done, { ...file, totalBytes: null }])).toMatchObject({ totalBytes: null, progress: null })
+    expect(summarizeFiles([file, { ...file, id: 'wait', phase: 'waiting' }])).toMatchObject({ tone: 'attention', lead: { id: 'wait' } })
+    expect(summarizeFiles([done, { ...file, id: 'gone', phase: 'cancelled' }])).toMatchObject({ tone: 'done', progress: null })
   })
 })

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { EroSource } from '@shared/eroscripts'
 import type { DownloadBatch, DownloadFile } from '@shared/downloads'
-import { distinctTopicFiles, initialTopicSelection, topicFileSources, topicSourceJob, topicSourcesJob } from './topicSelection'
+import { distinctTopicFiles, initialTopicSelection, scriptSets, topicFileSources, topicSourceJob, topicSourcesJob } from './topicSelection'
 
 function source(id: string, kind: EroSource['kind'], fileName: string | null, mirrorKey: string | null = null): EroSource {
   return { id, kind, fileName, mirrorKey, url: `https://example.test/${id}`, host: 'example.test', label: id, postNumber: 1, controlId: null }
@@ -11,6 +11,12 @@ describe('topic file selection', () => {
   it('preselects an unambiguous named pair and a standalone script', () => {
     expect(initialTopicSelection([source('v', 'video', 'test.mp4'), source('s', 'script', 'test.funscript')])).toEqual(['v', 's'])
     expect(initialTopicSelection([source('s', 'script', 'test.funscript')])).toEqual(['s'])
+  })
+
+  it('preselects a video with every axis of its script set, but not two sets', () => {
+    const axes = ['aria.funscript', 'aria.pitch.funscript', 'aria.roll.funscript'].map((name, index) => source(`s${index}`, 'script', name))
+    expect(initialTopicSelection([source('v', 'video', 'aria.mp4'), ...axes])).toEqual(['v', 's0', 's1', 's2'])
+    expect(initialTopicSelection([source('v', 'video', 'aria.mp4'), ...axes, source('o', 'script', 'other.funscript')])).toEqual([])
   })
 
   it('requires a choice for multiple editions or unproven pairing', () => {
@@ -36,6 +42,23 @@ describe('topic file selection', () => {
     expect(topicFileSources(video, sources)).toEqual([video, mirror])
     expect(topicFileSources(script, sources)).toEqual([script])
     expect(topicFileSources(unknown, sources)).toEqual([unknown])
+  })
+})
+
+describe('script sets', () => {
+  it('groups axes under their stem with stroke first and names a repeated axis by its suffix', () => {
+    const sets = scriptSets([
+      source('pitch', 'script', 'Scene.One.pitch.funscript'),
+      source('stroke', 'script', 'Scene.One.funscript'),
+      source('max', 'script', 'Scene.One.max.funscript'),
+      source('other', 'script', 'Other.funscript'),
+      source('label', 'script', null),
+    ], [source('v', 'video', 'Scene.One.mp4')])
+    expect(sets.map((set) => [set.name, set.scripts.map((script) => [script.source.id, script.axis, script.variant])])).toEqual([
+      ['Scene.One', [['stroke', 'L0', null], ['max', 'L0', 'max'], ['pitch', 'R2', null]]],
+      ['Other', [['other', 'L0', null]]],
+      ['label', [['label', 'L0', null]]],
+    ])
   })
 })
 

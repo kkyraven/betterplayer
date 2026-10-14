@@ -12,15 +12,37 @@ const hostSource = compile('../../../../preload/src/download-host.ts')
 const topicSource = compile('../../../../preload/src/eroscripts.ts')
 const archivePasswordSource = compile('../../../../shared/archive-passwords.ts')
 const archivePostSource = compile('../../../../preload/src/archive-passwords.ts')
+const downloadHostSource = compile('../../../../shared/download-host.ts')
+const ipcSource = compile('../../../../shared/ipc.ts')
+const matcherSource = compile('../../../../shared/matcher.ts')
+const megaSource = compile('../../../../shared/mega.ts')
 const header = '<div class="dl-header"><div class="fileinfo"><div class="filename">test.mp4</div></div><div class="actions"><button id="download"><i class="icon-arrow-down-circle-thin-outline"></i>Download</button></div></div>'
+const progress = '<div class="dl-widget progress"><div class="filename">test.mp4</div><div class="status">Decrypting</div><div class="progress-bar"><span class="bar" style="width:0%"></span></div></div>'
+const oldError = progress.replace('class="status">Decrypting', 'class="status error">Previous transfer failed')
 const gofile = '<div class="fm-row" data-id="fixture" data-type="file"><button data-action="open-file"><p>test.mp4</p></button><button id="download" data-action="download">Download</button></div>'
 const pixel = '<meta property="og:title" content="test.mp4"><meta property="og:url" content="https://pixeldrain.com/u/fyGa97Ty"><div class="file_viewer"><div class="headerbar"><div class="file_viewer_headerbar_title">test.mp4</div><button id="toggle" title="Open or close the toolbar">Menu</button></div><div class="toolbar toolbar_visible"><button id="download" class="toolbar_button" title="Save this file to your computer">Download</button></div></div>'
+const driveMissing = '<div id="outerContainer"><div id="innerContainer"><div align="center"><p class="errorMessage" style="padding-top:50px">Sorry, the file you have requested does not exist.</p><p>Make sure that you have the correct URL and that the file exists.</p></div></div></div>'
 const cases = [
+  { name: 'Drive missing single file', provider: 'drive', url: 'https://drive.google.com/file/d/fixture/view?usp=sharing', title: 'Page not found', html: driveMissing, expect: 'failed', unavailable: true },
+  { name: 'Drive access and sign-in remain recoverable', provider: 'drive', url: 'https://drive.google.com/file/d/fixture/view?usp=sharing', title: 'Google Drive', html: '<main><h1>You need access</h1><p>Request access, or switch to an account with access.</p><button>Request access</button><a href="https://accounts.google.com/ServiceLogin">Sign in</a></main>', expect: 'waiting' },
+  { name: 'Drive missing-file text on another host', provider: 'anchor', url: 'https://files.example/file/d/fixture/view', title: 'Page not found', html: driveMissing, expect: 'waiting' },
+  { name: 'Drive live viewer title rejects stale missing text', provider: 'drive', url: 'https://drive.google.com/file/d/fixture/view', title: 'test.mp4 - Google Drive', html: driveMissing, expect: 'waiting' },
+  { name: 'Drive hidden missing-file marker', provider: 'drive', url: 'https://drive.google.com/file/d/fixture/view', title: 'Page not found', html: driveMissing.replace('padding-top:50px', 'display:none'), expect: 'waiting' },
+  { name: 'Drive missing-file marker outside single-file route', provider: 'drive', url: 'https://drive.google.com/drive/folders/fixture', title: 'Page not found', html: driveMissing, expect: 'waiting' },
   { name: 'Pixeldrain detached native anchor', provider: 'pixeldrain', url: 'https://pixeldrain.com/u/fyGa97Ty', html: pixel, expect: 'complete' },
   { name: 'Pixeldrain closed native toolbar', provider: 'pixeldrain', url: 'https://pixeldrain.com/u/fyGa97Ty', html: pixel.replace('toolbar toolbar_visible', 'toolbar'), expect: 'complete' },
   { name: 'Pixeldrain metadata mismatch', provider: 'pixeldrain', url: 'https://pixeldrain.com/u/fyGa97Ty', html: pixel.replace('content="test.mp4"', 'content="other.mp4"'), expect: 'waiting' },
   { name: 'Pixeldrain CAPTCHA handoff', provider: 'pixeldrain', url: 'https://pixeldrain.com/u/fyGa97Ty', html: pixel.replace('</div></div>', '</div><div class="background" role="dialog"><div class="window" role="dialog" aria-modal="true"><div class="body"><div class="captcha_container">CAPTCHA</div></div></div></div></div>'), expect: 'waiting', reason: 'CAPTCHA' },
   { name: 'MEGA decrypted Blob', provider: 'mega', url: 'https://mega.nz/file/fixture#key', html: header, expect: 'complete' },
+  { name: 'MEGA normalized saved filename', provider: 'mega', url: 'https://mega.nz/file/fixture#key', html: header.replace('test.mp4', 'Scene: take.mp4'), fileName: 'Scene: take.mp4', actualFileName: 'Scene- take.mp4', expect: 'complete' },
+  { name: 'MEGA current quota after action', provider: 'mega', url: 'https://mega.nz/file/fixture#key', html: header, quotaAfter: true, quotaClass: 'quota-dialog transfer-quota overquota', expect: 'waiting', reason: 'quota' },
+  { name: 'MEGA current quota behind hidden legacy dialog', provider: 'mega', url: 'https://mega.nz/file/fixture#key', html: header + '<div class="limited-bandwidth-dialog" style="display:none">Old dialog</div><div class="quota-dialog transfer-quota overquota">Quota</div>', expect: 'waiting', reason: 'quota' },
+  { name: 'MEGA quota warning needs confirmation', provider: 'mega', url: 'https://mega.nz/file/fixture#key', html: header + '<div class="quota-dialog transfer-quota almost-overquota">Confirm transfer</div>', expect: 'waiting', reason: 'Confirm MEGA download' },
+  { name: 'MEGA retry clears its previous error asynchronously', provider: 'mega', url: 'https://mega.nz/file/fixture#key', html: header + oldError, retryError: 'clear', expect: 'complete' },
+  { name: 'MEGA persistent previous error reaches its grace deadline', provider: 'mega', url: 'https://mega.nz/file/fixture#key', html: header + oldError, retryError: 'persistent', expect: 'waiting', reason: 'interrupted' },
+  { name: 'MEGA changed transfer error stops promptly', provider: 'mega', url: 'https://mega.nz/file/fixture#key', html: header + oldError, retryError: 'changed', expect: 'waiting', reason: 'interrupted' },
+  { name: 'MEGA new transfer error stops promptly', provider: 'mega', url: 'https://mega.nz/file/fixture#key', html: header + progress, transferError: true, expect: 'waiting', reason: 'interrupted' },
+  { name: 'MEGA emits activity only for its advancing file', provider: 'mega', url: 'https://mega.nz/file/fixture#key', html: header + progress + progress.replace('test.mp4', 'other.mp4'), progressAfter: true, expectActivity: 2, expect: 'complete' },
   { name: 'MEGA ZIP footer download', provider: 'mega', url: 'https://mega.nz/file/fixture#key', actualFileName: 'test-pack.zip', html: '<div class="download download-page"><div class="dl-header"><div class="fileinfo"><div class="filename">test-pack.zip</div></div><div class="actions"><button><i class="icon-more-vertical-thin-outline"></i>More</button></div></div><div class="nv-container"><div class="footer"><button id="download"><i class="icon-arrow-down-circle-thin-outline"></i>Download</button></div></div></div>', expect: 'complete' },
   { name: 'GoFile single selected file', provider: 'gofile', url: 'https://gofile.io/d/fixture', html: gofile, expect: 'complete' },
   { name: 'MEGA missing key', provider: 'mega', url: 'https://mega.nz/file/fixture', html: '<div class="dl-access-box"><input name="decrypt-link" type="text"></div>', expect: 'waiting', reason: 'file key' },
@@ -44,16 +66,25 @@ const cases = [
 
 function bootstrap() {
   const test = window.fixtureCase
+  if (test.title !== undefined) document.title = test.title
   const actualFileName = test.actualFileName ?? 'test.mp4'
   const fakeLocation = new URL(test.url)
   const handlers = new Map()
-  const state = { armed: false, captured: false, released: false, clicks: 0, waiting: '', report: null, expectedUrl: null }
+  const state = { armed: false, captured: false, released: false, clicks: 0, waiting: '', failure: null, report: null, expectedUrl: null, preparedFileName: null, capturedFileName: null, activities: [] }
   const shared = {}
   new Function('exports', window.parent.sharedSource)(shared)
   const archivePasswords = {}
   new Function('exports', window.parent.archivePasswordSource)(archivePasswords)
   const archivePost = {}
   new Function('require', 'exports', window.parent.archivePostSource)((name) => name === '@shared/archive-passwords' ? archivePasswords : shared, archivePost)
+  const ipcHelpers = {}
+  new Function('exports', window.parent.ipcSource)(ipcHelpers)
+  const matcher = {}
+  new Function('exports', window.parent.matcherSource)(matcher)
+  const downloadHost = {}
+  new Function('require', 'exports', window.parent.downloadHostSource)((name) => name === './ipc' ? ipcHelpers : matcher, downloadHost)
+  const mega = {}
+  new Function('exports', window.parent.megaSource)(mega)
   const channels = shared.ERO_CHANNELS
   const call = (channel, value) => { for (const handler of handlers.get(channel) ?? []) handler({}, value) }
   const ipc = {
@@ -61,13 +92,19 @@ function bootstrap() {
     send(channel, value) {
       if (channel === channels.hostPrepared) {
         if (value.status === 'waiting') state.waiting = value.reason
-        else { state.armed = true; state.expectedUrl = value.url; call(channels.hostActivate, { requestId: value.requestId }) }
+        else if (value.status === 'failed') state.failure = value
+        else { state.armed = true; state.expectedUrl = value.url; state.preparedFileName = value.fileName; call(channels.hostActivate, { requestId: value.requestId }) }
       }
       if (channel === channels.hostDownload) {
         if (!state.armed) throw new Error('A host clicked before attribution was armed')
         state.captured = true
-        setTimeout(() => call(channels.hostRelease, { requestId: value.requestId }), 0)
+        state.capturedFileName = value.fileName
+        setTimeout(() => {
+          call(channels.hostRelease, { requestId: value.requestId })
+          if (test.progressAfter) document.querySelector('.dl-widget.progress .bar').style.width = '50%'
+        }, 0)
       }
+      if (channel === channels.hostActivity) state.activities.push(value)
       if (channel === channels.hostWaiting) {
         state.waiting = value.reason
         call(channels.hostCancel, { requestId: value.requestId })
@@ -76,8 +113,8 @@ function bootstrap() {
     },
   }
   const exports = {}
-  const require = (name) => name === 'electron' ? { ipcRenderer: ipc } : name === './archive-passwords' ? archivePost : shared
-  const clock = (callback, delay) => setTimeout(callback, delay >= 8000 ? 25 : delay)
+  const require = (name) => name === 'electron' ? { ipcRenderer: ipc } : name === './archive-passwords' ? archivePost : name === '@shared/download-host' ? downloadHost : name === '@shared/mega' ? mega : shared
+  const clock = (callback, delay) => setTimeout(callback, delay >= 5000 ? 25 : delay)
   new Function('require', 'exports', 'process', 'location', 'setTimeout', test.provider === 'topic' ? window.parent.topicSource : window.parent.hostSource)(require, exports, { isMainFrame: true }, fakeLocation, clock)
   if (test.provider === 'topic') {
     exports.observeEroScripts()
@@ -108,19 +145,41 @@ function bootstrap() {
       }
       if (test.quotaAfter) {
         const quota = document.createElement('div')
-        quota.className = 'limited-bandwidth-dialog'
+        quota.className = test.quotaClass ?? 'limited-bandwidth-dialog'
         quota.textContent = 'Quota'
         document.body.append(quota)
         return
       }
-      const anchor = document.createElement('a')
-      anchor.id = test.provider === 'mega' ? 'dllink' : ''
-      anchor.href = test.provider === 'mega' ? 'blob:https://mega.nz/fixture' : 'https://store1.gofile.io/download/web/fixture/test.mp4'
-      if (test.provider === 'mega') anchor.download = actualFileName
-      anchor.rel = 'noopener'
-      document.body.append(anchor)
-      anchor.click()
-      anchor.remove()
+      const save = () => {
+        const anchor = document.createElement('a')
+        anchor.id = test.provider === 'mega' ? 'dllink' : ''
+        anchor.href = test.provider === 'mega' ? 'blob:https://mega.nz/fixture' : 'https://store1.gofile.io/download/web/fixture/test.mp4'
+        if (test.provider === 'mega') anchor.download = actualFileName
+        anchor.rel = 'noopener'
+        document.body.append(anchor)
+        anchor.click()
+        anchor.remove()
+      }
+      const status = document.querySelector('.dl-widget.progress .status')
+      if (test.retryError === 'persistent') return
+      if (test.retryError === 'changed') { status.textContent = 'New transfer failed'; return }
+      if (test.transferError) { status.classList.add('error'); status.textContent = 'Decryption failed'; return }
+      if (test.retryError === 'clear') {
+        setTimeout(() => { status.classList.remove('error'); status.textContent = 'Decrypting' }, 5)
+        setTimeout(save, 15)
+        return
+      }
+      if (test.progressAfter) {
+        const bar = document.querySelector('.dl-widget.progress .bar')
+        const otherBar = document.querySelectorAll('.dl-widget.progress .bar')[1]
+        setTimeout(() => { otherBar.style.width = '90%' }, 1)
+        setTimeout(() => { bar.style.width = '10%' }, 5)
+        setTimeout(() => { bar.style.width = '25%' }, 10)
+        setTimeout(() => { bar.style.width = '25%' }, 15)
+        setTimeout(save, 20)
+        return
+      }
+      save()
     }
     document.addEventListener('click', (event) => {
       const anchor = event.target instanceof Element ? event.target.closest('a[href]') : null
@@ -135,8 +194,12 @@ function bootstrap() {
   }
   setTimeout(() => {
     let passed = false
-    if (test.expect === 'complete') passed = state.armed && state.released && (test.provider === 'anchor' || test.provider === 'pixeldrain' || state.captured)
-    if (test.expect === 'waiting') passed = !!state.waiting && !state.released && (!test.reason || state.waiting.includes(test.reason))
+    if (test.expect === 'complete') passed = state.armed && state.released && !state.waiting && (test.provider === 'anchor' || test.provider === 'pixeldrain' || state.captured)
+      && (test.provider !== 'mega' || state.preparedFileName === actualFileName && state.capturedFileName === actualFileName)
+      && (test.expectActivity === undefined || state.activities.length === test.expectActivity && state.activities.every(value => value.requestId === 1 && value.fileName === actualFileName))
+    if (test.expect === 'waiting') passed = !!state.waiting && !state.failure && !state.released && (!test.reason || state.waiting.includes(test.reason))
+    if (test.expect === 'failed') passed = state.failure?.status === 'failed' && state.failure.unavailable === test.unavailable
+      && !state.armed && !state.released && state.clicks === 0
     if (test.expect === 'topic') {
       const sources = state.report?.sources ?? []
       const mirrors = sources.filter((source) => source.mirrorKey === 'post-1-mirror-1')
@@ -152,13 +215,13 @@ function bootstrap() {
         && (test.postNumber === undefined || selected.postNumber === test.postNumber)
         && sources.filter((source) => source !== selected).every((source) => !source.archivePasswords?.length)
     }
-    window.parent.postMessage({ fixture: test.name, passed, reason: state.waiting, state }, '*')
+    window.parent.postMessage({ fixture: test.name, passed, reason: state.waiting || state.failure?.reason || '', state }, '*')
   }, 100)
 }
 
 const safe = (value) => JSON.stringify(value).replace(/<\//g, '<\\/')
 const html = `<!doctype html><html><head><style>body{background:#11151b;color:#ddd;font:14px system-ui;margin:20px}iframe{width:700px;height:160px;border:1px solid #444;margin:5px}li{padding:3px}.pass{color:#80d5a0}.fail{color:#ff8c8c}</style></head><body><h1>Browser preload fixtures</h1><ul id="results"></ul><div id="fixtures"></div><script>
-(()=>{window.sharedSource=${safe(sharedSource)};window.hostSource=${safe(hostSource)};window.topicSource=${safe(topicSource)};window.archivePasswordSource=${safe(archivePasswordSource)};window.archivePostSource=${safe(archivePostSource)};
+(()=>{window.sharedSource=${safe(sharedSource)};window.hostSource=${safe(hostSource)};window.topicSource=${safe(topicSource)};window.archivePasswordSource=${safe(archivePasswordSource)};window.archivePostSource=${safe(archivePostSource)};window.downloadHostSource=${safe(downloadHostSource)};window.ipcSource=${safe(ipcSource)};window.matcherSource=${safe(matcherSource)};window.megaSource=${safe(megaSource)};
 const cases=${safe(cases)};const bootstrap=${bootstrap.toString()};const results=[];
 window.addEventListener('message',event=>{if(!event.data.fixture)return;results.push(event.data);const li=document.createElement('li');li.className=event.data.passed?'pass':'fail';li.textContent=(event.data.passed?'PASS ':'FAIL ')+event.data.fixture+(event.data.reason?' / '+event.data.reason:'');document.querySelector('#results').append(li);if(results.length===cases.length)console.log('PRELOAD_FIXTURES '+JSON.stringify(results));});
 for(const test of cases){const frame=document.createElement('iframe');frame.srcdoc='<html><head><base href="'+test.url+'"><style>body{font:14px system-ui}button,input,a{display:inline-block;min-height:24px;min-width:30px}div{min-height:20px}</style></head><body>'+test.html+'<script>window.fixtureCase='+JSON.stringify(test)+';('+bootstrap.toString()+')();<'+ '/script></body></html>';document.querySelector('#fixtures').append(frame);}
