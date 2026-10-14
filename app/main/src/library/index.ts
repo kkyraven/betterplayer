@@ -413,6 +413,10 @@ export class Library {
     return this.db.jump(q, prefix)
   }
 
+  reshuffle() {
+    this.db.reshuffle()
+  }
+
   media(id: number): MediaDetail | null {
     const row = this.db.mediaRow(id)
     return row ? { ...row, ...this.db.metadata(id), scripts: this.db.scripts(id) } : null

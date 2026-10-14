@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto'
-import { link, lstat, open, readdir, rm, rmdir, stat, unlink } from 'node:fs/promises'
+import { copyFile, link, lstat, open, readdir, rm, rmdir, stat, unlink } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, join } from 'node:path'
-import type { DownloadBatch, DownloadDestination, DownloadFile, DownloadKind, DownloadState } from '@shared/downloads'
+import { downloadKindOf, waitingAttempt, type DownloadAttempt, type DownloadBatch, type DownloadDestination, type DownloadFile, type DownloadKind, type DownloadState } from '@shared/downloads'
 import { parseScriptName } from '@shared/matcher'
 import { checkDestination, fullFileName, safeFileName, scriptNameParts, stagingDirectory, truncateFileStem, type CheckedDestination, type WritableRoot } from './files'
 import { DownloadJournal, systemSecretCodec, type SecretCodec } from './journal'
 import { VerificationError, verifyDownloaded } from './verify'
 import { ArchiveError, extractArchive, inspectArchive } from './archive'
-import type { DownloadCandidate, DownloadTransport, OrdinaryBrowserDownload, TransferRequest, TrustedDownloadSelection } from './transport'
+import type { DownloadCandidate, DownloadTransport, OrdinaryBrowserDownload, SourceReveal, TransferRequest, TrustedDownloadSelection } from './transport'
 import { resolveCloudSource } from './providers/cloud'
 import { resolveWebSource } from './providers/web'
 import { megaDownloadName } from '@shared/mega'
@@ -44,6 +44,7 @@ interface FileRecord extends DownloadFile {
   dismissed: boolean
   browserOnly: boolean
   browserTriedSources: string[]
+  reveal?: boolean
   originalName?: string
   archiveDownloaded?: boolean
   archiveArtifacts?: ArchiveArtifact[]
@@ -72,7 +73,7 @@ export interface DownloadQueueOptions {
   transport: DownloadTransport
   importPublished: (batch: { id: string; destination: DownloadDestination; paths: string[]; files: { id: string; kind: DownloadKind; name: string }[] }) => Promise<{ mediaId: number | null }>
   onState: (state: DownloadState) => void
-  continueAttempt?: (fileId: string, attemptId: string) => void | Promise<void>
+  revealSource?: (source: SourceReveal) => number | null | Promise<number | null>
   codec?: SecretCodec
   resolveSource?: (source: DownloadCandidate) => Promise<string | null> | string | null
   openOrdinarySource?: (url: string) => void | Promise<void>
@@ -126,6 +127,13 @@ function browserFallback(source: DownloadCandidate): boolean {
 function candidateFileName(source: DownloadCandidate): string {
   const name = source.fileName || 'Download'
   return /^(?:www\.)?mega\.(?:nz|co\.nz|io)$/.test(new URL(source.url).hostname) ? megaDownloadName(name) : name
+}
+function claimable(file: FileRecord, name: string): boolean {
+  const source = file.candidates[file.candidateIndex]
+  if (!source) return false
+  if (source.fileName) return safeFileName(candidateFileName(source)).toLowerCase() === name.toLowerCase()
+  const kind = downloadKindOf(name)
+  return kind !== 'unknown' && (file.kind === 'unknown' || kind === file.kind)
 }
 function originalScriptStem(name: string, lowercaseStems: ReadonlySet<string>): string {
   const base = basename(name, extname(name))
@@ -240,7 +248,7 @@ export class DownloadQueue {
           if (!TERMINAL.has(file.phase) || (recovering && file.phase === 'failed')) {
             file.sessionId = queue.sessionId
             file.groupId = queue.groupId
-            if (batch.origin === 'browser') { file.phase = 'waiting'; file.reason = 'Browser download interrupted. Continue from its source'; file.canContinue = candidatesPresent(file); continue }
+            if (batch.origin === 'browser') { file.phase = 'waiting'; file.reason = 'downloads.reason.interrupted'; file.canContinue = candidatesPresent(file); continue }
             if (file.phase === 'verifying') {
               try {
                 await checkDestination(await queue.options.getRoot(batch.destination.rootId), batch.destination, batch.checked)
@@ -257,7 +265,7 @@ export class DownloadQueue {
             if (file.archiveDownloaded && !file.verified) { file.phase = 'queued'; file.reason = 'Extracting saved archive'; file.canContinue = false }
             else if (file.published) { file.phase = 'importing'; file.verified = true }
             else if (file.verified) file.phase = 'staged'
-            else if (!candidatesPresent(file)) { file.phase = 'waiting'; file.reason = 'Source details unavailable after restart'; file.canContinue = false }
+            else if (!candidatesPresent(file)) { file.phase = 'waiting'; file.reason = 'downloads.reason.reselect'; file.canContinue = false }
             else { file.phase = 'queued'; file.reason = 'Resuming after restart'; file.receivedBytes = 0; file.totalBytes = null }
           }
         }
@@ -317,6 +325,7 @@ export class DownloadQueue {
 
   adoptOrdinary(download: OrdinaryBrowserDownload): void {
     if (this.closed || this.ordinaryItems.has(download.item)) return
+    if (this.claimWaiting(download)) return
     const item = download.item
     this.ordinaryItems.add(item)
     let record: FileRecord | null = null
@@ -329,7 +338,7 @@ export class DownloadQueue {
       if (!savedPath || !isAbsolute(savedPath) || savedPath.includes('\0')) return Promise.resolve()
       if (!this.batches.flatMap(existing => existing.files).some(file => file.sessionId === this.sessionId && !TERMINAL.has(file.phase))) this.groupId = randomUUID()
       const fileName = basename(savedPath)
-      const kind: DownloadKind = /\.funscript$/i.test(fileName) ? 'script' : /\.zip$/i.test(fileName) ? 'archive' : /\.(mp4|m4v|mov|mkv|webm|avi)$/i.test(fileName) ? 'video' : 'unknown'
+      const kind = downloadKindOf(fileName)
       const sourceLink = /^https?:\/\//i.test(item.getURL()) ? item.getURL() : download.pageUrl
       let source: DownloadCandidate | null = null
       try {
@@ -395,7 +404,7 @@ export class DownloadQueue {
         record.canPause = false
         if (record.phase === 'cancelled') { await this.changed(); return }
         if (state === 'cancelled') { record.phase = 'cancelled'; record.reason = null }
-        else if (state === 'interrupted') { record.phase = 'waiting'; record.reason = 'Browser download interrupted. Continue from its source'; record.canContinue = record.candidates.length > 0 }
+        else if (state === 'interrupted') { record.phase = 'waiting'; record.reason = 'downloads.reason.interrupted'; record.canContinue = record.candidates.length > 0 }
         else {
           record.phase = 'verifying'; await this.changed()
           try {
@@ -503,8 +512,12 @@ export class DownloadQueue {
           catch (error) { this.ordinaryResumptions.delete(file.id); throw error }
           continue
         }
-        const attempt = [...file.attempts].reverse().find(entry => entry.sourceId === file.sourceId && entry.outcome === 'waiting')
-        if (attempt) await this.options.continueAttempt?.(file.id, attempt.id ?? `${file.id}:${file.attempts.length}`)
+        const attempt = waitingAttempt(file)
+        const source = attempt && file.candidates.find(candidate => candidate.id === attempt.sourceId)
+        const batch = this.batches.find(candidate => candidate.id === file.batchId)!
+        const tabId = source ? await this.options.revealSource?.({ attemptId: attempt.id ?? `${file.id}:${file.attempts.length}`, fileId: file.id, topic: { tabId: batch.topicTabId, generation: batch.topicGeneration, url: batch.sourceTopicUrl, title: batch.title }, candidate: source }) : null
+        if (attempt && tabId != null) { attempt.tabId = tabId; continue }
+        file.reveal = true
         file.candidateIndex = Math.min(file.candidateIndex, file.candidates.length - 1)
         const candidate = file.candidates[file.candidateIndex]!
         if (browserFallback(candidate) && !file.browserTriedSources.includes(candidate.id)) {
@@ -513,6 +526,40 @@ export class DownloadQueue {
         file.phase = 'queued'; file.reason = null; file.canContinue = false
       }
       await this.changed(); this.schedule()
+    })
+  }
+  attachFile(id: string, path: string): Promise<void> {
+    return this.command(async () => {
+      if (typeof path !== 'string' || !isAbsolute(path) || path.includes('\0')) throw new Error('Invalid file')
+      const batch = this.batches.find(candidate => candidate.origin !== 'browser' && candidate.files.some(file => file.id === id))
+      const file = batch?.files.find(candidate => candidate.id === id)
+      if (!batch || !file || !['waiting', 'failed'].includes(file.phase) || file.archiveDownloaded || file.verified) throw new Error('This download is not waiting for a file')
+      const info = await stat(path)
+      const kind = downloadKindOf(basename(path))
+      if (!info.isFile() || kind === 'unknown' || (file.kind !== 'unknown' && kind !== file.kind)) throw new Error('This file does not match the download')
+      const stem = extname(file.fileName) ? basename(file.fileName, extname(file.fileName)) : ''
+      const fileName = stem ? safeFileName(`${stem}${extname(path)}`) : safeFileName(basename(path))
+      await checkDestination(await this.options.getRoot(batch.destination.rootId), batch.destination, batch.checked)
+      await stagingDirectory(batch.checked, batch.id)
+      const stagePath = join(batch.stageDirectory, file.stageName)
+      file.attempts.push({ id: `${file.id}:${file.attempts.length + 1}`, host: file.host, sourceId: file.sourceId, at: Date.now(), outcome: 'starting', reason: null, tabId: null })
+      const attempt = file.attempts.at(-1)!
+      const active: ActiveTransfer = { controller: new AbortController(), attemptId: attempt.id!, control: null, ordinary: true }
+      this.active.set(file.id, active)
+      Object.assign(file, { phase: 'verifying', reason: null, canContinue: false, canPause: false, receivedBytes: 0, totalBytes: info.size })
+      await this.changed()
+      this.track((async () => {
+        let placed = true
+        await unlink(stagePath).catch(() => {})
+        try { await link(path, stagePath) } catch { placed = await copyFile(path, stagePath).then(() => true, () => false) }
+        if (this.active.get(file.id) !== active) { await unlink(stagePath).catch(() => {}); return }
+        this.active.delete(file.id)
+        const retry = placed ? await this.acceptTransfer(batch, file, attempt, null, stagePath, { fileName, totalBytes: info.size }, active) : 'Could not write to the destination'
+        if (retry === null) return
+        attempt.outcome = 'failed'; attempt.reason = retry
+        file.phase = 'waiting'; file.reason = retry; file.canContinue = candidatesPresent(file)
+        await this.changed()
+      })())
     })
   }
   openSource(id: string): Promise<void> {
@@ -606,7 +653,8 @@ export class DownloadQueue {
           if (!this.closed && !['paused', 'cancelled'].includes(file.phase)) { file.phase = 'failed'; file.reason = 'Download could not be saved'; await this.changed() }
         }).finally(() => {
           if (active.ownsHost && active.host) { active.ownsHost = false; this.releaseHost(active.host) }
-          this.active.delete(file.id); this.schedule()
+          if (this.active.get(file.id) === active) this.active.delete(file.id)
+          this.schedule()
         })
         this.track(task)
       }
@@ -660,7 +708,7 @@ export class DownloadQueue {
       await this.changed()
       const attemptId = active.attemptId
       const request: TransferRequest = {
-        attemptId: active.attemptId, fileId: file.id, batchId: batch.id, topic: { tabId: batch.topicTabId, generation: batch.topicGeneration, url: batch.sourceTopicUrl }, candidate: source, directUrl, stagingPath: stagePath, signal,
+        attemptId: active.attemptId, fileId: file.id, batchId: batch.id, topic: { tabId: batch.topicTabId, generation: batch.topicGeneration, url: batch.sourceTopicUrl, title: batch.title }, candidate: source, directUrl, stagingPath: stagePath, signal, reveal: file.reveal,
         scriptFileNames: batch.files.filter(sibling => sibling.kind === 'script' && sibling.phase !== 'cancelled')
           .map(sibling => sibling.candidates[sibling.candidateIndex]?.fileName)
           .filter((name): name is string => typeof name === 'string' && name.length > 0).slice(0, 100),
@@ -671,6 +719,7 @@ export class DownloadQueue {
         },
         onControl: control => { if (!signal.aborted && this.active.get(file.id) === active && active.attemptId === attemptId && ['resolving', 'attempting', 'downloading'].includes(file.phase)) { active.control = control; file.canPause = true } },
       }
+      file.reveal = false
       let result
       try { result = await this.options.transport(request) }
       catch { result = { status: 'failed' as const, reason: 'Host connection failed', scope: 'remote' as const } }
@@ -678,34 +727,9 @@ export class DownloadQueue {
       if (signal.aborted || this.closed || this.interrupted(file)) return
       file.canPause = false
       if (result.status === 'complete') {
-        file.phase = 'verifying'; await this.changed()
-        try {
-          file.originalName = fullFileName(result.fileName)
-          file.fileName = safeFileName(file.originalName)
-          if (source.fileName && safeFileName(candidateFileName(source)).toLowerCase() !== file.fileName.toLowerCase()) throw new VerificationError('The source returned a different file')
-          const size = (await stat(stagePath)).size
-          if (result.totalBytes > 0 && result.totalBytes !== size) throw new VerificationError('Incomplete download')
-          if (await zipDownload(stagePath, file.fileName, result.mimeType)) {
-            if (file.kind === 'video') throw new VerificationError('The source returned a different file')
-            if (!/\.zip$/i.test(file.fileName)) file.fileName = safeFileName(`${file.fileName}.zip`)
-            file.kind = 'archive'; file.archiveDownloaded = true; file.receivedBytes = size; file.totalBytes = size; attempt.outcome = 'complete'
-            await this.changed()
-            await this.prepareArchive(batch, file, active)
-            await this.startFinishBatch(batch)
-            return
-          }
-          file.kind = await verifyDownloaded(stagePath, file.fileName, file.kind, result.mimeType)
-          if (signal.aborted || this.closed || this.interrupted(file)) return
-          if (result.totalBytes > 0 && result.totalBytes !== size) throw new VerificationError('Incomplete download')
-          file.receivedBytes = size; file.totalBytes = size; file.verified = true; file.phase = 'staged'; attempt.outcome = 'complete'
-          await this.changed(); await this.startFinishBatch(batch); return
-        } catch (error) {
-          if (signal.aborted || this.closed || this.interrupted(file)) return
-          if (!(error instanceof VerificationError)) { file.phase = 'failed'; file.reason = 'Downloaded file could not be verified'; await this.changed(); return }
-          attempt.outcome = 'failed'; attempt.reason = error.message
-          if (error.unsupported) { file.phase = 'failed'; file.reason = error.message; await this.changed(); return }
-          result = { status: 'failed', reason: error.message, scope: 'remote' }
-        }
+        const retry = await this.acceptTransfer(batch, file, attempt, source.fileName ? candidateFileName(source) : null, stagePath, result, active)
+        if (retry === null) return
+        result = { status: 'failed', reason: retry, scope: 'remote' }
       }
       if (result.status === 'waiting') { attempt.outcome = 'waiting'; attempt.reason = result.reason; attempt.tabId = result.tabId ?? null }
       else if (result.status === 'failed') {
@@ -713,7 +737,7 @@ export class DownloadQueue {
         if (result.scope === 'local') { file.phase = 'failed'; file.reason = result.reason; await this.changed(); return }
       }
       const next = file.candidateIndex + 1
-      if (!file.browserOnly && next < file.candidates.length) { file.candidateIndex = next; file.reason = `Trying ${file.candidates[next]!.host}`; await this.changed(); continue }
+      if (!file.browserOnly && next < file.candidates.length) { file.candidateIndex = next; file.host = file.candidates[next]!.host; file.reason = 'downloads.reason.trying'; await this.changed(); continue }
       const checkedSources = new Set<string>()
       const waiting = [...file.attempts].reverse().find(entry => {
         if (entry.outcome === 'starting' || checkedSources.has(entry.sourceId)) return false
@@ -731,16 +755,102 @@ export class DownloadQueue {
           file.candidateIndex = fallbackIndex; file.sourceId = fallback.id; file.host = fallback.host
           if (/^(?:www\.)?pixeldrain\.com$/.test(new URL(fallback.url).hostname)) {
             file.browserOnly = true; file.browserTriedSources.push(fallback.id)
-            file.reason = `Trying ${fallback.host}`
+            file.reason = 'downloads.reason.trying'
             await this.changed()
             continue
           }
-          file.phase = 'waiting'; file.reason = 'Continue on the source page to check this download'; file.canContinue = true
+          file.phase = 'waiting'; file.reason = 'downloads.reason.notStarted'; file.canContinue = true
         } else { file.phase = 'failed'; file.reason = result.status === 'failed' ? result.reason : 'Could not start this download' }
       }
       await this.changed(); return
     }
-    file.phase = 'waiting'; file.reason = 'Open the topic and select this source again'; await this.changed()
+    file.phase = 'waiting'; file.reason = 'downloads.reason.reselect'; await this.changed()
+  }
+
+  private async acceptTransfer(batch: BatchRecord, file: FileRecord, attempt: DownloadAttempt, expectedName: string | null, stagePath: string, result: { fileName: string; totalBytes: number; mimeType?: string }, active: ActiveTransfer): Promise<string | null> {
+    const signal = active.controller.signal
+    file.phase = 'verifying'; await this.changed()
+    try {
+      file.originalName = fullFileName(result.fileName)
+      file.fileName = safeFileName(file.originalName)
+      if (expectedName && safeFileName(expectedName).toLowerCase() !== file.fileName.toLowerCase()) throw new VerificationError('The source returned a different file')
+      const size = (await stat(stagePath)).size
+      if (result.totalBytes > 0 && result.totalBytes !== size) throw new VerificationError('Incomplete download')
+      if (await zipDownload(stagePath, file.fileName, result.mimeType)) {
+        if (file.kind === 'video') throw new VerificationError('The source returned a different file')
+        if (!/\.zip$/i.test(file.fileName)) file.fileName = safeFileName(`${file.fileName}.zip`)
+        file.kind = 'archive'; file.archiveDownloaded = true; file.receivedBytes = size; file.totalBytes = size; attempt.outcome = 'complete'
+        await this.changed()
+        await this.prepareArchive(batch, file, active)
+        await this.startFinishBatch(batch)
+        return null
+      }
+      file.kind = await verifyDownloaded(stagePath, file.fileName, file.kind, result.mimeType)
+      if (signal.aborted || this.closed || this.interrupted(file)) return null
+      file.receivedBytes = size; file.totalBytes = size; file.verified = true; file.phase = 'staged'; attempt.outcome = 'complete'
+      await this.changed(); await this.startFinishBatch(batch); return null
+    } catch (error) {
+      if (signal.aborted || this.closed || this.interrupted(file)) return null
+      if (!(error instanceof VerificationError)) { file.phase = 'failed'; file.reason = 'Downloaded file could not be verified'; await this.changed(); return null }
+      attempt.outcome = 'failed'; attempt.reason = error.message
+      if (error.unsupported) { file.phase = 'failed'; file.reason = error.message; await this.changed(); return null }
+      return error.message
+    }
+  }
+
+  private claimWaiting(download: OrdinaryBrowserDownload): boolean {
+    const item = download.item
+    let name: string
+    try { name = safeFileName(item.getFilename()) } catch { return false }
+    const matches = this.batches.filter(batch => batch.origin !== 'browser' && batch.stageDirectory).flatMap(batch => batch.files
+      .filter(file => file.phase === 'waiting' && file.canContinue && !file.archiveDownloaded
+        && waitingAttempt(file)?.tabId === download.tabId && claimable(file, name))
+      .map(file => ({ batch, file })))
+    const match = matches.length === 1 ? matches[0] : undefined
+    if (!match) return false
+    const { batch, file } = match
+    const source = file.candidates[file.candidateIndex]!
+    const stagePath = join(batch.stageDirectory, file.stageName)
+    try { item.setSavePath(stagePath) } catch { return false }
+    this.ordinaryItems.add(item)
+    file.attempts.push({ id: `${file.id}:${file.attempts.length + 1}`, host: source.host, sourceId: source.id, at: Date.now(), outcome: 'starting', reason: null, tabId: download.tabId })
+    const attempt = file.attempts.at(-1)!
+    const control = { pause: () => item.pause(), resume: () => item.resume(), cancel: () => item.cancel() }
+    const active: ActiveTransfer = { controller: new AbortController(), attemptId: attempt.id!, control, ordinary: true }
+    this.active.set(file.id, active)
+    Object.assign(file, { phase: 'downloading', host: source.host, reason: null, canContinue: false, canPause: true, receivedBytes: Math.max(0, item.getReceivedBytes()), totalBytes: item.getTotalBytes() > 0 ? item.getTotalBytes() : null })
+    const progress = () => {
+      if (this.active.get(file.id) !== active || file.phase !== 'downloading') return
+      file.receivedBytes = Math.max(0, item.getReceivedBytes())
+      file.totalBytes = item.getTotalBytes() > 0 ? item.getTotalBytes() : null
+      this.progress()
+    }
+    const done = (_event: Electron.Event, state: 'completed' | 'cancelled' | 'interrupted') => {
+      cleanup()
+      if (this.active.get(file.id) !== active) return
+      this.active.delete(file.id)
+      file.canPause = false
+      if (this.closed || file.phase === 'cancelled') return
+      this.track((async () => {
+        const retry = state === 'completed'
+          ? await this.acceptTransfer(batch, file, attempt, source.fileName ? candidateFileName(source) : null, stagePath, { fileName: item.getFilename(), totalBytes: item.getReceivedBytes(), mimeType: item.getMimeType() }, active)
+          : 'downloads.reason.interrupted'
+        if (retry === null) return
+        attempt.outcome = 'failed'; attempt.reason = retry
+        file.phase = 'waiting'; file.reason = retry; file.canContinue = true
+        await this.changed()
+      })())
+    }
+    const cleanup = () => {
+      item.removeListener('updated', progress)
+      item.removeListener('done', done)
+      this.ordinaryCleanups.delete(cleanup)
+    }
+    this.ordinaryCleanups.add(cleanup)
+    item.on('updated', progress)
+    item.once('done', done)
+    this.track(this.changed())
+    return true
   }
 
   private syncArchive(file: FileRecord): void {

@@ -1,4 +1,23 @@
-import type { DownloadBatch, DownloadFile, DownloadPhase, DownloadSession, DownloadState } from '@shared/downloads'
+import { isDownloadReason, type DownloadBatch, type DownloadFile, type DownloadPhase, type DownloadSession, type DownloadState } from '@shared/downloads'
+import type { Translate } from '@shared/i18n'
+
+const HOST_NAMES: Record<string, string> = {
+  'mega.nz': 'MEGA', 'mega.co.nz': 'MEGA', 'mega.io': 'MEGA', 'gofile.io': 'GoFile', 'pixeldrain.com': 'Pixeldrain',
+  'drive.google.com': 'Google Drive', 'dropbox.com': 'Dropbox', 'mediafire.com': 'MediaFire',
+}
+export function hostName(host: string): string {
+  const bare = host.toLowerCase().replace(/^www\./, '')
+  return HOST_NAMES[bare] ?? bare
+}
+export function reasonText(t: Translate, reason: string, host: string): string {
+  return isDownloadReason(reason) ? t(reason, { host: hostName(host) }) : reason
+}
+export function manualStep(file: DownloadFile): boolean {
+  return file.phase === 'waiting' && file.canContinue && !file.archive
+}
+export function canAttachFile(file: DownloadFile): boolean {
+  return (file.phase === 'waiting' || file.phase === 'failed') && file.canRetry !== false && !file.archive
+}
 
 export function downloadTone(session: DownloadSession, phases?: DownloadPhase[]): 'attention' | 'active' | 'done' | 'idle' {
   if (session.attention > 0) return 'attention'

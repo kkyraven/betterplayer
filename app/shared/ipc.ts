@@ -118,6 +118,7 @@ export interface IpcContract {
   'library:query': (query: MediaQuery) => MediaPage
   'library:queryIds': (query: MediaQuery) => number[]
   'library:jump': (query: MediaQuery, prefix: string) => { index: number; id: number } | null
+  'library:reshuffle': () => void
   'library:media': (id: number) => MediaDetail | null
   'library:suggestions': (id: number) => MediaRow[]
   'library:scriptFolders': (path: string) => Promise<string[]>
@@ -176,6 +177,7 @@ export interface IpcContract {
   'account:cancelLogin': () => void
   'account:logout': () => void
   'account:refresh': () => void
+  'account:syncAgenticLover': () => void
   'account:setName': (name: string) => void
   'account:setAvatar': (userId: string, png: string | null) => void
   'account:friends': () => void
@@ -212,6 +214,7 @@ export interface IpcContract {
   'downloads:cancel': (id: string) => void
   'downloads:continue': (id: string) => void
   'downloads:openSource': (id: string) => void
+  'downloads:attachFile': (id: string, path: string) => void
   'downloads:clear': () => void
   'downloads:cancelAll': () => void
   'downloads:videoOnly': (id: string) => void
@@ -238,6 +241,7 @@ export interface IpcContract {
   'models:dir': () => string
   'models:status': (files: string[]) => Record<string, ModelFileStatus | null>
   'models:download': (id: string, file: ModelFileInfo) => void
+  'models:import': (files: ModelFileInfo[]) => string[] | null
   'models:remove': (file: string) => void
   'models:cancel': (id: string) => void
   'audio:decode': (source: string) => string

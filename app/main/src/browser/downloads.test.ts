@@ -3,7 +3,7 @@ import type { DownloadItem, IpcMain, Session, WebContents } from 'electron'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ERO_CHANNELS } from '@shared/eroscripts'
 import type { BrowserTab } from '@shared/browser'
-import type { TransferRequest } from '../downloads/transport'
+import type { SourceReveal, TransferRequest } from '../downloads/transport'
 import { BrowserDownloads, attributedDownload, hostDownloadUrl, publicDownloadUrl } from './downloads'
 
 class Contents extends EventEmitter {
@@ -35,7 +35,7 @@ class Item extends EventEmitter {
 function request(overrides: Partial<TransferRequest> = {}): TransferRequest {
   return {
     attemptId: 'attempt-1', fileId: 'file-1', batchId: '00000000-0000-0000-0000-000000000001',
-    topic: { tabId: 1, generation: 3, url: 'https://discuss.eroscripts.com/t/test/123' },
+    topic: { tabId: 1, generation: 3, url: 'https://discuss.eroscripts.com/t/test/123', title: 'Test topic' },
     candidate: { id: 'source-1', url: 'https://files.example/test.mp4', label: 'test.mp4', host: 'files.example', kind: 'video', fileName: 'test.mp4', postNumber: 1, controlId: null, mirrorKey: null },
     directUrl: 'https://files.example/test.mp4', stagingPath: '/tmp/.bp-downloads-00000000-0000-0000-0000-000000000001/file-1.part',
     signal: new AbortController().signal, onProgress: vi.fn(), onControl: vi.fn(), ...overrides,
@@ -50,7 +50,7 @@ function setup() {
   const origin = new Contents('https://discuss.eroscripts.com/t/test/123')
   const host = new Contents('https://mega.nz/file/handle#key')
   const ordinary = vi.fn()
-  const openRelated = vi.fn((_request: TransferRequest) => tab(2, host.url))
+  const openRelated = vi.fn((_request: SourceReveal & { reveal?: boolean }) => tab(2, host.url))
   const contents = vi.fn((id: number) => (id === 1 ? origin : host) as unknown as WebContents)
   const activate = vi.fn()
   const manager = new BrowserDownloads(events as unknown as Session, ipc as unknown as IpcMain, {
@@ -175,7 +175,7 @@ describe('ordinary host controls', () => {
     state.host.mainFrame.send.mockImplementation((channel: string, payload: { requestId: number; sourceUrl: string }) => {
       if (channel !== ERO_CHANNELS.hostPrepare) return
       if (payload.sourceUrl === article) state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'redirect', url: target })
-      else state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'failed', unavailable: true, reason: 'Source is unavailable' })
+      else state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'failed', unavailable: true, reason: 'downloads.reason.unavailable' })
     })
     const transfer = request({ directUrl: null, candidate: { ...request().candidate, url: article, host: 'keep2porn.net', fileName: null } })
     await expect(state.manager.start(transfer)).resolves.toMatchObject({ status: 'failed', unavailable: true })
@@ -193,7 +193,7 @@ describe('ordinary host controls', () => {
       if (channel !== ERO_CHANNELS.hostPrepare) return
       state.reply(ERO_CHANNELS.hostPrepared, payload.sourceUrl === article
         ? { requestId: payload.requestId, status: 'redirect', url: target }
-        : { requestId: payload.requestId, status: 'waiting', reason: 'Sign in to download' })
+        : { requestId: payload.requestId, status: 'waiting', reason: 'downloads.reason.notStarted' })
     })
     const transfer = request({ directUrl: null, candidate: { ...request().candidate, url: article, host: 'keep2porn.net', fileName: null } })
     await expect(state.manager.start(transfer)).resolves.toMatchObject({ status: 'waiting' })
@@ -207,24 +207,39 @@ describe('ordinary host controls', () => {
     state.contents.mockImplementation(id => (id === 1 ? state.origin : id === 2 ? state.host : removed) as unknown as WebContents)
     state.openRelated.mockImplementation(request => tab(request.candidate.url === state.host.url ? 2 : 3, request.candidate.url))
     state.host.mainFrame.send.mockImplementation((channel: string, payload: { requestId: number }) => {
-      if (channel === ERO_CHANNELS.hostPrepare) state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'waiting', reason: 'MEGA needs the file key' })
+      if (channel === ERO_CHANNELS.hostPrepare) state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'waiting', reason: 'downloads.reason.fileKey' })
     })
     removed.mainFrame.send.mockImplementation((channel: string, payload: { requestId: number }) => {
-      if (channel === ERO_CHANNELS.hostPrepare) state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'failed', unavailable: true, reason: 'Source is unavailable' }, removed)
+      if (channel === ERO_CHANNELS.hostPrepare) state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'failed', unavailable: true, reason: 'downloads.reason.unavailable' }, removed)
     })
     const first = request({ directUrl: null, candidate: { ...request().candidate, url: state.host.url, host: 'mega.nz' } })
     const later = { ...first, attemptId: 'attempt-2', candidate: { ...first.candidate, id: 'source-2', url: removed.url } }
     await expect(state.manager.start(first)).resolves.toMatchObject({ status: 'waiting', tabId: 2 })
     await expect(state.manager.start(later)).resolves.toMatchObject({ status: 'failed', unavailable: true })
-    state.manager.continue(first.fileId, first.attemptId)
+    expect(state.manager.reveal(first)).toBe(2)
     expect(state.activate).toHaveBeenCalledWith(2)
     const retry = { ...first, attemptId: 'attempt-3' }
     await expect(state.manager.start(retry)).resolves.toMatchObject({ status: 'waiting', tabId: 2 })
     state.activate.mockClear()
-    state.manager.continue(first.fileId, first.attemptId)
+    expect(state.manager.reveal(first)).toBeNull()
     expect(state.activate).not.toHaveBeenCalled()
-    state.manager.continue(retry.fileId, retry.attemptId)
+    expect(state.manager.reveal(retry)).toBe(2)
     expect(state.activate).toHaveBeenCalledWith(2)
+    state.manager.destroy()
+  })
+  it('reopens a closed source tab in front without rerunning the automatic step', async () => {
+    const state = setup()
+    state.host.mainFrame.send.mockImplementation((channel: string, payload: { requestId: number }) => {
+      if (channel === ERO_CHANNELS.hostPrepare) state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'waiting', reason: 'downloads.reason.chooseFile' })
+    })
+    const first = request({ directUrl: null, candidate: { ...request().candidate, url: state.host.url, host: 'mega.nz' } })
+    await expect(state.manager.start(first)).resolves.toMatchObject({ status: 'waiting', tabId: 2 })
+    state.host.mainFrame.send.mockClear()
+    state.contents.mockImplementation(id => (id === 1 ? state.origin : null) as unknown as WebContents)
+    state.openRelated.mockImplementation(() => tab(5, state.host.url))
+    expect(state.manager.reveal(first)).toBe(5)
+    expect(state.openRelated).toHaveBeenLastCalledWith(expect.objectContaining({ reveal: true, attemptId: first.attemptId }))
+    expect(state.host.mainFrame.send).not.toHaveBeenCalled()
     state.manager.destroy()
   })
   it('does not follow provider promotions or unrelated origins as intermediary files', async () => {
@@ -235,7 +250,7 @@ describe('ordinary host controls', () => {
       for (const url of ['https://k2s.cc/code/promotion', 'http://127.0.0.1/file', 'https://ads.example/file/53a37617478a5']) {
         state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'redirect', url })
       }
-      state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'waiting', reason: 'A verified download control was not available' })
+      state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'waiting', reason: 'downloads.reason.notStarted' })
     })
     await expect(state.manager.start(request({ directUrl: null, candidate: { ...request().candidate, url: state.host.url, host: 'keep2porn.net' } }))).resolves.toMatchObject({ status: 'waiting' })
     expect(state.openRelated).toHaveBeenCalledOnce()
@@ -245,7 +260,7 @@ describe('ordinary host controls', () => {
     const state = setup()
     state.host.url = 'https://gofile.io/d/Xsfx7tfh'
     state.host.mainFrame.send.mockImplementation((channel: string, payload: { requestId: number }) => {
-      if (channel === ERO_CHANNELS.hostPrepare) state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'waiting', reason: 'Fixture' })
+      if (channel === ERO_CHANNELS.hostPrepare) state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'waiting', reason: 'downloads.reason.notStarted' })
     })
     const scriptFileNames = ['1641647055994.funscript']
     await state.manager.start(request({ directUrl: null, scriptFileNames, candidate: { ...request().candidate, url: state.host.url, host: 'gofile.io', fileName: null } }))
@@ -435,7 +450,7 @@ describe('ordinary host controls', () => {
     expect(finished).not.toHaveBeenCalled()
     expect(transfer.onProgress).not.toHaveBeenCalled()
     await vi.advanceTimersByTimeAsync(8 * 60_000)
-    expect(finished).toHaveBeenCalledWith({ status: 'waiting', reason: 'The source did not start a download. Continue on its page', tabId: 2 })
+    expect(finished).toHaveBeenCalledWith({ status: 'waiting', reason: 'downloads.reason.notStarted', tabId: 2 })
     expect(state.ipc.listenerCount(ERO_CHANNELS.hostActivity)).toBe(0)
     expect(state.ipc.listenerCount(ERO_CHANNELS.hostDownload)).toBe(0)
     expect(state.ipc.listenerCount(ERO_CHANNELS.hostWaiting)).toBe(0)
@@ -461,7 +476,7 @@ describe('ordinary host controls', () => {
       senderFrame: forgery === 'frame' ? {} : state.host.mainFrame,
     }, { requestId: forgery === 'request ID' ? requestId + 1 : requestId, fileName: forgery === 'filename' ? 'other.mp4' : 'test.mp4' })
     await vi.advanceTimersByTimeAsync(60_001)
-    expect(finished).toHaveBeenCalledWith({ status: 'waiting', reason: 'The source did not start a download. Continue on its page', tabId: 2 })
+    expect(finished).toHaveBeenCalledWith({ status: 'waiting', reason: 'downloads.reason.notStarted', tabId: 2 })
     expect(transfer.onProgress).not.toHaveBeenCalled()
     expect(state.ipc.listenerCount(ERO_CHANNELS.hostActivity)).toBe(0)
     state.manager.destroy()
@@ -470,9 +485,9 @@ describe('ordinary host controls', () => {
     const state = setup()
     const transfer = request({ directUrl: null, candidate: { ...request().candidate, url: state.host.url, host: 'mega.nz' } })
     state.host.mainFrame.send.mockImplementation((channel: string, payload: { requestId: number }) => {
-      if (channel === ERO_CHANNELS.hostPrepare) state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'waiting', reason: 'MEGA needs the file key' })
+      if (channel === ERO_CHANNELS.hostPrepare) state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'waiting', reason: 'downloads.reason.fileKey' })
     })
-    await expect(state.manager.start(transfer)).resolves.toEqual({ status: 'waiting', reason: 'MEGA needs the file key', tabId: 2 })
+    await expect(state.manager.start(transfer)).resolves.toEqual({ status: 'waiting', reason: 'downloads.reason.fileKey', tabId: 2 })
     expect(transfer.onProgress).not.toHaveBeenCalled()
     expect(state.host.mainFrame.send).not.toHaveBeenCalledWith(ERO_CHANNELS.hostActivate, expect.anything())
     state.manager.destroy()
@@ -482,9 +497,9 @@ describe('ordinary host controls', () => {
     state.host.url = 'https://gofile.io/d/removed'
     const transfer = request({ directUrl: null, candidate: { ...request().candidate, url: state.host.url, host: 'gofile.io' } })
     state.host.mainFrame.send.mockImplementation((channel: string, payload: { requestId: number }) => {
-      if (channel === ERO_CHANNELS.hostPrepare) state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'failed', unavailable: true, reason: 'Source is unavailable' })
+      if (channel === ERO_CHANNELS.hostPrepare) state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'failed', unavailable: true, reason: 'downloads.reason.unavailable' })
     })
-    await expect(state.manager.start(transfer)).resolves.toEqual({ status: 'failed', scope: 'remote', unavailable: true, reason: 'Source is unavailable' })
+    await expect(state.manager.start(transfer)).resolves.toEqual({ status: 'failed', scope: 'remote', unavailable: true, reason: 'downloads.reason.unavailable' })
     expect(state.host.mainFrame.send).not.toHaveBeenCalledWith(ERO_CHANNELS.hostActivate, expect.anything())
     expect(transfer.onProgress).not.toHaveBeenCalled()
     state.manager.destroy()
@@ -494,12 +509,12 @@ describe('ordinary host controls', () => {
     const transfer = request({ directUrl: null, candidate: { ...request().candidate, url: state.host.url, host: 'mega.nz' } })
     state.host.mainFrame.send.mockImplementation((channel: string, payload: { requestId: number }) => {
       if (channel !== ERO_CHANNELS.hostPrepare) return
-      const dead = { requestId: payload.requestId, status: 'failed', unavailable: true, reason: 'Source is unavailable' }
+      const dead = { requestId: payload.requestId, status: 'failed', unavailable: true, reason: 'downloads.reason.unavailable' }
       state.reply(ERO_CHANNELS.hostPrepared, dead, state.origin)
       state.ipc.emit(ERO_CHANNELS.hostPrepared, { sender: state.host, senderFrame: {} }, dead)
       state.host.url = 'https://mega.nz/file/other#key'
       state.reply(ERO_CHANNELS.hostPrepared, dead)
-      state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'waiting', reason: 'The source page changed. Reopen the original link' })
+      state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'waiting', reason: 'downloads.reason.pageChanged' })
     })
     await expect(state.manager.start(transfer)).resolves.toMatchObject({ status: 'waiting' })
     state.manager.destroy()
@@ -509,7 +524,7 @@ describe('ordinary host controls', () => {
     state.host.url = 'https://mega.nz/file/handle#key'
     const transfer = request({ directUrl: null, candidate: { ...request().candidate, url: 'https://mega.co.nz/#!handle!key', host: 'mega.co.nz' } })
     state.host.mainFrame.send.mockImplementation((channel: string, payload: { requestId: number }) => {
-      if (channel === ERO_CHANNELS.hostPrepare) state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'failed', unavailable: true, reason: 'Source is unavailable' })
+      if (channel === ERO_CHANNELS.hostPrepare) state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'failed', unavailable: true, reason: 'downloads.reason.unavailable' })
     })
     await expect(state.manager.start(transfer)).resolves.toMatchObject({ status: 'failed', unavailable: true })
     state.manager.destroy()
@@ -534,7 +549,7 @@ describe('ordinary host controls', () => {
       }
       if (channel === ERO_CHANNELS.hostActivate) state.reply(ERO_CHANNELS.hostDownload, { requestId: payload.requestId, fileName: 'test.mp4', url: 'blob:https://advert.example/uuid' })
     })
-    await expect(state.manager.start(transfer)).resolves.toMatchObject({ status: 'waiting', reason: 'The host offered a different file. Check the source page' })
+    await expect(state.manager.start(transfer)).resolves.toMatchObject({ status: 'waiting', reason: 'downloads.reason.differentFile' })
     expect(state.host.mainFrame.send).not.toHaveBeenCalledWith(ERO_CHANNELS.hostRelease, expect.anything())
     state.manager.destroy()
   })
@@ -543,9 +558,9 @@ describe('ordinary host controls', () => {
     const transfer = request({ directUrl: null, candidate: { ...request().candidate, url: state.host.url, host: 'mega.nz' } })
     state.host.mainFrame.send.mockImplementation((channel: string, payload: { requestId: number }) => {
       if (channel === ERO_CHANNELS.hostPrepare) state.reply(ERO_CHANNELS.hostPrepared, { requestId: payload.requestId, status: 'ready', provider: 'mega', fileName: 'test.mp4', url: null })
-      if (channel === ERO_CHANNELS.hostActivate) state.reply(ERO_CHANNELS.hostWaiting, { requestId: payload.requestId, reason: 'MEGA reached its transfer quota' })
+      if (channel === ERO_CHANNELS.hostActivate) state.reply(ERO_CHANNELS.hostWaiting, { requestId: payload.requestId, reason: 'downloads.reason.limit' })
     })
-    await expect(state.manager.start(transfer)).resolves.toEqual({ status: 'waiting', reason: 'MEGA reached its transfer quota', tabId: 2 })
+    await expect(state.manager.start(transfer)).resolves.toEqual({ status: 'waiting', reason: 'downloads.reason.limit', tabId: 2 })
     expect(state.ipc.listenerCount(ERO_CHANNELS.hostDownload)).toBe(0)
     expect(state.ipc.listenerCount(ERO_CHANNELS.hostWaiting)).toBe(0)
     expect(transfer.onProgress).not.toHaveBeenCalled()

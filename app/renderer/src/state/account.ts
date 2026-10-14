@@ -46,3 +46,12 @@ export async function checkSupporter(): Promise<string | null> {
     return ipcMessage(error)
   }
 }
+
+export async function checkAgenticLover(): Promise<string | null> {
+  try {
+    await invoke('account:syncAgenticLover')
+    return useAccount.getState().status.me?.premium ? null : t('account.notSubscribed')
+  } catch (error) {
+    return ipcMessage(error)
+  }
+}

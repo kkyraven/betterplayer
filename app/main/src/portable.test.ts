@@ -16,7 +16,7 @@ describe('portableDataDir', () => {
   })
 
   it('is the folder beside the exe for the portable build, which runs from the temp unpack folder', () => {
-    expect(portableDataDir({ PORTABLE_EXECUTABLE_DIR: '/Volumes/stick' }, TEMP_EXE)).toBe('/Volumes/stick/betterplayer')
+    expect(portableDataDir({ PORTABLE_EXECUTABLE_DIR: '/Volumes/stick' }, TEMP_EXE)).toBe(join('/Volumes/stick', 'betterplayer'))
   })
 
   it('is null when the variable was inherited by an installed copy', () => {

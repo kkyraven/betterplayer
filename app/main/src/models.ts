@@ -1,8 +1,8 @@
 import { t } from './i18n'
 import { createHash } from 'node:crypto'
-import { createWriteStream, mkdirSync, renameSync, rmSync, statSync } from 'node:fs'
+import { createReadStream, createWriteStream, mkdirSync, renameSync, rmSync, statSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import type { ReadableStream } from 'node:stream/web'
@@ -54,6 +54,30 @@ export class Models {
 
   cancel(id: string) {
     this.running.get(id)?.abort()
+  }
+
+  async import(paths: string[], files: ModelFileInfo[]): Promise<string[]> {
+    const unknown: string[] = []
+    for (const path of paths) {
+      const tmp = join(this.dir, `import.${process.pid}.part`)
+      const hash = createHash('sha256')
+      const hashing = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          hash.update(chunk)
+          callback(null, chunk)
+        },
+      })
+      try {
+        await pipeline(createReadStream(path), hashing, createWriteStream(tmp))
+        const digest = hash.digest('hex')
+        const match = files.find((f) => f.sha256.toLowerCase() === digest)
+        if (match) renameSync(tmp, join(this.dir, match.file))
+        else unknown.push(basename(path))
+      } finally {
+        rmSync(tmp, { force: true })
+      }
+    }
+    return unknown
   }
 
   private async fetchFile(id: string, file: ModelFileInfo, tmp: string, target: string, signal: AbortSignal): Promise<void> {

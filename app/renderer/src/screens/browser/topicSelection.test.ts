@@ -66,21 +66,21 @@ describe('topic source status', () => {
   const file: DownloadFile = { id: 'file', batchId: 'batch', sourceId: 'reused-script', fileName: 'speedtest.funscript', publishedName: 'video.funscript', kind: 'script', phase: 'complete', host: 'discuss.eroscripts.com', receivedBytes: 100, totalBytes: 100, reason: null, attempts: [], canPause: false, canContinue: false, mediaId: 1 }
   const batch: DownloadBatch = { id: 'batch', title: 'Test video', topicUrl: 'https://discuss.eroscripts.com/t/review/293158', topicTabId: 1, topicGeneration: 2, destination: { rootId: 1, relativePath: '' }, destinationName: 'Library', createdAt: 1, files: [file] }
 
-  it('does not inherit completion for a reused script in another topic or tab', () => {
-    expect(topicSourceJob({ tabId: 1, url: 'https://discuss.eroscripts.com/t/mini/313607' }, { id: 'reused-script' }, [batch])).toBeUndefined()
-    expect(topicSourceJob({ tabId: 2, url: batch.topicUrl }, { id: 'reused-script' }, [batch])).toBeUndefined()
-    expect(topicSourceJob({ tabId: 1, url: batch.topicUrl }, { id: 'reused-script' }, [{ ...batch, origin: 'browser' }])).toBeUndefined()
+  it('does not inherit completion for a reused script in another topic or from a browser download', () => {
+    expect(topicSourceJob({ url: 'https://discuss.eroscripts.com/t/mini/313607' }, { id: 'reused-script' }, [batch])).toBeUndefined()
+    expect(topicSourceJob({ url: batch.topicUrl }, { id: 'reused-script' }, [batch])?.file).toBe(file)
+    expect(topicSourceJob({ url: batch.topicUrl }, { id: 'reused-script' }, [{ ...batch, origin: 'browser' }])).toBeUndefined()
   })
 
   it('retains the newest same-topic status across reply URLs, renamed slugs and mirror attempts', () => {
     const newer = { ...batch, id: 'newer', createdAt: 2, files: [{ ...file, id: 'mirror-file', sourceId: 'mirror', attempts: [{ sourceId: file.sourceId, host: file.host, outcome: 'failed' as const, reason: 'Unavailable', at: 1, tabId: null }] }] }
     for (const url of ['https://discuss.eroscripts.com/t/new-slug/293158/4?tracking=1#reply', 'https://discuss.eroscripts.com/t/293158/4']) {
-      expect(topicSourceJob({ tabId: 1, url }, { id: 'reused-script' }, [batch, newer])).toEqual({ file: newer.files[0], destinationName: 'Library' })
+      expect(topicSourceJob({ url }, { id: 'reused-script' }, [batch, newer])).toEqual({ file: newer.files[0], destinationName: 'Library' })
     }
   })
 
   it('shows the newest grouped-file job when a different mirror needs attention', () => {
     const waiting = { ...batch, id: 'waiting', createdAt: 2, destinationName: 'Other folder', files: [{ ...file, id: 'waiting-file', sourceId: 'mirror', phase: 'waiting' as const, attempts: [] }] }
-    expect(topicSourcesJob({ tabId: 1, url: batch.topicUrl }, [{ id: file.sourceId }, { id: 'mirror' }], [batch, waiting])).toEqual({ file: waiting.files[0], destinationName: 'Other folder' })
+    expect(topicSourcesJob({ url: batch.topicUrl }, [{ id: file.sourceId }, { id: 'mirror' }], [batch, waiting])).toEqual({ file: waiting.files[0], destinationName: 'Other folder' })
   })
 })

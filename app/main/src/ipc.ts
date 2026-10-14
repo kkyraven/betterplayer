@@ -167,6 +167,13 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
     await models.download(id, file)
     library.wakeTagger()
   })
+  handle('models:import', async (files) => {
+    const result = await dialog.showOpenDialog(win, { properties: ['openFile', 'multiSelections'] })
+    if (result.canceled) return null
+    const unknown = await models.import(result.filePaths, files)
+    library.wakeTagger()
+    return unknown
+  })
   handle('models:remove', (file) => models.remove(file))
   handle('models:cancel', (id) => models.cancel(id))
 
@@ -191,9 +198,13 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   handle('dom:setKey', (key) => dom.setKey(key))
   handle('dom:ownModels', (url) => dom.ownModels(url))
   handle('dom:account', (free) => dom.account(free))
-  handle('dom:login', (email, password, free) => dom.login(email, password, free))
-  handle('dom:register', (email, username, password, free) => dom.register(email, username, password, free))
-  handle('dom:loginWith', (provider, free) => dom.loginWith(provider, win, free))
+  const thenSync = <T>(signIn: Promise<T>) => signIn.then((result) => {
+    void account.syncAgenticLover().catch(() => undefined)
+    return result
+  })
+  handle('dom:login', (email, password, free) => thenSync(dom.login(email, password, free)))
+  handle('dom:register', (email, username, password, free) => thenSync(dom.register(email, username, password, free)))
+  handle('dom:loginWith', (provider, free) => thenSync(dom.loginWith(provider, win, free)))
   handle('dom:logout', () => dom.al.logout())
   handle('dom:heartbeat', (seconds) => dom.al.heartbeat(seconds))
   handle('dom:personas', (source, query) => dom.personas(source, query))
@@ -232,6 +243,7 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   handle('account:cancelLogin', () => account.cancelLogin())
   handle('account:logout', () => account.logout())
   handle('account:refresh', () => account.refresh(true))
+  handle('account:syncAgenticLover', () => account.syncAgenticLover())
   handle('account:setName', (name) => account.setName(name))
   handle('account:setAvatar', (userId, png) => account.setAvatar(userId, png))
   handle('account:friends', () => account.friends())
@@ -318,6 +330,7 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
     await library.prepareSearch(query)
     return library.jump(query, prefix)
   })
+  handle('library:reshuffle', () => library.reshuffle())
   handle('library:media', (id) => library.media(id))
   handle('library:suggestions', (id) => library.suggestions(id))
   handle('library:scriptFolders', (path) => library.scriptFolders(path))
@@ -394,10 +407,13 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
     transport: (request) => browser.startDownload(request),
     importPublished: (batch) => library.importDownloads(batch.destination.rootId, batch.paths),
     onState: (state) => send(win, 'downloads:state', state),
-    continueAttempt: (fileId, attemptId) => browser.continueDownload(fileId, attemptId),
+    revealSource: (source) => browser.revealDownloadSource(source),
     openOrdinarySource: (url) => { browser.openSource(url) },
   })
+  let readyQueue: DownloadQueue | null = null
+  void queueReady.then((queue) => { readyQueue = queue }, () => {})
   browser.setOrdinaryDownloadHandler((download) => {
+    if (readyQueue) return readyQueue.adoptOrdinary(download)
     void queueReady.then((queue) => queue.adoptOrdinary(download)).catch(() => {
       logEvent({ processType: 'main', reason: 'error', message: 'Browser download could not be added to Downloads' })
     })
@@ -438,6 +454,7 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   handle('downloads:cancel', async (id) => { await (await queueReady).cancel(id) })
   handle('downloads:continue', async (id) => { await (await queueReady).continue(id) })
   handle('downloads:openSource', async (id) => { await (await queueReady).openSource(id) })
+  handle('downloads:attachFile', async (id, path) => { await (await queueReady).attachFile(id, path) })
   handle('downloads:clear', async () => { await (await queueReady).clear() })
   handle('downloads:cancelAll', async () => { await (await queueReady).cancelAll() })
   handle('downloads:videoOnly', async (id) => { await (await queueReady).videoOnly(id) })

@@ -182,7 +182,7 @@ export class AgenticLover {
     this.email = ''
   }
 
-  private async token(): Promise<string> {
+  async token(): Promise<string> {
     if (this.access && Date.now() < this.accessUntil - EXPIRY_MARGIN_MS) return this.access
     this.refreshing ??= (async () => {
       const refreshToken = this.refreshToken()

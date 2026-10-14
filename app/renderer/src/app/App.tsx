@@ -34,7 +34,6 @@ import { TV_SHELL_KEYS } from '@/state/tvNav'
 import { toastFor } from '@/screens/tv/TvToast'
 import { useUi, type Screen } from '@/state/ui'
 import { useDownloads } from '@/state/downloads'
-import { DownloadManager } from '@/components/downloads/DownloadManager'
 import { MediaCentreShell } from './MediaCentreShell'
 import { NowPlayingStrip } from './NowPlayingStrip'
 import { Rail } from './Rail'
@@ -68,7 +67,6 @@ export function App() {
   const toggleFullscreen = useUi((s) => s.toggleFullscreen)
   const mediaCentre = useUi((s) => s.mediaCentre)
   const firstStart = useUi((s) => s.firstStart)
-  const managerOpen = useDownloads((s) => s.managerOpen)
   const initDownloads = useDownloads((s) => s.init)
   useEffect(initDownloads, [initDownloads])
   const editingPhoto = useProfilePhoto((s) => s.userId !== null)
@@ -156,7 +154,6 @@ export function App() {
       <main className="main">
         <div className="screen">
           <div className="screen-content"><Current /></div>
-          {screen !== 'browser' && managerOpen && <DownloadManager />}
         </div>
         {screen !== 'player' && screen !== 'editor' && !gameRunning && <NowPlayingStrip />}
       </main>

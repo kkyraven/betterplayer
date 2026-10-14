@@ -124,6 +124,7 @@ function createWindow(store: SettingsStore, library: Library, remote: RemoteServ
     reloadedAt = Date.now()
     win.webContents.reload()
   })
+  win.webContents.on('did-finish-load', () => win.webContents.setZoomLevel(0))
   win.once('ready-to-show', () => win.show())
   setTimeout(() => {
     if (!win.isDestroyed() && !win.isVisible()) win.show()
@@ -240,6 +241,7 @@ if (!app.requestSingleInstanceLock()) {
     updater = upd
     const doms = new Dom(userData)
     dom = doms
+    acct.setAgenticLover(() => (doms.al.signedIn ? doms.al.token() : Promise.resolve(null)))
     win = createWindow(store, lib, server, source, acct, upd, doms)
     upd.start()
     acct.start(store.get())

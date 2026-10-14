@@ -29,6 +29,7 @@ const HASH_BATCH = 500
 const PUSH_BYTES = 200_000
 const USAGE_FIRST_MS = 20_000
 const USAGE_EVERY_MS = 6 * 60 * 60_000
+const AGENTIC_LOVER_EVERY_MS = 12 * 60 * 60_000
 
 export interface ClientInfo {
   os: UsagePing['os']
@@ -72,6 +73,8 @@ export class Account {
   private pulling: Promise<void> | null = null
   private stopped = false
   private avatarRevision = 0
+  private agenticLoverAt = 0
+  private agenticLoverToken: () => Promise<string | null> = async () => null
 
   private emit: (status: AccountStatus) => void = () => {}
 
@@ -92,6 +95,10 @@ export class Account {
 
   setEmitter(emit: (status: AccountStatus) => void) {
     this.emit = emit
+  }
+
+  setAgenticLover(token: () => Promise<string | null>) {
+    this.agenticLoverToken = token
   }
 
   sessionToken(): string | null {
@@ -202,12 +209,28 @@ export class Account {
       const { stun, ...rest } = me
       if (avatarRevision !== this.avatarRevision) rest.avatarUrl = this.status.me?.avatarUrl
       this.set({ ...this.status, state: 'in', me: rest, friends, stun, error: undefined })
+      if ((!rest.premium || rest.agenticLover) && Date.now() - this.agenticLoverAt > AGENTIC_LOVER_EVERY_MS) void this.syncAgenticLover().catch(() => undefined)
       await this.pull()
     } catch (e) {
       if (token !== this.token) return
       if (e instanceof ServerError && e.status === 401) return this.sessionLost()
       this.set({ ...this.status, state: 'error', error: describe(e) })
     }
+  }
+
+  async syncAgenticLover(): Promise<void> {
+    this.agenticLoverAt = Date.now()
+    const alToken = await this.agenticLoverToken()
+    if (!alToken) throw new Error(t('dom.error.signedOut'))
+    const token = this.token
+    const me = await this.request<MeJson>('POST', '/me/agentic-lover', { token: alToken }).catch((e: unknown) => {
+      if (e instanceof ServerError && e.code === 'agentic_lover_email') throw new Error(t('account.error.agenticLoverEmail'))
+      if (e instanceof ServerError && e.code === 'agentic_lover_signed_out') throw new Error(t('dom.error.signedOut'))
+      if (e instanceof ServerError && e.code === 'agentic_lover_unavailable') throw new Error(t('account.error.unreachable', { host: 'agenticlover.ai' }))
+      throw e
+    })
+    if (token !== this.token || !this.status.me) return
+    this.set({ ...this.status, me: { ...this.status.me, premium: me.premium, agenticLover: me.agenticLover } })
   }
 
   private sessionLost() {

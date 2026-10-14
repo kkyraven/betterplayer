@@ -16,9 +16,15 @@ interface Layout {
   top: number
 }
 
-export function useVirtualGrid(scroll: RefObject<HTMLElement | null>, grid: RefObject<HTMLElement | null>, count: number, view: string) {
-  const [range, setRange] = useState<VirtualRange>({ start: 0, end: Math.min(count, PRIME), padTop: 0, padBottom: 0 })
+export interface GridPosition {
+  top: number
+  range: VirtualRange
+}
+
+export function useVirtualGrid(scroll: RefObject<HTMLElement | null>, grid: RefObject<HTMLElement | null>, count: number, view: string, position?: RefObject<GridPosition | null>) {
+  const [range, setRange] = useState<VirtualRange>(() => position?.current?.range ?? { start: 0, end: Math.min(count, PRIME), padTop: 0, padBottom: 0 })
   const layout = useRef<Layout | null>(null)
+  const restoreTop = useRef(position?.current?.top ?? 0)
 
   const measure = useCallback(() => {
     const scrollEl = scroll.current
@@ -27,6 +33,7 @@ export function useVirtualGrid(scroll: RefObject<HTMLElement | null>, grid: RefO
     const kids = gridEl.children
     if (count === 0 || kids.length === 0) {
       layout.current = null
+      if (position) position.current = null
       setRange((r) => (r.start === 0 && r.end === Math.min(count, PRIME) && r.padTop === 0 && r.padBottom === 0 ? r : { start: 0, end: Math.min(count, PRIME), padTop: 0, padBottom: 0 }))
       return
     }
@@ -44,13 +51,18 @@ export function useVirtualGrid(scroll: RefObject<HTMLElement | null>, grid: RefO
     const startRow = Math.min(rows, Math.max(0, Math.floor((viewTop - height * OVERSCAN) / stride)))
     const endRow = Math.min(rows, Math.max(startRow, Math.ceil((viewTop + height * (1 + OVERSCAN)) / stride)))
     const next = { start: startRow * cols, end: Math.min(count, endRow * cols), padTop: startRow * stride, padBottom: (rows - endRow) * stride }
+    if (position) position.current = { top: scrollEl.scrollTop, range: next }
     setRange((r) => (r.start === next.start && r.end === next.end && r.padTop === next.padTop && r.padBottom === next.padBottom ? r : next))
-  }, [scroll, grid, count])
+  }, [scroll, grid, count, position])
 
   useLayoutEffect(() => {
-    measure()
     const scrollEl = scroll.current
     const gridEl = grid.current
+    if (scrollEl && restoreTop.current) {
+      scrollEl.scrollTop = restoreTop.current
+      restoreTop.current = 0
+    }
+    measure()
     if (!scrollEl || !gridEl) return
     let frame = 0
     const onScroll = () => {

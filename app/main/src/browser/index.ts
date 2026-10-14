@@ -14,7 +14,7 @@ import { ERO_CHANNELS, EROSCRIPTS_HOME, isEroScriptsUrl, isEroTopicUrl, sourceUr
 import { topicReport } from './topic'
 import { BrowserDownloads, type OrdinaryBrowserDownload } from './downloads'
 import { downloadContextForNavigation, relatedNavigation, reusableDownload, type DownloadOwner, type RelatedDownloadContext } from './download-context'
-import type { TransferRequest, TransferResult } from '../downloads/transport'
+import type { SourceReveal, TransferRequest, TransferResult } from '../downloads/transport'
 import { nextZoom, zoomStep } from './zoom'
 
 export type Emit = <E extends IpcEvent>(event: E, payload: IpcEvents[E]) => void
@@ -546,10 +546,10 @@ export class BrowserTabs {
     return this.open(safe)
   }
 
-  private openRelatedDownload(request: TransferRequest, transferOnly = false): BrowserTab | null {
+  private openRelatedDownload(request: SourceReveal & { reveal?: boolean }, transferOnly = false): BrowserTab | null {
     const liveTopic = this.getTopic(request.topic.tabId)
     const topic: EroTopic = liveTopic?.generation === request.topic.generation && liveTopic.url === request.topic.url ? liveTopic : {
-      ...request.topic, title: request.candidate.label, sources: [request.candidate], scope: 'loaded-posts',
+      ...request.topic, sources: [request.candidate], scope: 'loaded-posts',
     }
     const owner: DownloadOwner = { attemptId: request.attemptId, fileId: request.fileId, sourceUrl: request.candidate.url, topic }
     const existing = !transferOnly && this.tabList.find((tab) => reusableDownload(tab.downloadOwner, request.fileId, request.candidate.url, tab.view.webContents.getURL()))
@@ -557,10 +557,11 @@ export class BrowserTabs {
       existing.downloadOwner = owner
       existing.related = { ...owner, approvedUrl: null, approvedUntil: 0 }
       this.sizeBackgroundDownload(existing)
+      if (request.reveal) this.activate(existing.id)
       this.push()
       return this.toTab(existing)
     }
-    const opened = this.open(transferOnly ? 'about:blank' : request.candidate.url, undefined, true)
+    const opened = this.open(transferOnly ? 'about:blank' : request.candidate.url, undefined, !request.reveal || transferOnly)
     const tab = this.find(opened.id)
     if (!tab) return null
     this.sizeBackgroundDownload(tab)
@@ -582,8 +583,8 @@ export class BrowserTabs {
     return this.downloads.start(request)
   }
 
-  continueDownload(fileId: string, attemptId: string): void {
-    this.downloads.continue(fileId, attemptId)
+  revealDownloadSource(source: SourceReveal): number | null {
+    return this.downloads.reveal(source)
   }
 
   cancelDownload(attemptId: string): void {

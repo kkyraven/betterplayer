@@ -24,15 +24,17 @@ export interface TransferRequest {
   attemptId: string
   fileId: string
   batchId: string
-  topic: { tabId: number; generation: number; url: string }
+  topic: { tabId: number; generation: number; url: string; title: string }
   candidate: DownloadCandidate
   scriptFileNames?: readonly string[]
   directUrl: string | null
+  reveal?: boolean
   stagingPath: string
   signal: AbortSignal
   onProgress: (progress: TransferProgress) => void
   onControl: (control: { pause: () => void; resume: () => void; cancel: () => void }) => void
 }
+export type SourceReveal = Pick<TransferRequest, 'attemptId' | 'fileId' | 'topic' | 'candidate'>
 export type TransferResult =
   | { status: 'complete'; fileName: string; totalBytes: number; mimeType?: string }
   | { status: 'waiting'; reason: string; tabId?: number }

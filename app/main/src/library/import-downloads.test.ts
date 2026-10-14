@@ -28,7 +28,7 @@ beforeEach(async () => {
   logicalRoot = join(directory, 'library-alias')
   const dataDir = join(directory, 'profile')
   await Promise.all([mkdir(physicalRoot), mkdir(dataDir)])
-  await symlink(physicalRoot, logicalRoot, 'dir')
+  await symlink(physicalRoot, logicalRoot, 'junction')
   vi.spyOn(ScriptScanner.prototype, 'scriptsFor').mockImplementation(async (video) => {
     const source = video.replace(/\.mp4$/i, '.funscript')
     if (!await readFile(source).catch(() => null)) return []
@@ -63,10 +63,13 @@ describe('download library import', () => {
     expect(library.byPath(files.video)).toBeNull()
   })
 
-  it('rejects outside files and an in-library link that points outside the physical root', async () => {
+  it('rejects outside files and an in-library link that points outside the physical root', async ({ skip }) => {
     const outside = await pair(join(directory, 'outside'))
     const escaped = join(physicalRoot, 'escaped.mp4')
-    await symlink(outside.video, escaped)
+    await symlink(outside.video, escaped).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'EPERM') skip('file symlinks are unavailable')
+      throw error
+    })
     const root = library.addRoot(logicalRoot)
     await expect(library.importDownloads(root.id, [outside.video])).rejects.toThrow('excluded from the library')
     await expect(library.importDownloads(root.id, [escaped])).rejects.toThrow('excluded from the library')

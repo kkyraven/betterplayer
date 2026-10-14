@@ -4,8 +4,8 @@ import type { BrowserWindow, ContextMenuParams, MenuItem, MenuItemConstructorOpt
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { showContextMenu } from './context-menu'
 
-const native = vi.hoisted(() => ({ popup: vi.fn(), build: vi.fn(), copy: vi.fn() }))
-vi.mock('electron', () => ({ Menu: { buildFromTemplate: native.build }, clipboard: { writeText: native.copy } }))
+const native = vi.hoisted(() => ({ popup: vi.fn(), build: vi.fn(), copy: vi.fn(), external: vi.fn(), handler: vi.fn(() => 'Firefox') }))
+vi.mock('electron', () => ({ Menu: { buildFromTemplate: native.build }, clipboard: { writeText: native.copy }, shell: { openExternal: native.external }, app: { getApplicationNameForProtocol: native.handler } }))
 
 function setup(overrides: Partial<ContextMenuParams> = {}) {
   const contents = {
@@ -43,6 +43,15 @@ describe('browser context menu', () => {
     expect(menu.item('main.contextMenu.forward').enabled).toBe(false)
     menu.click('main.contextMenu.back')
     expect(menu.contents.navigationHistory.goBack).toHaveBeenCalledOnce()
+  })
+
+  it('opens a link in the system browser, named when the system reports one', () => {
+    const menu = setup({ linkURL: 'https://example.com/a' })
+    menu.items.find((entry) => entry.label === t('main.contextMenu.openInBrowser', { browser: 'Firefox' }))!.click!({} as MenuItem, undefined, {} as Electron.KeyboardEvent)
+    expect(native.external).toHaveBeenCalledWith('https://example.com/a')
+    native.build.mockClear()
+    native.handler.mockReturnValueOnce('')
+    expect(setup({ linkURL: 'javascript:alert(1)' }).item('main.contextMenu.openInDefaultBrowser').enabled).toBe(false)
   })
 
   it('does not execute script or local file links as new tabs', () => {

@@ -1,5 +1,9 @@
 # Release notes
 
+## 1.2.2
+
+- Improve browser, improve AL sync.
+
 ## 1.2.1
 
 - Fix issue with zoom in browser

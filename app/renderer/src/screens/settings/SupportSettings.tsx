@@ -1,11 +1,12 @@
 import { ExternalLink } from 'lucide-react'
 import { Fragment, useState } from 'react'
 import { ACCOUNT_PORTAL_URL, SUBSCRIBE_URL, SUPPORTER_PRICE } from '@shared/account'
+import { AGENTIC_LOVER_URL } from '@shared/dom'
 import type { MessageKey } from '@shared/i18n'
 import { Button } from '@/components/ui/Button'
 import { ipcMessage } from '@/lib/errors'
 import { electron } from '@/node'
-import { checkSupporter, useAccount } from '@/state/account'
+import { checkAgenticLover, checkSupporter, useAccount } from '@/state/account'
 import { useT } from '@/state/i18n'
 
 const FEATURES: ReadonlyArray<readonly [MessageKey, MessageKey]> = [
@@ -21,12 +22,12 @@ export function SupportSettings() {
   const t = useT()
   const status = useAccount((s) => s.status)
   const premium = status.me?.premium === true
-  const [busy, setBusy] = useState(false)
+  const [busy, setBusy] = useState<'portal' | 'agenticLover' | null>(null)
   const [message, setMessage] = useState<string | null>(null)
-  const refresh = async () => {
-    setBusy(true)
-    setMessage(await checkSupporter())
-    setBusy(false)
+  const refresh = async (from: 'portal' | 'agenticLover') => {
+    setBusy(from)
+    setMessage(await (from === 'portal' ? checkSupporter() : checkAgenticLover()))
+    setBusy(null)
   }
   const open = (url: string) => {
     setMessage(null)
@@ -52,15 +53,20 @@ export function SupportSettings() {
         )}
         <span className="spacer" />
         {premium ? (
-          <Button onClick={() => open(ACCOUNT_PORTAL_URL)}>
+          <Button onClick={() => open(status.me?.agenticLover ? AGENTIC_LOVER_URL : ACCOUNT_PORTAL_URL)}>
             {t('settings.support.manage')}
             <ExternalLink />
           </Button>
         ) : (
           <>
-            <Button variant="ghost" disabled={busy} onClick={() => void refresh()}>
-              {busy ? t('settings.support.checking') : status.me ? t('settings.support.refreshStatus') : t('settings.profile.signIn')}
+            <Button variant="ghost" disabled={busy !== null} onClick={() => void refresh('portal')}>
+              {busy === 'portal' ? t('settings.support.checking') : status.me ? t('settings.support.refreshStatus') : t('settings.profile.signIn')}
             </Button>
+            {status.me && (
+              <Button variant="ghost" disabled={busy !== null} onClick={() => void refresh('agenticLover')}>
+                {busy === 'agenticLover' ? t('settings.support.checking') : t('settings.support.refreshFromAl')}
+              </Button>
+            )}
             <Button variant="primary" onClick={() => open(SUBSCRIBE_URL)}>
               {t('settings.support.become')}
               <ExternalLink />

@@ -1066,24 +1066,34 @@ export class LibraryDb {
     titles: Map<number, string>
   } | null = null
   private recRev = 0
+  private recLast: typeof this.rec = null
+  private recSession: { day: string; plays: Map<number, { pc: number; lp: number | null }> } | null = null
+
+  reshuffle() {
+    this.recSession = null
+    this.rec = null
+  }
 
   private recommended(q: MediaQuery) {
     const { join, whereSql, params } = this.compile(q)
-    const now = new Date()
-    const day = `${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()}`
+    if (!this.recSession) {
+      const now = new Date()
+      const plays = new Map(this.stmt('SELECT media_id, play_count, last_played FROM watch').all().map((r) => [num(r, 'media_id'), { pc: num(r, 'play_count'), lp: numOrNull(r, 'last_played') }]))
+      this.recSession = { day: `${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()}`, plays }
+    }
+    const { day, plays } = this.recSession
     const held = new Set<number>()
     if (q.continueRow) {
       const c = this.compile({ ...q, section: 'continue', sort: 'lastPlayed', desc: true })
       for (const r of this.stmt(`SELECT m.id ${MEDIA_FROM}${c.join}${c.whereSql} ORDER BY ${c.orderSql} LIMIT 4`).all(...c.params)) held.add(num(r, 'id'))
     }
-    const key = `${day}|${JSON.stringify({ ...q, limit: 0, offset: 0, desc: true })}|${[...held].join(',')}`
+    const key = `${JSON.stringify({ ...q, limit: 0, offset: 0, desc: true })}|${[...held].join(',')}`
     const sigRow = this.stmt(
-      `SELECT count(*) n, coalesce(sum(m.id),0) ids, coalesce(sum(m.pinned),0) pins, coalesce(sum(w.play_count),0) plays,
-        coalesce(max(w.last_played),0) recent, coalesce(max(m.added_at),0) added
+      `SELECT count(*) n, coalesce(sum(m.id),0) ids, coalesce(sum(m.pinned),0) pins, coalesce(max(m.added_at),0) added
        ${MEDIA_FROM}${join}${whereSql}`,
     ).get(...params)
     const sig =
-      `${num(sigRow!, 'n')}:${num(sigRow!, 'ids')}:${num(sigRow!, 'pins')}:${num(sigRow!, 'plays')}:${num(sigRow!, 'recent')}:${num(sigRow!, 'added')}|` +
+      `${num(sigRow!, 'n')}:${num(sigRow!, 'ids')}:${num(sigRow!, 'pins')}:${num(sigRow!, 'added')}|` +
       text(
         this.stmt(
           `SELECT (SELECT count(*) FROM playlists) || ':' || (SELECT coalesce(sum(c),0) FROM (SELECT count(*) c FROM playlist_items GROUP BY playlist_id))
@@ -1095,7 +1105,7 @@ export class LibraryDb {
       )
     if (this.rec?.key === key && this.rec.sig === sig) return this.rec
 
-    const rows = this.stmt(`SELECT m.id, m.title, m.pinned, m.added_at, coalesce(w.play_count, 0) pc, w.last_played lp ${MEDIA_FROM}${join}${whereSql}`).all(...params)
+    const rows = this.stmt(`SELECT m.id, m.title, m.pinned, m.added_at ${MEDIA_FROM}${join}${whereSql}`).all(...params)
     const pinned: MixEntry[] = rows
       .filter((r) => num(r, 'pinned') > 0)
       .sort((a, b) => num(b, 'pinned') - num(a, 'pinned') || num(a, 'id') - num(b, 'id'))
@@ -1116,19 +1126,27 @@ export class LibraryDb {
     const seed = recommendSeed(day, rows.map((r) => num(r, 'id')))
     const sprinkle = q.section === 'all' && !q.folder && !q.search?.trim() && Object.values(q.filters).every((v) => v === undefined)
     const mix = mixRecommended(
-      rest.map((r) => ({ id: num(r, 'id'), playCount: num(r, 'pc'), lastPlayed: numOrNull(r, 'lp'), addedAt: num(r, 'added_at') })),
+      rest.map((r) => {
+        const id = num(r, 'id')
+        const play = plays.get(id)
+        return { id, playCount: play?.pc ?? 0, lastPlayed: play?.lp ?? null, addedAt: num(r, 'added_at') }
+      }),
       sprinkle ? pls.map((r) => ({ id: num(r, 'id'), count: num(r, 'cnt') })) : [],
       seed,
     )
+    const entries = holdBack([...pinned, ...mix], held, CONTINUE_HOLD)
+    const prev = this.recLast
+    const same = prev?.key === key && prev.entries.length === entries.length && prev.entries.every((e, i) => e.kind === entries[i]!.kind && e.id === entries[i]!.id)
     this.rec = {
       key,
       sig,
-      rev: ++this.recRev,
-      entries: holdBack([...pinned, ...mix], held, CONTINUE_HOLD),
+      rev: same ? prev.rev : ++this.recRev,
+      entries,
       videos: rows.length,
       playlists: new Map(pls.map((r) => [num(r, 'id'), { playlist: true as const, id: num(r, 'id'), name: text(r, 'name'), count: num(r, 'cnt'), thumbs: thumbs.get(num(r, 'id')) ?? [] }])),
       titles: new Map(rows.map((r) => [num(r, 'id'), text(r, 'title')])),
     }
+    this.recLast = this.rec
     return this.rec
   }
 

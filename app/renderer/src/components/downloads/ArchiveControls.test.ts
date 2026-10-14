@@ -11,7 +11,7 @@ vi.mock('@/state/downloads', () => ({ useDownloads: (select: (s: { unlock: () =>
 import { ArchiveControls } from './ArchiveControls'
 import type { ArchiveView } from './archiveView'
 
-const render = (view: ArchiveView, active = true) => renderToStaticMarkup(createElement(ArchiveControls, { id: 'zip', view, active, onBackToTopic: vi.fn() }))
+const render = (view: ArchiveView) => renderToStaticMarkup(createElement(ArchiveControls, { id: 'zip', view, onBackToTopic: vi.fn() }))
 const entry = (id: string, kind: DownloadArchiveEntry['kind'], selected: boolean): DownloadArchiveEntry => ({ id, name: `${id}.${kind === 'video' ? 'mp4' : 'funscript'}`, kind, bytes: 10, selected })
 const flushEffects = () => { for (const effect of hooks.effects.splice(0)) effect() }
 
@@ -33,11 +33,8 @@ it('cannot import an empty selection and keeps the queue defaults checked', () =
   expect(chosen.match(/checked=""/g)).toHaveLength(2)
 })
 
-it('focuses a remounted wrong-password field only when downloads are visible', () => {
+it('focuses a remounted password field only after a wrong password', () => {
   render({ kind: 'password', wrong: false })
-  flushEffects()
-  expect(hooks.focus).not.toHaveBeenCalled()
-  render({ kind: 'password', wrong: true }, false)
   flushEffects()
   expect(hooks.focus).not.toHaveBeenCalled()
   expect(render({ kind: 'password', wrong: true })).toMatch(/<input[^>]*type="password"[^>]*value=""/)

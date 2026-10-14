@@ -7,9 +7,9 @@ import { useT } from '@/state/i18n'
 import { extractionProgress, selectedIds, toggleKind, type ArchiveView } from './archiveView'
 import { formatDownloadBytes } from './downloadPresentation'
 
-export function ArchiveControls({ id, view, onBackToTopic, active = true }: { id: string; view: ArchiveView; onBackToTopic?: () => void; active?: boolean }) {
+export function ArchiveControls({ id, view, onBackToTopic }: { id: string; view: ArchiveView; onBackToTopic?: () => void }) {
   const t = useT()
-  if (view.kind === 'password') return <ArchivePassword key={`${id}:${view.wrong}`} id={id} wrong={view.wrong} active={active} onBackToTopic={onBackToTopic} />
+  if (view.kind === 'password') return <ArchivePassword key={`${id}:${view.wrong}`} id={id} wrong={view.wrong} onBackToTopic={onBackToTopic} />
   if (view.kind === 'select') return <ArchiveSelection key={id} id={id} entries={view.entries} />
   if (view.kind === 'published') return <details className="download-archive download-archive-published"><summary>{t('downloads.extractedFiles')} <span>{view.entries.length}</span></summary><EntryList entries={view.entries} published /></details>
   const progress = extractionProgress(view)
@@ -24,14 +24,14 @@ export function ArchiveControls({ id, view, onBackToTopic, active = true }: { id
   )
 }
 
-function ArchivePassword({ id, wrong, onBackToTopic, active }: { id: string; wrong: boolean; onBackToTopic?: () => void; active: boolean }) {
+function ArchivePassword({ id, wrong, onBackToTopic }: { id: string; wrong: boolean; onBackToTopic?: () => void }) {
   const t = useT()
   const unlock = useDownloads((store) => store.unlock)
   const [password, setPassword] = useState('')
   const [pending, setPending] = useState(false)
   const busy = useRef(false)
   const input = useRef<HTMLInputElement>(null)
-  const focusOnMount = useRef(active && wrong)
+  const focusOnMount = useRef(wrong)
   useEffect(() => { if (focusOnMount.current) input.current?.focus() }, [])
   const submit = async (event: FormEvent) => {
     event.preventDefault()

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { ModelFileStatus, ModelInfo } from '@shared/tracking'
+import type { ModelFileInfo, ModelFileStatus, ModelInfo } from '@shared/tracking'
 import { Button } from '@/components/ui/Button'
 import { Modal } from '@/components/ui/Modal'
 import { invoke } from '@/ipc'
@@ -27,17 +27,22 @@ export function modelPresent(model: ModelInfo, status: Record<string, ModelFileS
   return model.files.every((f) => status[f.file])
 }
 
+const upstreamName = (file: ModelFileInfo) => new URL(file.url).pathname.split('/').pop() ?? file.file
+
 export function ModelDownloads({ models, onChange, row }: Props) {
   const t = useT()
   const [status, setStatus] = useState<Record<string, ModelFileStatus | null>>({})
   const [consent, setConsent] = useState<ModelInfo | null>(null)
+  const [importErrors, setImportErrors] = useState<Record<string, string[]>>({})
   const downloads = useModels((s) => s.downloads)
   const start = useModels((s) => s.download)
   const clear = useModels((s) => s.clear)
 
   const refresh = async () => {
-    setStatus(await invoke('models:status', models.flatMap((m) => m.files.map((f) => f.file))))
+    const next = await invoke('models:status', models.flatMap((m) => m.files.map((f) => f.file)))
+    setStatus(next)
     onChange?.()
+    return next
   }
   useEffect(() => {
     void refresh()
@@ -53,8 +58,19 @@ export function ModelDownloads({ models, onChange, row }: Props) {
 
   const download = (m: ModelInfo) => {
     setConsent(null)
+    setImportErrors((e) => ({ ...e, [m.id]: [] }))
     clear(m.id)
     void start(m)
+  }
+  const choose = async (m: ModelInfo) => {
+    const unknown = await invoke('models:import', m.files)
+    if (!unknown) return
+    const next = await refresh()
+    const errors = unknown.map((file) => t('settings.models.notModelFile', { file }))
+    const missing = m.files.filter((f) => !next[f.file])
+    if (missing.length > 0 && missing.length < m.files.length) errors.push(t('settings.models.stillNeeded', { files: missing.map(upstreamName).join(', ') }))
+    if (missing.length === 0) clear(m.id)
+    setImportErrors((e) => ({ ...e, [m.id]: errors }))
   }
   const remove = async (m: ModelInfo) => {
     for (const file of m.files) await invoke('models:remove', file.file)
@@ -89,9 +105,14 @@ export function ModelDownloads({ models, onChange, row }: Props) {
                 {t('common.remove')}
               </Button>
             ) : (
-              <Button disabled={d?.status === 'running'} onClick={() => (m.consent ? setConsent(m) : download(m))}>
-                {t('settings.models.download')}
-              </Button>
+              <>
+                <Button variant="ghost" disabled={d?.status === 'running'} onClick={() => void choose(m)}>
+                  {t('settings.models.chooseFiles')}
+                </Button>
+                <Button disabled={d?.status === 'running'} onClick={() => (m.consent ? setConsent(m) : download(m))}>
+                  {t('settings.models.download')}
+                </Button>
+              </>
             )}
           </div>
         )
@@ -101,6 +122,13 @@ export function ModelDownloads({ models, onChange, row }: Props) {
           {d.error}
         </div>
       ))}
+      {models.flatMap((m) =>
+        (importErrors[m.id] ?? []).map((error) => (
+          <div key={`${m.id}:${error}`} className="prow error">
+            {error}
+          </div>
+        )),
+      )}
       <Modal open={consent !== null} onOpenChange={(open) => !open && setConsent(null)} title={t('settings.models.downloadTitle')} width={440}>
         {consent && (
           <div className="sheet-body">

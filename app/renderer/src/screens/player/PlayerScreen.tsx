@@ -70,7 +70,7 @@ export function PlayerScreen() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return
+      if (e.defaultPrevented || e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return
       const t = useTracking.getState()
       if (t.zoneEdit) {
         if (e.key === 'Escape' || e.key === 'Enter') {

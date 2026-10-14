@@ -1,13 +1,13 @@
-import { ArrowLeft, Check, ChevronDown, ChevronRight, CircleAlert, Copy, Download, ExternalLink, FileArchive, FileJson2, FileQuestion, FileVideoCamera, Folder, FolderOpen, Link, MoreHorizontal, Pause, Play, RotateCcw, SlidersHorizontal, X } from 'lucide-react'
+import { ArrowLeft, ArrowUpRight, Check, ChevronDown, CircleAlert, Copy, Download, ExternalLink, FileArchive, FileJson2, FileQuestion, FileVideoCamera, Folder, FolderOpen, Link, MoreHorizontal, Pause, Play, RotateCcw, SlidersHorizontal, X } from 'lucide-react'
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import type { EroSource, EroTopic } from '@shared/eroscripts'
-import type { DownloadBatch, DownloadDestination, DownloadFile } from '@shared/downloads'
+import { waitingAttempt, type DownloadBatch, type DownloadDestination, type DownloadFile } from '@shared/downloads'
 import { ArchiveControls } from '@/components/downloads/ArchiveControls'
 import { archiveView, extractionProgress } from '@/components/downloads/archiveView'
-import { matchVideo, openBatchLibrary, openBatchTopic, playMedia } from '@/components/downloads/batchActions'
+import { matchVideo, openBatchLibrary, playMedia } from '@/components/downloads/batchActions'
 import { DestinationPicker, rootName } from '@/components/downloads/DestinationPicker'
-import { canCancelDownload, formatDownloadBytes, orderedBatches, summarizeFiles } from '@/components/downloads/downloadPresentation'
-import { isTopicBatch } from '@/components/downloads/topicTab'
+import { canAttachFile, canCancelDownload, formatDownloadBytes, hostName, manualStep, reasonText, summarizeFiles } from '@/components/downloads/downloadPresentation'
+import { FileDrop } from '@/components/downloads/FileDrop'
 import { Button } from '@/components/ui/Button'
 import { IconButton } from '@/components/ui/IconButton'
 import { invoke } from '@/ipc'
@@ -21,7 +21,7 @@ import { distinctTopicFiles, initialTopicSelection, scriptSets, topicFileSources
 
 const TRANSFER: ReadonlySet<DownloadFile['phase']> = new Set(['queued', 'resolving', 'attempting', 'downloading', 'paused', 'verifying', 'extracting', 'staged', 'publishing', 'importing'])
 
-export function TopicCard({ topic, related, hidden = false }: { topic: EroTopic; related: boolean; hidden?: boolean }) {
+export function TopicCard({ topic, related }: { topic: EroTopic; related: boolean }) {
   const t = useT()
   const batches = useDownloads((state) => state.state.batches)
   const destination = useDownloads((state) => state.destination)
@@ -31,7 +31,7 @@ export function TopicCard({ topic, related, hidden = false }: { topic: EroTopic;
   const roots = useLibrary((state) => state.roots)
   const [initial] = useState(() => initialTopicSelection(topic.sources))
   const [selected, setSelected] = useState(initial)
-  const [editing, setEditing] = useState(initial.length === 0)
+  const [editChoice, setEditing] = useState<boolean | null>(null)
   const [noVideo, setNoVideo] = useState(false)
   const [chooseFolder, setChooseFolder] = useState(false)
   const [pending, setPending] = useState<{ sourceIds: string[]; again?: boolean } | null>(null)
@@ -57,6 +57,7 @@ export function TopicCard({ topic, related, hidden = false }: { topic: EroTopic;
   const otherRows = others.filter(shown)
   const rowFiles = [...videoRows, ...setRows.flatMap((row) => row.scripts.map((script) => script.source)), ...otherRows]
   const jobs = rowFiles.flatMap((file) => jobOf(file) ?? [])
+  const editing = editChoice ?? (initial.length === 0 && jobs.length === 0)
   const toStart = selected.filter((id) => {
     const file = files.find((entry) => entry.id === id)
     return file !== undefined && jobOf(file) === undefined
@@ -138,8 +139,8 @@ export function TopicCard({ topic, related, hidden = false }: { topic: EroTopic;
   const sourceList = (list: EroSource[], named = false) => <SourceList sources={list} topic={topic} batches={batches} named={named} disabled={starting} onDownload={(id, again) => void start([id], again)} onPost={(post) => void openPost(post)} />
 
   return (
-    <aside ref={card} tabIndex={-1} className="downloads-dock topic-card" hidden={hidden} aria-labelledby="topic-card-title" onKeyDown={(event) => {
-      if (hidden || event.key !== 'Escape') return
+    <aside ref={card} tabIndex={-1} className="downloads-dock topic-card" aria-labelledby="topic-card-title" onKeyDown={(event) => {
+      if (event.key !== 'Escape') return
       if (chooseFolder) { setChooseFolder(false); setPending(null); folderButton.current?.focus() }
       else if (editing && canClose) setEditing(false)
       else return
@@ -152,7 +153,7 @@ export function TopicCard({ topic, related, hidden = false }: { topic: EroTopic;
           {related && <IconButton size="sm" label={t('eroscripts.backToTopic')} onClick={() => void back()}><ArrowLeft /></IconButton>}
         </div>
 
-        {!editing && notices.map((job) => <Notice key={job.id} job={job} batch={batchOf(job)} active={!hidden} onBackToTopic={related ? () => void back() : undefined} />)}
+        {!editing && notices.map((job) => <Notice key={job.id} job={job} batch={batchOf(job)} onBackToTopic={related ? () => void back() : undefined} />)}
 
         {editing ? (
           <div className="topic-choose">
@@ -211,7 +212,6 @@ export function TopicCard({ topic, related, hidden = false }: { topic: EroTopic;
           </>}
         </div>
       </div>
-      <OtherDownloads batches={batches.filter((batch) => !isTopicBatch(topic, batch))} />
     </aside>
   )
 }
@@ -222,16 +222,17 @@ function Row({ icon, title, detail, jobs, keepDetail = false }: { icon: ReactNod
   const lead = summary.lead
   const extracting = lead?.phase === 'extracting' && lead.archive ? extractionProgress(lead.archive) : null
   const progress = summary.progress ?? extracting
+  const here = useOnSourceTab(lead)
   let status = detail
-  if (summary.tone === 'attention' && lead) status = t(`downloads.phase.${lead.phase}`)
+  if (summary.tone === 'attention' && lead) status = here ? t('downloads.manual.waiting') : manualStep(lead) ? t('downloads.manual.needs', { host: hostName(lead.host) }) : t(`downloads.phase.${lead.phase}`)
   else if (summary.tone === 'done' && !keepDetail) status = formatDownloadBytes(summary.totalBytes ?? summary.receivedBytes)
   else if (summary.tone === 'active' && lead) {
     if (summary.progress !== null && summary.totalBytes !== null) status = `${formatDownloadBytes(summary.receivedBytes)} / ${formatDownloadBytes(summary.totalBytes)}${jobs.length === 1 ? ` · ${t('downloads.via', { host: lead.host })}` : ''}`
     else status = lead.phase === 'attempting' ? `${t('downloads.phase.attempting')} · ${lead.host}` : t(`downloads.phase.${lead.phase}`)
   }
   return (
-    <div className={cx('topic-row', `topic-row-${summary.tone}`)}>
-      <span className="topic-row-icon">{summary.tone === 'done' ? <Check /> : summary.tone === 'attention' ? <CircleAlert /> : icon}</span>
+    <div className={cx('topic-row', here ? 'topic-row-here' : `topic-row-${summary.tone}`)}>
+      <span className="topic-row-icon">{summary.tone === 'done' ? <Check /> : here ? <Download /> : summary.tone === 'attention' ? <CircleAlert /> : icon}</span>
       <strong title={title}>{title}</strong>
       {progress !== null && <span className="topic-row-percent">{Math.round(progress * 100)}%</span>}
       <span className="topic-row-detail" title={status}>{status}</span>
@@ -240,33 +241,44 @@ function Row({ icon, title, detail, jobs, keepDetail = false }: { icon: ReactNod
   )
 }
 
-function Notice({ job, batch, active, onBackToTopic }: { job: DownloadFile; batch: DownloadBatch | undefined; active: boolean; onBackToTopic?: () => void }) {
+function useOnSourceTab(job: DownloadFile | null | undefined): boolean {
+  const activeTab = useBrowser((state) => state.tabs.find((tab) => tab.active)?.id)
+  const tabId = job && manualStep(job) ? waitingAttempt(job)?.tabId : undefined
+  return tabId != null && tabId === activeTab
+}
+
+function Notice({ job, batch, onBackToTopic }: { job: DownloadFile; batch: DownloadBatch | undefined; onBackToTopic?: () => void }) {
   const t = useT()
   const command = useDownloads((state) => state.command)
   const [confirmVideoOnly, setConfirmVideoOnly] = useState(false)
+  const here = useOnSourceTab(job)
   const archive = archiveView(job)
   const step = archive?.kind
-  const title = step === 'password' ? t('settings.source.passwordRequired') : step === 'select' ? t('downloads.chooseFiles') : t(`downloads.phase.${job.phase}`)
+  const manual = manualStep(job)
+  const host = hostName(job.host)
+  const title = step === 'password' ? t('settings.source.passwordRequired') : step === 'select' ? t('downloads.chooseFiles')
+    : here ? t('downloads.manual.here') : manual ? t('downloads.manual.from', { host }) : t(`downloads.phase.${job.phase}`)
   const videoOnly = batch?.canImportVideoOnly && job.kind !== 'video'
   return (
-    <div className="topic-notice" role="group" aria-label={title}>
-      <CircleAlert />
+    <div className={cx('topic-notice', here && 'topic-notice-here')} role="group" aria-label={title}>
+      {here ? <Download /> : <CircleAlert />}
       <strong>{title}</strong>
-      <span className="topic-notice-detail">{step === 'password' || step === 'select' || !job.reason ? job.publishedName ?? job.fileName : job.reason}</span>
+      <span className="topic-notice-detail">{step === 'password' || step === 'select' || !job.reason ? job.publishedName ?? job.fileName : reasonText(t, job.reason, job.host)}</span>
       {archive && (step === 'password' || step === 'select')
-        ? <div className="topic-notice-body"><ArchiveControls id={job.id} view={archive} active={active} onBackToTopic={onBackToTopic} /></div>
+        ? <div className="topic-notice-body"><ArchiveControls id={job.id} view={archive} onBackToTopic={onBackToTopic} /></div>
         : confirmVideoOnly && batch
           ? <div className="topic-notice-body"><p>{t('downloads.skipScripts')}</p><div className="topic-notice-actions">
             <Button variant="primary" onClick={() => { setConfirmVideoOnly(false); void useDownloads.getState().videoOnly(batch.id) }}>{t('downloads.videoOnly')}</Button>
             <Button variant="ghost" onClick={() => setConfirmVideoOnly(false)}>{t('common.cancel')}</Button>
           </div></div>
           : <div className="topic-notice-actions">
-            {job.canContinue && <Button variant="primary" onClick={() => void command('continue', job.id)}>{t('common.continue')}</Button>}
+            {job.canContinue && !here && <Button variant="primary" onClick={() => void command('continue', job.id)}>{manual ? <><ArrowUpRight />{t('downloads.manual.open', { host })}</> : t('common.continue')}</Button>}
             {job.phase === 'failed' && job.canRetry !== false && <Button variant="primary" onClick={() => void command('retry', job.id)}><RotateCcw />{t('common.retry')}</Button>}
             {videoOnly && <Button variant="ghost" onClick={() => setConfirmVideoOnly(true)}>{t('downloads.videoOnly')}</Button>}
-            {job.canOpenSource === true && <Button variant="ghost" onClick={() => void invoke('downloads:openSource', job.id)}><ExternalLink />{t('eroscripts.openSource')}</Button>}
+            {job.canOpenSource === true && !manual && <Button variant="ghost" onClick={() => void invoke('downloads:openSource', job.id)}><ExternalLink />{t('eroscripts.openSource')}</Button>}
             {canCancelDownload(job) && <Button variant="ghost" onClick={() => void command('cancel', job.id)}>{t('common.cancel')}</Button>}
           </div>}
+      {!step && !confirmVideoOnly && canAttachFile(job) && <div className="topic-notice-body"><FileDrop file={job} /></div>}
     </div>
   )
 }
@@ -322,35 +334,5 @@ function SourceList({ sources, topic, batches, named, disabled, onDownload, onPo
         )
       })}
     </ul>
-  )
-}
-
-function OtherDownloads({ batches }: { batches: DownloadBatch[] }) {
-  const t = useT()
-  if (!batches.length) return null
-  const ordered = orderedBatches(batches)
-  const attention = batches.some((batch) => batch.files.some((file) => file.phase === 'waiting' || file.phase === 'failed'))
-  return (
-    <details className="topic-others">
-      <summary><ChevronRight />{t('downloads.other')}<span className={cx(attention && 'warn')}>{batches.length}</span></summary>
-      <ul>
-        {ordered.map((batch) => {
-          const live = batch.files.filter((file) => file.phase !== 'cancelled')
-          const summary = summarizeFiles(live)
-          const finished = live.filter((file) => file.phase === 'complete').length
-          const mediaId = live.find((file) => file.phase === 'complete' && file.mediaId !== null)?.mediaId ?? null
-          return (
-            <li key={batch.id}>
-              <button type="button" className="topic-other-title" title={batch.title} onClick={() => void openBatchTopic(batch)}>{batch.title}</button>
-              {summary.tone === 'attention' ? <CircleAlert className="warn" aria-label={t('downloads.attention')} />
-                : mediaId !== null ? <Button variant="ghost" onClick={() => void playMedia(mediaId)}><Play />{t('common.play')}</Button>
-                  : summary.progress !== null && <span className="topic-other-percent">{Math.round(summary.progress * 100)}%</span>}
-              <span className="topic-other-detail">{finished}/{live.length} · {batch.destinationName}</span>
-              {summary.progress !== null && <div className="download-progress"><span style={{ width: `${summary.progress * 100}%` }} /></div>}
-            </li>
-          )
-        })}
-      </ul>
-    </details>
   )
 }

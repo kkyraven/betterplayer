@@ -11,16 +11,16 @@ function topicId(url: string): string | null {
   return /^\d+$/.test(segments[2] ?? '') ? segments[2]! : segments[3] ?? null
 }
 
-export function topicSourceJob(topic: Pick<EroTopic, 'tabId' | 'url'>, source: Pick<EroSource, 'id'>, batches: readonly DownloadBatch[]): { file: DownloadFile; destinationName: string } | undefined {
+export function topicSourceJob(topic: Pick<EroTopic, 'url'>, source: Pick<EroSource, 'id'>, batches: readonly DownloadBatch[]): { file: DownloadFile; destinationName: string } | undefined {
   return topicSourcesJob(topic, [source], batches)
 }
 
-export function topicSourcesJob(topic: Pick<EroTopic, 'tabId' | 'url'>, sources: readonly Pick<EroSource, 'id'>[], batches: readonly DownloadBatch[]): { file: DownloadFile; destinationName: string } | undefined {
+export function topicSourcesJob(topic: Pick<EroTopic, 'url'>, sources: readonly Pick<EroSource, 'id'>[], batches: readonly DownloadBatch[]): { file: DownloadFile; destinationName: string } | undefined {
   const id = topicId(topic.url)
   if (!id) return undefined
   const sourceIds = new Set(sources.map((source) => source.id))
   for (const batch of [...batches].sort((a, b) => b.createdAt - a.createdAt)) {
-    if (batch.origin === 'browser' || batch.topicTabId !== topic.tabId || topicId(batch.topicUrl) !== id) continue
+    if (batch.origin === 'browser' || topicId(batch.topicUrl) !== id) continue
     const file = batch.files.find((file) => sourceIds.has(file.sourceId) || file.attempts.some((attempt) => sourceIds.has(attempt.sourceId)))
     if (file) return { file, destinationName: batch.destinationName }
   }

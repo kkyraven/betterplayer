@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, Bookmark, Crosshair, Home, Lock, Maximize, Minimize, Plus, RefreshCw, Shield, ShieldOff, Star, Volume2, VolumeX, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Bookmark, Crosshair, ExternalLink, Home, Lock, Maximize, Minimize, Plus, RefreshCw, Shield, ShieldOff, Star, Volume2, VolumeX, X } from 'lucide-react'
 import * as Popover from '@radix-ui/react-popover'
 import { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import { flushSync } from 'react-dom'
@@ -21,14 +21,13 @@ import { FaptapDialog } from './FaptapDialog'
 import { useSettings } from '@/state/settings'
 import { useTracking } from '@/state/tracking'
 import { useDownloads } from '@/state/downloads'
-import { DownloadButton } from '@/components/downloads/DownloadButton'
-import { DownloadManager } from '@/components/downloads/DownloadManager'
+import { DownloadsMenu } from '@/components/downloads/DownloadsMenu'
 import { isEroScriptsUrl } from '@shared/eroscripts'
 import { EroScriptsSearch } from './EroScriptsSearch'
 import { TopicCard } from './TopicCard'
 import './browser.css'
 
-type Overlay = `site:${string}` | 'adblock' | 'faptap'
+type Overlay = `site:${string}` | 'adblock' | 'faptap' | 'downloads'
 
 
 export function BrowserScreen() {
@@ -71,8 +70,13 @@ export function BrowserScreen() {
     ++menuRequest.current
     setOverlay(null)
     setPreview(null)
+    if (useDownloads.getState().managerOpen) useDownloads.getState().setManagerOpen(false)
     return () => { ++menuRequest.current }
   }, [active?.id, site])
+  useEffect(() => {
+    if (managerOpen) void openMenu('downloads')
+    else setOverlay((current) => (current === 'downloads' ? null : current))
+  }, [managerOpen])
   const faptap = site === FAPTAP_HOST
   useEffect(() => {
     if (faptap && !faptapHelpSeen) void openMenu('faptap')
@@ -155,8 +159,7 @@ export function BrowserScreen() {
         <div ref={page} className="bpage">
           {startPage ? <StartPage key={active?.id} /> : preview && overlay !== null ? <img className="bpreview" src={preview} alt="" /> : null}
         </div>
-        {topic && topic.sources.length > 0 && <TopicCard key={`${topic.tabId}-${topic.generation}`} topic={topic} related={active?.id !== topic.tabId} hidden={managerOpen} />}
-        {managerOpen && <DownloadManager />}
+        {topic && topic.sources.length > 0 && <TopicCard key={`${topic.tabId}-${topic.generation}`} topic={topic} related={active?.id !== topic.tabId} />}
       </div>
       <FaptapDialog open={overlay === 'faptap'} onClose={closeFaptap} />
     </div>
@@ -174,6 +177,7 @@ function Tabs() {
   const reorder = useBrowser((s) => s.reorder)
   const setMuted = useBrowser((s) => s.setMuted)
   const [drag, setDrag] = useState<{ id: number; from: number; to: number; dx: number; pitch: number } | null>(null)
+  const [heldWidth, setHeldWidth] = useState<number | null>(null)
 
   const press = (event: ReactPointerEvent<HTMLDivElement>, id: number, from: number) => {
     if (event.button !== 0 || tabs.length < 2 || (event.target instanceof Element && event.target.closest('.tab-close, .tab-audio'))) return
@@ -241,7 +245,7 @@ function Tabs() {
   }
 
   return (
-    <div className={cx('tabs', drag && 'dragging')} role="tablist">
+    <div className={cx('tabs', drag && 'dragging')} role="tablist" onPointerLeave={() => setHeldWidth(null)}>
       {tabs.map((t, index) => {
         const dragged = drag?.id === t.id
         const x = dragged ? drag.dx : shift(index)
@@ -253,7 +257,7 @@ function Tabs() {
             aria-selected={t.active}
             aria-busy={t.loading}
             className={cx('tab', t.active && 'on', dragged && 'dragged')}
-            style={x ? { transform: `translateX(${x}px)` } : undefined}
+            style={{ transform: x ? `translateX(${x}px)` : undefined, flexBasis: heldWidth ?? undefined, flexShrink: heldWidth ? 0 : undefined }}
             onClick={() => void activate(t.id)}
             onPointerDown={(event) => press(event, t.id, index)}
             onKeyDown={(event) => {
@@ -296,6 +300,7 @@ function Tabs() {
               aria-label={translate('browser.tab.close')}
               onClick={(e) => {
                 e.stopPropagation()
+                setHeldWidth(e.currentTarget.parentElement?.getBoundingClientRect().width ?? null)
                 void close(t.id)
               }}
             >
@@ -308,6 +313,7 @@ function Tabs() {
         label={translate('browser.tab.new')}
         size="sm"
         onClick={async () => {
+          setHeldWidth(null)
           await open()
           document.querySelector<HTMLInputElement>('.bchrome .url input')?.focus()
         }}
@@ -359,7 +365,6 @@ function AddressRow({ adBlockOpen, onAdBlockOpen }: { adBlockOpen: boolean; onAd
         {tab?.loading ? <X /> : <RefreshCw />}
       </IconButton>
       <IconButton label={t('browser.addr.startPage')} onClick={() => void navigate('about:blank')}><Home /></IconButton>
-      <DownloadButton />
       <label className="url">
         <Lock />
         <input
@@ -379,6 +384,7 @@ function AddressRow({ adBlockOpen, onAdBlockOpen }: { adBlockOpen: boolean; onAd
       <IconButton label={bookmarked ? t('browser.addr.removeBookmark') : t('browser.addr.bookmark')} disabled={!canBookmark} aria-pressed={bookmarked} className={cx(bookmarked && 'on')} onClick={() => tab && void toggleBookmark(tab.url, tab.title)}>
         <Star fill={bookmarked ? 'currentColor' : 'none'} />
       </IconButton>
+      <DownloadsMenu />
       <IconButton label={bookmarksBar ? t('browser.addr.hideBookmarksBar') : t('browser.addr.showBookmarksBar')} aria-pressed={bookmarksBar} className={cx(bookmarksBar && 'on')} onClick={() => setBookmarksBar(!bookmarksBar)}>
         <Bookmark fill={bookmarksBar ? 'currentColor' : 'none'} />
       </IconButton>
@@ -416,10 +422,10 @@ function AdBlockButton({ open, onOpenChange }: { open: boolean; onOpenChange: (o
       <Popover.Trigger asChild>{button}</Popover.Trigger>
       <Popover.Portal>
         <Popover.Content className="badblock-menu" align="end" sideOffset={5} collisionPadding={12}>
-          <strong>{t('browser.adBlock.premiumTitle')}</strong>
-          <p>{t('browser.adBlock.premiumBody')}</p>
+          <strong>{t('common.supporterOnly')}</strong>
           <Button variant="primary" onClick={() => void electron.shell.openExternal(SUBSCRIBE_URL)}>
-            {t('browser.adBlock.subscribe')}
+            {t('firstStart.supporter.become')}
+            <ExternalLink />
           </Button>
           {signedOut && (
             <button type="button" className="badblock-login" onClick={() => void invoke('account:login')}>

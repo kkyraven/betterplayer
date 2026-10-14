@@ -30,6 +30,7 @@ interface DownloadsStore {
   command: (action: DownloadAction, id: string) => Promise<void>
   unlock: (id: string, password: string) => Promise<boolean>
   selectArchive: (id: string, entryIds: string[]) => Promise<boolean>
+  attachFile: (id: string, path: string) => Promise<void>
   clear: () => Promise<void>
   cancelAll: () => Promise<void>
   videoOnly: (id: string) => Promise<void>
@@ -117,6 +118,12 @@ export const useDownloads = create<DownloadsStore>()((set, get) => ({
       set({ error: null })
       return true
     } catch (error) { set({ error: errorMessage(error) }); return false }
+  },
+  attachFile: async (id, path) => {
+    try {
+      await invoke('downloads:attachFile', id, path)
+      set({ error: null })
+    } catch (error) { set({ error: errorMessage(error) }) }
   },
   clear: async () => {
     try { await invoke('downloads:clear'); set({ error: null }) }

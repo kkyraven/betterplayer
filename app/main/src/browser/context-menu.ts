@@ -1,4 +1,4 @@
-import { clipboard, Menu, type BrowserWindow, type ContextMenuParams, type MenuItemConstructorOptions, type WebContents } from 'electron'
+import { app, clipboard, Menu, shell, type BrowserWindow, type ContextMenuParams, type MenuItemConstructorOptions, type WebContents } from 'electron'
 import { t } from '../i18n'
 import { webUrl } from './storage'
 
@@ -13,6 +13,7 @@ export function showContextMenu(window: BrowserWindow, contents: WebContents, pa
 
   if (params.linkURL) {
     add(t('main.contextMenu.openInNewTab'), () => openTab(params.linkURL), webUrl(params.linkURL))
+    add(systemBrowserLabel(), () => void shell.openExternal(params.linkURL), webUrl(params.linkURL))
     add(t('main.contextMenu.copyLink'), () => clipboard.writeText(params.linkURL))
   }
 
@@ -49,4 +50,9 @@ export function showContextMenu(window: BrowserWindow, contents: WebContents, pa
   add(t('main.contextMenu.reload'), () => contents.reload())
   contents.focus()
   Menu.buildFromTemplate(items).popup({ window, frame: params.frame ?? undefined })
+}
+
+function systemBrowserLabel(): string {
+  const name = app.getApplicationNameForProtocol('https://').replace(/\.exe$/i, '').trim()
+  return name ? t('main.contextMenu.openInBrowser', { browser: name }) : t('main.contextMenu.openInDefaultBrowser')
 }

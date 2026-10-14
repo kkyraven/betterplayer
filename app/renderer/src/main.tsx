@@ -32,6 +32,8 @@ import { useUi } from './state/ui'
 
 document.documentElement.dataset.platform = process.platform
 
+const RESHUFFLE_IDLE_MS = 30 * 60_000
+
 Object.assign(window, { __bp: { get engine() { return engine }, usePlayer, useSession, useDevices, useSettings, useUi, useFollow, useTracking, useBrowser, useRemote, useEditor } })
 
 async function boot() {
@@ -81,6 +83,17 @@ async function boot() {
       if (ui.screen !== 'browser' || prev.screen === 'browser') return
       const player = usePlayer.getState()
       if (player.snapshot.loaded && !player.snapshot.paused) player.pause()
+    })
+    let lastActive = Date.now()
+    const active = () => {
+      const now = Date.now()
+      const { loaded, paused } = usePlayer.getState().snapshot
+      if (now - lastActive > RESHUFFLE_IDLE_MS && !(loaded && !paused)) void useLibrary.getState().reshuffle()
+      lastActive = now
+    }
+    for (const type of ['pointermove', 'pointerdown', 'keydown', 'wheel']) window.addEventListener(type, active, { capture: true, passive: true })
+    usePlayer.subscribe((s, prev) => {
+      if (s.snapshot.paused !== prev.snapshot.paused) lastActive = Date.now()
     })
     const fileArg = process.argv.find((a) => a.startsWith('--bp-file='))
     const startArg = process.argv.find((a) => a.startsWith('--bp-start='))

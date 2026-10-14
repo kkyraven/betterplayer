@@ -1,0 +1,24 @@
+.downloads-anchor { display: inline-flex; flex: none; }
+.downloads-menu { z-index: 50; display: flex; flex-direction: column; width: 320px; max-width: calc(100vw - 24px); max-height: min(480px, var(--radix-popover-content-available-height, 480px)); background: var(--popover); backdrop-filter: var(--blur-strong); -webkit-backdrop-filter: var(--blur-strong); border: 0.5px solid var(--line-2); border-radius: 12px; box-shadow: var(--shadow); font-size: 12px; overflow: hidden; }
+.downloads-menu:focus { outline: none; }
+.downloads-menu :focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.downloads-menu-head { display: flex; align-items: center; gap: 2px; min-height: 42px; padding: 0 6px 0 14px; border-bottom: 1px solid var(--line); flex: none; }
+.downloads-menu-head > h2 { flex: 1; min-width: 0; margin: 0; font-size: 13px; font-weight: 600; }
+.downloads-menu-head .btn { height: 26px; padding: 0 7px; font-size: 11px; }
+.downloads-menu .download-confirm, .downloads-menu .download-error { padding: 10px 14px; }
+.downloads-menu .download-inline-menu { padding: 4px 6px; }
+.downloads-menu-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px 0 6px; }
+.downloads-menu-list .download-empty { margin: 14px; }
+.downloads-menu-group { display: flex; justify-content: space-between; margin: 0; padding: 8px 14px 3px; color: var(--text-3); font-size: 11px; font-weight: 500; }
+.downloads-menu-group.warn { color: var(--warn); }
+.downloads-menu-group > span { font-weight: 400; font-variant-numeric: tabular-nums; }
+.downloads-menu-entry { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 1px 8px; width: 100%; padding: 7px 8px 7px 14px; text-align: left; color: var(--text); }
+button.downloads-menu-entry:hover { background: var(--glass-light); }
+.downloads-menu-entry > strong { grid-column: 1; min-width: 0; font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.downloads-menu-entry > small { grid-column: 1; min-width: 0; color: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.downloads-menu-entry > small.warn { color: var(--warn); }
+.downloads-menu-entry > .download-progress { grid-column: 1; margin-top: 5px; }
+.downloads-menu-go, .downloads-menu-actions { grid-column: 2; grid-row: 1 / span 3; }
+.downloads-menu-go { width: 14px; height: 14px; color: var(--text-3); }
+button.downloads-menu-entry:hover .downloads-menu-go { color: var(--text); }
+.downloads-menu-actions { display: flex; align-items: center; gap: 1px; }

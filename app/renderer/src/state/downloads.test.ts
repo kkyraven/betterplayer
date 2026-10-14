@@ -116,6 +116,9 @@ describe('downloads renderer state', () => {
     expect(useDownloads.getState().managerOpen).toBe(false)
     useDownloads.getState().setTopicCard({ tabId: 2, url: 'https://discuss.eroscripts.com/t/grid/123' })
     push(archiveAttention('wrong-password'))
+    expect(useDownloads.getState().managerOpen).toBe(false)
+    useDownloads.getState().setTopicCard({ tabId: 2, url: 'https://discuss.eroscripts.com/t/other/124' })
+    push(archiveAttention('password-required'))
     expect(useDownloads.getState().managerOpen).toBe(true)
   })
 

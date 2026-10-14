@@ -448,6 +448,7 @@ export interface TrackingDefaults {
   beatBounce: boolean
   beatBounceDepth: number
   beatBounceSpeed: number
+  zoneHelpSeen: boolean
 }
 
 export const EASE_DEFAULT_MS = 250
@@ -490,5 +491,6 @@ export function defaultTrackingDefaults(): TrackingDefaults {
     beatBounce: true,
     beatBounceDepth: BEAT_BOUNCE_DEPTH.default,
     beatBounceSpeed: BEAT_BOUNCE_SPEED.default,
+    zoneHelpSeen: false,
   }
 }

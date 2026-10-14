@@ -17,6 +17,7 @@ export interface Me {
   avatarUrl?: string | null
   friendCode: string
   premium: boolean
+  agenticLover?: boolean
   admin: boolean
 }
 

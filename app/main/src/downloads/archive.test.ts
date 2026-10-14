@@ -144,10 +144,13 @@ describe('safe streamed ZIP extraction', () => {
     await expectPreserved(context.path, context.bytes, context.directory)
   })
 
-  it('refuses a symlink archive source', async () => {
+  it('refuses a symlink archive source', async ({ skip }) => {
     const context = await fixture([{ name: 'scene.funscript' }])
     const link = join(context.directory, 'linked.zip')
-    await symlink(context.path, link)
+    await symlink(context.path, link).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'EPERM') skip('file symlinks are unavailable')
+      throw error
+    })
     await expect(extractArchive(link)).rejects.toMatchObject({ code: 'unsafe' })
     await expectPreserved(context.path, context.bytes, context.directory)
   })

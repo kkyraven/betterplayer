@@ -2,6 +2,7 @@ import { ipcRenderer } from 'electron'
 import { ERO_CHANNELS, sourceKind, sourceUrl } from '@shared/eroscripts'
 import { intermediaryDownloadUrl, matchingVideoFileNames, unavailableHostFile } from '@shared/download-host'
 import { MEGA_PREPARE_TIMEOUT_MS, megaDownloadName } from '@shared/mega'
+import type { DownloadReason } from '@shared/downloads'
 
 interface HostRequest { requestId: number; sourceUrl: string; fileName: string | null; scriptFileNames?: readonly string[] }
 interface Selection { request: HostRequest; control: HTMLElement; fileName: string; provider: 'mega' | 'gofile' | 'pixeldrain' | 'anchor'; url: string | null }
@@ -35,6 +36,8 @@ export function installDownloadHost() {
         const handle = /\/file\/([\w-]+)/.exec(source.pathname)?.[1] ?? /^#!([\w-]+)!/.exec(source.hash)?.[1]
         return !!handle && (current.pathname === `/file/${handle}` || current.hash.startsWith(`#!${handle}!`))
       }
+      const driveId = (url: URL) => url.hostname === 'drive.google.com' ? /\/(?:file\/d|folders)\/([\w-]+)/.exec(url.pathname)?.[1] : undefined
+      if (driveId(source)) return driveId(source) === driveId(current)
       const gofile = /^(?:www\.)?gofile\.io$/
       const pixeldrain = /^(?:www\.)?pixeldrain\.com$/
       if (gofile.test(source.hostname)) {
@@ -47,7 +50,7 @@ export function installDownloadHost() {
   }
   function stopPrepare() { observation?.disconnect(); observation = null; if (timer) clearTimeout(timer); timer = null }
   function stopMonitor() { monitor?.disconnect(); monitor = null; if (monitorTimer) clearTimeout(monitorTimer); monitorTimer = null }
-  function waiting(requestId: number, reason: string) {
+  function waiting(requestId: number, reason: DownloadReason) {
     if (preparingRequestId !== requestId) return
     stopPrepare()
     preparingRequestId = null
@@ -57,7 +60,7 @@ export function installDownloadHost() {
     if (preparingRequestId !== requestId) return
     stopPrepare()
     preparingRequestId = null
-    ipcRenderer.send(ERO_CHANNELS.hostPrepared, { requestId, status: 'failed', unavailable: true, reason: 'Source is unavailable' })
+    ipcRenderer.send(ERO_CHANNELS.hostPrepared, { requestId, status: 'failed', unavailable: true, reason: 'downloads.reason.unavailable' })
   }
   function redirect(requestId: number, url: string) {
     if (preparingRequestId !== requestId) return
@@ -84,7 +87,7 @@ export function installDownloadHost() {
     let revealedLinks: Element | null = null
     function scan() {
       if (preparingRequestId !== request.requestId) return
-      if (!samePage(request.sourceUrl)) return waiting(request.requestId, 'The source page changed. Reopen the original link')
+      if (!samePage(request.sourceUrl)) return waiting(request.requestId, 'downloads.reason.pageChanged')
       const host = location.hostname
       if (host === 'drive.google.com' && document.title === 'Page not found'
         && /^\/file\/d\/[A-Za-z0-9_-]+(?:\/(?:view|preview))?\/?$/.test(location.pathname)) {
@@ -114,7 +117,7 @@ export function installDownloadHost() {
       }
       if (/^(?:www\.)?pixeldrain\.com$/.test(host)) {
         const id = /^\/u\/([A-Za-z0-9]{8})$/.exec(location.pathname)?.[1]
-        if (!id) return waiting(request.requestId, 'Choose a single file link on Pixeldrain')
+        if (!id) return waiting(request.requestId, 'downloads.reason.chooseFile')
         const step = pixeldrainStep()
         if (step) return waiting(request.requestId, step)
         const fileName = document.querySelector('.file_viewer > .headerbar > .file_viewer_headerbar_title')?.textContent?.trim() ?? ''
@@ -143,7 +146,7 @@ export function installDownloadHost() {
         const error = document.querySelector('.dl-access-box .file-folder-view h2')
         if (error && visible(error) && unavailableHostFile(host, error.textContent ?? '')) return unavailable(request.requestId)
         const source = new URL(request.sourceUrl)
-        if (source.pathname.startsWith('/folder/') || source.hash.startsWith('#F!')) return waiting(request.requestId, 'Choose a single file link from the MEGA folder')
+        if (source.pathname.startsWith('/folder/') || source.hash.startsWith('#F!')) return waiting(request.requestId, 'downloads.reason.chooseFile')
         if (!named(fileName, request.fileName === null ? null : megaDownloadName(request.fileName))) return
         const controls = Array.from(document.querySelectorAll<HTMLElement>('.dl-header .actions button:has(.icon-arrow-down-circle-thin-outline), .context-section button:has(.icon-arrow-down-circle-thin-outline), .download.download-page .nv-container .footer button:has(.icon-arrow-down-circle-thin-outline)')).filter(visible)
         if (controls.length === 1 && controls[0]) return ready({ request, control: controls[0], fileName, provider: 'mega', url: null })
@@ -155,8 +158,8 @@ export function installDownloadHost() {
         const error = document.querySelector('#page h1')
         if (error && visible(error) && unavailableHostFile(host, error.textContent ?? '')) return unavailable(request.requestId)
         const panel = document.querySelector('section.panel')
-        if (panel && /cold storage and cannot be downloaded directly/.test(panel.textContent ?? '')) return waiting(request.requestId, 'GoFile has this file in cold storage')
-        if (panel && /free downloads are temporarily paused/.test(panel.textContent ?? '')) return waiting(request.requestId, 'GoFile has paused free downloads for this file')
+        if (panel && /cold storage and cannot be downloaded directly/.test(panel.textContent ?? '')) return waiting(request.requestId, 'downloads.reason.unavailableNow')
+        if (panel && /free downloads are temporarily paused/.test(panel.textContent ?? '')) return waiting(request.requestId, 'downloads.reason.unavailableNow')
         const rows = Array.from(document.querySelectorAll<HTMLElement>('.fm-row[data-id][data-type="file"]'))
         const matchingNames = matchingVideoFileNames(rows.map(row => row.querySelector('[data-action="open-file"] p')?.textContent?.trim() ?? ''), request.scriptFileNames ?? [])
         const selectedRows = rows.filter(row => row.dataset.selected === 'true')
@@ -174,7 +177,7 @@ export function installDownloadHost() {
         const fileName = document.querySelector('section.panel h1')?.textContent?.trim() ?? ''
         const controls = Array.from(document.querySelectorAll<HTMLElement>('section.panel button[data-action="download"]')).filter(visible)
         if (named(fileName, request.fileName) && controls.length === 1 && controls[0]) return ready({ request, control: controls[0], fileName, provider: 'gofile', url: null })
-        if (rows.length > 1 && request.fileName === null) return waiting(request.requestId, 'Choose one file on GoFile, then Continue')
+        if (rows.length > 1 && request.fileName === null) return waiting(request.requestId, 'downloads.reason.chooseFile')
         return
       }
       if (request.fileName !== null) {
@@ -187,7 +190,7 @@ export function installDownloadHost() {
     observation = new MutationObserver(scan)
     observation.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'hidden', 'style', 'href', 'download', 'content', 'data-selected'] })
     const timeout = /^(?:www\.)?mega\.(?:nz|co\.nz|io)$/.test(new URL(request.sourceUrl).hostname) ? MEGA_PREPARE_TIMEOUT_MS : 8_000
-    timer = setTimeout(() => waiting(request.requestId, 'A verified download control was not available. Complete the host step, then Continue'), timeout)
+    timer = setTimeout(() => waiting(request.requestId, 'downloads.reason.notStarted'), timeout)
     scan()
   })
 
@@ -195,7 +198,7 @@ export function installDownloadHost() {
     if (!selected || selected.request.requestId !== request.requestId) return
     if (!selected.control.isConnected || !samePage(selected.request.sourceUrl)) {
       selected = null
-      ipcRenderer.send(ERO_CHANNELS.hostWaiting, { requestId: request.requestId, reason: 'The source page changed. Continue to refresh it' })
+      ipcRenderer.send(ERO_CHANNELS.hostWaiting, { requestId: request.requestId, reason: 'downloads.reason.pageChanged' })
       return
     }
     active = selected
@@ -219,7 +222,7 @@ export function installDownloadHost() {
         const widget = megaWidget(active.fileName)
         const error = widget?.querySelector('.status.error')
         const reason = megaStep() ?? (error && visible(error) && (error !== staleError || error.textContent !== staleErrorText)
-          ? 'The transfer was interrupted' : null)
+          ? 'downloads.reason.interrupted' as const : null)
         if (reason) {
           stopMonitor()
           ipcRenderer.send(ERO_CHANNELS.hostWaiting, { requestId: request.requestId, reason })
@@ -250,13 +253,13 @@ export function installDownloadHost() {
     return widgets.length === 1 ? widgets[0] ?? null : null
   }
 
-  function megaStep(): string | null {
-    const checks = [
-      { selector: '.limited-bandwidth-dialog, .quota-dialog.transfer-quota.overquota', reason: 'MEGA reached its transfer quota' },
-      { selector: '.quota-dialog.transfer-quota.almost-overquota', reason: 'Confirm MEGA download' },
-      { selector: '.megasync-overlay', reason: 'MEGA requires a browser or desktop-app choice' },
-      { selector: '.dl-access-box input[name="decrypt-link"][type="text"]', reason: 'MEGA needs the file key' },
-      { selector: '.dl-access-box input[name="decrypt-link"][type="password"]', reason: 'MEGA needs the link password' },
+  function megaStep(): DownloadReason | null {
+    const checks: { selector: string; reason: DownloadReason }[] = [
+      { selector: '.limited-bandwidth-dialog, .quota-dialog.transfer-quota.overquota', reason: 'downloads.reason.limit' },
+      { selector: '.quota-dialog.transfer-quota.almost-overquota', reason: 'downloads.reason.confirm' },
+      { selector: '.megasync-overlay', reason: 'downloads.reason.confirm' },
+      { selector: '.dl-access-box input[name="decrypt-link"][type="text"]', reason: 'downloads.reason.fileKey' },
+      { selector: '.dl-access-box input[name="decrypt-link"][type="password"]', reason: 'downloads.reason.linkPassword' },
     ]
     for (const step of checks) {
       if (Array.from(document.querySelectorAll(step.selector)).some(visible)) return step.reason
@@ -264,21 +267,21 @@ export function installDownloadHost() {
     return null
   }
 
-  function pixeldrainStep(): string | null {
+  function pixeldrainStep(): DownloadReason | null {
     const dialog = Array.from(document.querySelectorAll('.file_viewer .background[role="dialog"] > .window[role="dialog"][aria-modal="true"]')).find(visible)
-    if (dialog?.querySelector('.captcha_container')) return 'Complete the Pixeldrain CAPTCHA, then Continue'
-    if (dialog?.querySelector(':scope > .header > .title')?.textContent?.trim() === 'Download error') return 'Pixeldrain cannot download this file. Check the source page'
+    if (dialog?.querySelector('.captcha_container')) return 'downloads.reason.captcha'
+    if (dialog?.querySelector(':scope > .header > .title')?.textContent?.trim() === 'Download error') return 'downloads.reason.hostError'
     const preview = document.querySelector('.file_viewer .file_preview')
     if (!preview) return null
-    if (preview.querySelector('img.header_image[src="/res/img/slow_down.webp"]')) return 'Pixeldrain reached its download limit'
+    if (preview.querySelector('img.header_image[src="/res/img/slow_down.webp"]')) return 'downloads.reason.limit'
     const heading = preview.querySelector('h1')?.cloneNode(true)
     if (heading instanceof Element) {
       heading.querySelectorAll('i, .material-icons').forEach((icon) => icon.remove())
       const text = heading.textContent?.trim()
-      if (text === 'Download limit reached') return 'Pixeldrain reached its download limit'
-      if (text === 'Hotlink protection enabled') return 'Pixeldrain requires a download step on its page'
+      if (text === 'Download limit reached') return 'downloads.reason.limit'
+      if (text === 'Hotlink protection enabled') return 'downloads.reason.notStarted'
     }
-    if (preview.querySelector('.highlight_yellow')) return 'Pixeldrain requires a CAPTCHA on its page'
+    if (preview.querySelector('.highlight_yellow')) return 'downloads.reason.captcha'
     return null
   }
 

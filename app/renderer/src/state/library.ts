@@ -8,6 +8,9 @@ import { invoke, on } from '@/ipc'
 import { t } from '@/state/i18n'
 import { useSettings } from '@/state/settings'
 import { useUi } from '@/state/ui'
+import type { GridPosition } from '@/screens/library/virtualGrid'
+
+export const libraryGridPosition: { current: GridPosition | null } = { current: null }
 
 export type View = 'grid' | 'list' | 'condensed'
 
@@ -60,6 +63,7 @@ interface LibraryState {
   rows: GridEntry[]
   total: number
   rev: number | null
+  mix: number
   continueRows: MediaRow[]
   loading: boolean
   selectedId: number | null
@@ -69,6 +73,7 @@ interface LibraryState {
   refresh: () => Promise<void>
   query: (mode?: QueryMode) => Promise<void>
   loadMore: () => Promise<void>
+  reshuffle: () => Promise<void>
   allIds: () => Promise<number[]>
   jumpTo: (prefix: string) => Promise<{ index: number; id: number } | null>
   setSection: (section: Section) => void
@@ -279,6 +284,7 @@ export const useLibrary = create<LibraryState>()((set, get) => {
     rows: [],
     total: 0,
     rev: null,
+    mix: 0,
     continueRows: [],
     loading: false,
     selectedId: null,
@@ -385,6 +391,14 @@ export const useLibrary = create<LibraryState>()((set, get) => {
       } catch {
         if (id === queryId) set({ loading: false, rows: [], total: 0, continueRows: [], searchInfo: { query: get().search, conditions: [], corrections: [], error: t('library.search.unavailable') } })
       }
+    },
+    reshuffle: async () => {
+      await invoke('library:reshuffle')
+      libraryGridPosition.current = null
+      set((s) => ({ mix: s.mix + 1 }))
+      if (get().sort !== 'recommended') return
+      if (users.has('library')) void get().query('reset')
+      else pageStale = true
     },
     loadMore: async () => {
       const { rows, total, loading } = get()

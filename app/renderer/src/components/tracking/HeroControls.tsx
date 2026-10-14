@@ -15,10 +15,13 @@ import {
   type TrackAxisId,
 } from '@shared/tracking'
 import { Button } from '@/components/ui/Button'
+import { Modal } from '@/components/ui/Modal'
+import '@/components/ui/Prompt.css'
 import { Segmented } from '@/components/ui/Segmented'
 import { Slider } from '@/components/ui/Slider'
 import { cx } from '@/lib/cx'
 import { useT } from '@/state/i18n'
+import { useSettings } from '@/state/settings'
 import { useTracking } from '@/state/tracking'
 import { FlourishGlyph } from './FlourishGlyph'
 
@@ -29,6 +32,19 @@ export function HeroControls({ stroke, colours = true }: { stroke: boolean; colo
   const zone = useTracking((s) => s.heroZone)
   const pickZone = useTracking((s) => s.pickHeroZone)
   const setZoneEdit = useTracking((s) => s.setZoneEdit)
+  const inPlayer = useTracking((s) => s.source === 'player')
+  const helpSeen = useSettings((s) => s.settings?.tracking.zoneHelpSeen ?? true)
+  const updateSettings = useSettings((s) => s.update)
+  const [help, setHelp] = useState(false)
+  const placeZone = () => {
+    pickZone()
+    setZoneEdit(true)
+  }
+  const closeHelp = () => {
+    setHelp(false)
+    void updateSettings((s) => ({ ...s, tracking: { ...s.tracking, zoneHelpSeen: true } }))
+    placeZone()
+  }
   const direction = useTracking((s) => s.heroDirection)
   const setDirection = useTracking((s) => s.setHeroDirection)
   const found = useTracking((s) => s.hero?.found ?? null)
@@ -38,16 +54,21 @@ export function HeroControls({ stroke, colours = true }: { stroke: boolean; colo
   const Arrow = shown ? ARROW[shown] : null
   return (
     <>
-      <Button
-        className={cx(zone && 'active')}
-        onClick={() => {
-          pickZone()
-          setZoneEdit(true)
-        }}
-      >
+      <Button className={cx(zone && 'active')} onClick={() => (inPlayer && !helpSeen ? setHelp(true) : placeZone())}>
         <Scan />
         {zone ? t('tracking.hero.moveZone') : t('tracking.hero.pickZone')}
       </Button>
+      <Modal open={help} onOpenChange={(o) => !o && closeHelp()} title={t('tracking.zoneHelp.title')} width={400}>
+        <div className="prompt">
+          <h2>{t('tracking.zoneHelp.title')}</h2>
+          <p>{t('tracking.zoneHelp.body')}</p>
+          <div className="actions">
+            <Button variant="primary" onClick={closeHelp}>
+              {t('common.done')}
+            </Button>
+          </div>
+        </div>
+      </Modal>
       <DropdownMenu.Root>
         <DropdownMenu.Trigger asChild>
           <button type="button" className="chip region-pick">

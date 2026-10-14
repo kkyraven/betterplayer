@@ -9,14 +9,14 @@ export function topicNumber(url: string): string | null {
 }
 
 export function topicTab(batch: Pick<DownloadBatch, 'topicTabId' | 'topicUrl'>, tabs: readonly Pick<BrowserTab, 'id' | 'url'>[]): number | null {
-  const tab = tabs.find((candidate) => candidate.id === batch.topicTabId)
-  if (!tab) return null
   const topic = topicNumber(batch.topicUrl)
-  const same = topic === null ? tab.url === batch.topicUrl : topicNumber(tab.url) === topic
-  return same ? tab.id : null
+  const same = (tab: Pick<BrowserTab, 'url'>) => topic === null ? tab.url === batch.topicUrl : topicNumber(tab.url) === topic
+  const captured = tabs.find((tab) => tab.id === batch.topicTabId)
+  if (captured && same(captured)) return captured.id
+  return topic === null ? null : tabs.find(same)?.id ?? null
 }
 
-export function isTopicBatch(topic: Pick<EroTopic, 'tabId' | 'url'>, batch: Pick<DownloadBatch, 'origin' | 'topicTabId' | 'topicUrl'>): boolean {
+export function isTopicBatch(topic: Pick<EroTopic, 'url'>, batch: Pick<DownloadBatch, 'origin' | 'topicUrl'>): boolean {
   const id = topicNumber(topic.url)
-  return batch.origin !== 'browser' && batch.topicTabId === topic.tabId && id !== null && topicNumber(batch.topicUrl) === id
+  return batch.origin !== 'browser' && id !== null && topicNumber(batch.topicUrl) === id
 }

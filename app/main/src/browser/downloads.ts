@@ -1,17 +1,18 @@
 import type { DownloadItem, IpcMain, IpcMainEvent, Session, WebContents } from 'electron'
 import { isAbsolute, basename, dirname } from 'node:path'
-import { ERO_CHANNELS, isEroScriptsUrl, sourceUrl, type EroTopic } from '@shared/eroscripts'
+import { ERO_CHANNELS, sourceUrl, type EroTopic } from '@shared/eroscripts'
+import { isDownloadReason } from '@shared/downloads'
 import { intermediaryDownloadUrl } from '@shared/download-host'
 import { MEGA_PREPARE_TIMEOUT_MS, megaDownloadName } from '@shared/mega'
 import type { BrowserTab } from '@shared/browser'
 import { relatedNavigation } from './download-context'
-import type { TransferRequest, TransferResult } from '../downloads/transport'
+import type { SourceReveal, TransferRequest, TransferResult } from '../downloads/transport'
 export type { OrdinaryBrowserDownload } from '../downloads/transport'
 
 interface BrowserDownloadAccess {
   topic: (id: number) => EroTopic | null
   contents: (id: number) => WebContents | null
-  openRelated: (request: TransferRequest) => BrowserTab | null
+  openRelated: (request: SourceReveal & { reveal?: boolean }) => BrowserTab | null
   openTransfer: (request: TransferRequest) => BrowserTab | null
   activate: (id: number) => void
   ordinaryDownload?: (item: DownloadItem, contents: WebContents) => void
@@ -83,7 +84,7 @@ export class BrowserDownloads {
     if (request.signal.aborted) return { status: 'failed', reason: 'Cancelled', scope: 'remote' }
     if (!safeStaging(request.stagingPath)) return { status: 'failed', reason: 'Invalid staging destination', scope: 'local' }
     if (!publicDownloadUrl(request.candidate.url)) return { status: 'failed', reason: 'Invalid source URL', scope: 'remote' }
-    if (this.intents.has(request.attemptId)) return { status: 'waiting', reason: 'This source is already downloading' }
+    if (this.intents.has(request.attemptId)) return { status: 'waiting', reason: 'downloads.reason.busy' }
     const direct = request.directUrl !== null ? sourceUrl(request.directUrl) : null
     if (request.directUrl !== null && (!direct || !publicDownloadUrl(direct))) return { status: 'failed', reason: 'Invalid download URL', scope: 'remote' }
     let contents = this.browser.contents(request.topic.tabId)
@@ -97,10 +98,10 @@ export class BrowserDownloads {
       const topic = this.browser.topic(request.topic.tabId)
       if (!contents || contents.isDestroyed() || !topic || topic.generation !== request.topic.generation
         || topic.url !== request.topic.url || !topic.sources.some((source) => source.id === request.candidate.id && source.controlId === request.candidate.controlId)) {
-        return { status: 'waiting', reason: 'Reopen the topic to refresh this generated file', tabId: request.topic.tabId }
+        return { status: 'waiting', reason: 'downloads.reason.refreshTopic', tabId: request.topic.tabId }
       }
       const prepared = await this.prepareControl(contents, request)
-      if (!prepared) return { status: 'waiting', reason: 'The generated file changed. Refresh the topic', tabId }
+      if (!prepared) return { status: 'waiting', reason: 'downloads.reason.refreshTopic', tabId }
       expectedUrl = prepared.url
       generated = true
       trigger = () => contents?.mainFrame.send(ERO_CHANNELS.activate, { requestId: prepared.requestId, generation: request.topic.generation })
@@ -116,7 +117,7 @@ export class BrowserDownloads {
         const relatedSources = this.related.get(request.fileId) ?? new Map<string, RelatedAttempt>()
         relatedSources.set(request.candidate.id, { fileId: request.fileId, attemptId: request.attemptId, tabId, sourceUrl: request.candidate.url })
         this.related.set(request.fileId, relatedSources)
-        if (!contents || !await this.documentReady(contents, request.signal)) return { status: 'waiting', reason: 'The source page did not load. Continue to try again', tabId }
+        if (!contents || !await this.documentReady(contents, request.signal)) return { status: 'waiting', reason: 'downloads.reason.notLoaded', tabId }
         const prepared = await this.prepareHost(contents, request)
         if (prepared.status === 'waiting') return { ...prepared, tabId }
         if (prepared.status === 'failed') return prepared
@@ -139,11 +140,11 @@ export class BrowserDownloads {
       tabId = tab.id
       contents = this.browser.contents(tabId)
     }
-    if (!contents || !expectedUrl && !hostControl) return { status: 'failed', reason: 'Source is unavailable', scope: 'remote' }
+    if (!contents || !expectedUrl && !hostControl) return { status: 'failed', reason: 'downloads.reason.unavailable', scope: 'remote' }
     if (request.signal.aborted) return { status: 'failed', reason: 'Cancelled', scope: 'remote' }
     if (expectedUrl && this.revoked.some((revoked) => revoked.contents === contents && revoked.url === expectedUrl && revoked.expires > Date.now())) {
       const tab = this.browser.openTransfer(request)
-      if (!tab) return { status: 'waiting', reason: 'The previous source attempt is still closing', tabId }
+      if (!tab) return { status: 'waiting', reason: 'downloads.reason.busy', tabId }
       tabId = tab.id
       contents = this.browser.contents(tabId)
       if (!contents) return { status: 'failed', reason: 'Could not open the source', scope: 'remote' }
@@ -151,7 +152,7 @@ export class BrowserDownloads {
     const initiating = contents
     const expected = expectedUrl
     if ([...this.intents.values()].some((intent) => intent.contents === initiating && intent.expectedUrl === expected)) {
-      return { status: 'waiting', reason: 'Another transfer is using this source', tabId }
+      return { status: 'waiting', reason: 'downloads.reason.busy', tabId }
     }
     return new Promise<TransferResult>((resolve) => {
       let settled = false
@@ -183,7 +184,7 @@ export class BrowserDownloads {
       }
       const destroyed = () => {
         const intent = this.intents.get(request.attemptId)
-        if (!intent?.item) finish({ status: 'waiting', reason: 'The source tab closed. Continue to reopen it', tabId })
+        if (!intent?.item) finish({ status: 'waiting', reason: 'downloads.reason.tabClosed', tabId })
       }
       const intent: Intent = { request, contents: initiating, expectedUrl: expected, generated, item: null, finish, triggered: false, hostControl }
       const hostDownload = (event: IpcMainEvent, payload: unknown) => {
@@ -192,25 +193,25 @@ export class BrowserDownloads {
         if (!('requestId' in payload) || payload.requestId !== hostControl.requestId || !('fileName' in payload) || payload.fileName !== hostControl.fileName) return
         const url = 'url' in payload ? payload.url : null
         if (typeof url !== 'string' || url.length > 8192 || !hostDownloadUrl(hostControl.provider, initiating.getURL(), url, hostControl.fileName)) {
-          finish({ status: 'waiting', reason: 'The host offered a different file. Check the source page', tabId })
+          finish({ status: 'waiting', reason: 'downloads.reason.differentFile', tabId })
           return
         }
         intent.expectedUrl = url
         intent.generated = hostControl.provider === 'mega'
         this.browser.approveNavigation?.(initiating, url)
         try { initiating.mainFrame.send(ERO_CHANNELS.hostRelease, { requestId: hostControl.requestId }) }
-        catch { finish({ status: 'waiting', reason: 'The source page changed. Continue to refresh it', tabId }) }
+        catch { finish({ status: 'waiting', reason: 'downloads.reason.pageChanged', tabId }) }
       }
       const hostWaiting = (event: IpcMainEvent, payload: unknown) => {
         if (!hostControl || this.intents.get(request.attemptId) !== intent || intent.item || event.sender !== initiating
           || event.senderFrame !== initiating.mainFrame || !payload || typeof payload !== 'object') return
         if ('requestId' in payload && payload.requestId === hostControl.requestId && 'reason' in payload
-          && typeof payload.reason === 'string' && payload.reason.length <= 300) finish({ status: 'waiting', reason: payload.reason, tabId })
+          && isDownloadReason(payload.reason)) finish({ status: 'waiting', reason: payload.reason, tabId })
       }
       const armTimer = () => {
         if (timer) clearTimeout(timer)
         timer = setTimeout(() => {
-          if (!intent.item) finish({ status: 'waiting', reason: 'The source did not start a download. Continue on its page', tabId })
+          if (!intent.item) finish({ status: 'waiting', reason: 'downloads.reason.notStarted', tabId })
         }, hostControl?.provider === 'mega' ? 10 * 60_000 : 20_000)
       }
       const hostActivity = (event: IpcMainEvent, payload: unknown) => {
@@ -362,13 +363,12 @@ export class BrowserDownloads {
         }
         if (payload.status === 'failed' && 'unavailable' in payload && payload.unavailable === true
           && relatedNavigation(request.candidate.url, contents.getURL())) {
-          const reason = 'reason' in payload && typeof payload.reason === 'string' && payload.reason.length <= 300 ? payload.reason : 'Source is unavailable'
+          const reason = 'reason' in payload && isDownloadReason(payload.reason) ? payload.reason : 'downloads.reason.unavailable'
           finish({ status: 'failed', reason, scope: 'remote', unavailable: true })
           return
         }
         if (payload.status === 'waiting') {
-          const reason = 'reason' in payload && typeof payload.reason === 'string' && payload.reason.length <= 300 ? payload.reason : hostStep(request.candidate.host)
-          finish({ status: 'waiting', reason })
+          finish({ status: 'waiting', reason: 'reason' in payload && isDownloadReason(payload.reason) ? payload.reason : 'downloads.reason.notStarted' })
           return
         }
         if (payload.status !== 'ready' || !('fileName' in payload) || typeof payload.fileName !== 'string' || payload.fileName.length > 256
@@ -381,9 +381,9 @@ export class BrowserDownloads {
         if (payload.provider === 'anchor' && (payload.url === null || !sourceUrl(payload.url))) return
         const source = new URL(request.candidate.url)
         let current: URL
-        try { current = new URL(contents.getURL()) } catch { return finish({ status: 'waiting', reason: 'The source page changed. Reopen the original link' }) }
+        try { current = new URL(contents.getURL()) } catch { return finish({ status: 'waiting', reason: 'downloads.reason.pageChanged' }) }
         const family = payload.provider === 'mega' ? /^(?:www\.)?mega\.(?:nz|co\.nz|io)$/ : payload.provider === 'pixeldrain' ? /^(?:www\.)?pixeldrain\.com$/ : /^(?:www\.)?gofile\.io$/
-        if (current.origin !== source.origin && (payload.provider === 'anchor' || !family.test(source.hostname) || !family.test(current.hostname))) return finish({ status: 'waiting', reason: 'The source page changed. Reopen the original link' })
+        if (current.origin !== source.origin && (payload.provider === 'anchor' || !family.test(source.hostname) || !family.test(current.hostname))) return finish({ status: 'waiting', reason: 'downloads.reason.pageChanged' })
         if (payload.provider === 'mega' && !/^(?:www\.)?mega\.(?:nz|co\.nz|io)$/.test(source.hostname)
           || payload.provider === 'gofile' && !/^(?:www\.)?gofile\.io$/.test(source.hostname)
           || payload.provider === 'pixeldrain' && (!/^(?:www\.)?pixeldrain\.com$/.test(source.hostname)
@@ -392,11 +392,11 @@ export class BrowserDownloads {
         finish({ status: 'ready', control: { requestId, fileName: payload.fileName, provider: payload.provider, url: payload.url } })
       }
       const timeout = /^(?:www\.)?mega\.(?:nz|co\.nz|io)$/.test(new URL(request.candidate.url).hostname) ? MEGA_PREPARE_TIMEOUT_MS + 1_000 : 9_000
-      const timer = setTimeout(() => finish({ status: 'waiting', reason: hostStep(request.candidate.host) }), timeout)
+      const timer = setTimeout(() => finish({ status: 'waiting', reason: 'downloads.reason.notStarted' }), timeout)
       this.ipc.on(ERO_CHANNELS.hostPrepared, receive)
       request.signal.addEventListener('abort', abort, { once: true })
       try { contents.mainFrame.send(ERO_CHANNELS.hostPrepare, { requestId, sourceUrl: request.candidate.url, fileName: request.candidate.fileName, scriptFileNames: request.scriptFileNames }) }
-      catch { finish({ status: 'waiting', reason: 'The source tab closed. Continue to reopen it' }) }
+      catch { finish({ status: 'waiting', reason: 'downloads.reason.tabClosed' }) }
     })
   }
 
@@ -427,9 +427,21 @@ export class BrowserDownloads {
     })
   }
 
-  continue(fileId: string, attemptId: string): void {
-    const related = [...(this.related.get(fileId)?.values() ?? [])].find(source => source.attemptId === attemptId)
-    if (related && this.browser.contents(related.tabId)) this.browser.activate(related.tabId)
+  reveal(source: SourceReveal): number | null {
+    const sources = this.related.get(source.fileId) ?? new Map<string, RelatedAttempt>()
+    const related = sources.get(source.candidate.id)
+    if (related && related.attemptId !== source.attemptId) return null
+    if (related && this.browser.contents(related.tabId)) {
+      this.browser.activate(related.tabId)
+      return related.tabId
+    }
+    const resolved = this.resolvedPages.get(source.fileId)
+    const candidate = resolved?.sourceUrl === source.candidate.url ? { ...source.candidate, url: resolved.targetUrl, host: new URL(resolved.targetUrl).hostname } : source.candidate
+    const tab = this.browser.openRelated({ ...source, candidate, reveal: true })
+    if (!tab) return null
+    sources.set(source.candidate.id, { fileId: source.fileId, attemptId: source.attemptId, tabId: tab.id, sourceUrl: candidate.url })
+    this.related.set(source.fileId, sources)
+    return tab.id
   }
 
   cancel(attemptId: string): void {
@@ -464,12 +476,4 @@ export function hostDownloadUrl(provider: HostControl['provider'], source: strin
     return provider === 'gofile' && url.protocol === 'https:' && /^(?:[a-z0-9-]+\.)?gofile\.io$/.test(url.hostname)
       && url.pathname.startsWith('/download/') && decodeURIComponent(url.pathname.split('/').at(-1) ?? '') === fileName
   } catch { return false }
-}
-
-function hostStep(host: string): string {
-  if (/^(?:www\.)?mega\.(?:nz|co\.nz)$/.test(host)) return 'Continue on MEGA to choose the file and download. Keys or quota may require your input'
-  if (/^(?:www\.)?gofile\.io$/.test(host)) return 'Continue on GoFile to choose the file and download'
-  if (host === 'drive.google.com') return 'Continue on Google Drive to download. Sign-in or permission may be required'
-  if (isEroScriptsUrl(`https://${host}/`)) return 'Continue on EroScripts to download the attachment'
-  return 'Continue on the source page to complete its download step'
 }

@@ -173,6 +173,48 @@ describe('durable download queue', () => {
     expect(JSON.stringify(context.queue.state())).not.toContain('signature=private')
   })
 
+  it('finishes a waiting file with the matching download the user starts on its source tab', async () => {
+    const context = await setup(async () => ({ status: 'waiting', reason: 'downloads.reason.captcha', tabId: 9 }))
+    await context.queue.enqueue(context.selection([candidate('preferred')]))
+    await settled(context.queue)
+    let savedPath = ''
+    const item = (name: string) => Object.assign(new EventEmitter(), {
+      getSavePath: () => savedPath, setSavePath: vi.fn((path: string) => { savedPath = path }), getReceivedBytes: () => SCRIPT.length, getTotalBytes: () => SCRIPT.length,
+      getFilename: () => name, getURL: () => 'https://fixture.example/file', getMimeType: () => 'application/octet-stream', getState: () => 'progressing', pause: vi.fn(), resume: vi.fn(), cancel: vi.fn(),
+    })
+    const other = item('other.funscript')
+    context.queue.adoptOrdinary({ item: other as unknown as DownloadItem, tabId: 9, pageUrl: 'https://fixture.example/file' })
+    const elsewhere = item('scene.alternative.roll.funscript')
+    context.queue.adoptOrdinary({ item: elsewhere as unknown as DownloadItem, tabId: 4, pageUrl: 'https://fixture.example/file' })
+    expect(other.setSavePath).not.toHaveBeenCalled()
+    expect(elsewhere.setSavePath).not.toHaveBeenCalled()
+
+    const download = item('scene.alternative.roll.funscript')
+    context.queue.adoptOrdinary({ item: download as unknown as DownloadItem, tabId: 9, pageUrl: 'https://fixture.example/file' })
+    expect(download.setSavePath).toHaveBeenCalledOnce()
+    expect(context.queue.state().batches[0]?.files[0]?.phase).toBe('downloading')
+    await writeFile(savedPath, SCRIPT)
+    download.emit('done', {}, 'completed')
+    await expect.poll(() => context.queue.state().batches[0]?.files[0]?.phase).toBe('complete')
+    expect(context.importPublished).toHaveBeenCalledOnce()
+  })
+
+  it('finishes a waiting file with one the user downloaded elsewhere, keeping the expected name and the original', async () => {
+    const context = await setup(async () => ({ status: 'waiting', reason: 'downloads.reason.limit', tabId: 9 }))
+    await context.queue.enqueue(context.selection([candidate('video', 'video')]))
+    await settled(context.queue)
+    const id = context.queue.state().batches[0]!.files[0]!.id
+    const script = join(context.directory, 'elsewhere.funscript')
+    await writeFile(script, SCRIPT)
+    await expect(context.queue.attachFile(id, script)).rejects.toThrow('does not match')
+    const dropped = join(context.directory, 'elsewhere.mp4')
+    await writeFile(dropped, VIDEO)
+    await context.queue.attachFile(id, dropped)
+    await expect.poll(() => context.queue.state().batches[0]?.files[0]?.phase).toBe('complete')
+    expect(context.queue.state().batches[0]?.files[0]?.publishedName).toBe('scene.mp4')
+    await expect(readFile(dropped)).resolves.toEqual(VIDEO)
+  })
+
   it('accepts a tiny native transfer completed before attachment exactly once and cleans listeners on shutdown', async () => {
     const context = await setup(complete)
     const path = join(context.directory, 'chosen-name.funscript')
@@ -359,7 +401,7 @@ describe('durable download queue', () => {
     const recovered = await DownloadQueue.open(context.options)
     resources.push({ directory: context.directory, queue: recovered })
     const file = recovered.state().batches[0]?.files[0]
-    expect(file).toMatchObject({ phase: 'waiting', canContinue: false, canOpenSource: false, reason: 'Source details unavailable after restart' })
+    expect(file).toMatchObject({ phase: 'waiting', canContinue: false, canOpenSource: false, reason: 'downloads.reason.reselect' })
     await expect(recovered.openSource(file!.id)).rejects.toThrow('Browser download source is unavailable')
     expect(openOrdinarySource).not.toHaveBeenCalled()
   })
@@ -669,7 +711,7 @@ describe('destination and format safety', () => {
     const context = await setup(complete)
     const root = context.options.getRoot()
     await expect(checkDestination(root, { rootId: 1, relativePath: '../outside' })).rejects.toThrow('Invalid destination')
-    await symlink(context.directory, join(context.directory, 'alias'))
+    await symlink(context.directory, join(context.directory, 'alias'), 'junction')
     await expect(checkDestination(root, { rootId: 1, relativePath: 'alias' })).rejects.toThrow('symbolic link')
     expect(() => safeFileName('CON.mp4')).toThrow('Invalid file name')
     expect(() => verifyFunscript(SCRIPT)).not.toThrow()

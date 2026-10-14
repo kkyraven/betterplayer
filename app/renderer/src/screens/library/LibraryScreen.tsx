@@ -1,5 +1,5 @@
 import { Check, Film, FolderPlus, Plus, Server, X } from 'lucide-react'
-import { memo, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode, type RefObject } from 'react'
+import { memo, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode, type RefObject } from 'react'
 import type { MessageKey } from '@shared/i18n'
 import { isPlaylist, titleStartsWith, type MediaRow, type Section } from '@shared/library'
 import { FavButton } from '@/components/media/FavButton'
@@ -12,7 +12,7 @@ import { invoke } from '@/ipc'
 import { cx } from '@/lib/cx'
 import { useDevices } from '@/state/devices'
 import { useT } from '@/state/i18n'
-import { countVideos, useLibrary } from '@/state/library'
+import { countVideos, libraryGridPosition, useLibrary } from '@/state/library'
 import { usePlayer } from '@/state/player'
 import { useSettings } from '@/state/settings'
 import { useSelect } from '@/state/select'
@@ -129,8 +129,15 @@ function Grid() {
   const gridSize = useLibrary((s) => s.gridSize)
   const scrollRef = useRef<HTMLDivElement>(null)
   const gridRef = useRef<HTMLDivElement>(null)
-  const { range, scrollToIndex } = useVirtualGrid(scrollRef, gridRef, rows.length, `${view}:${gridSize}`)
+  const { range, scrollToIndex } = useVirtualGrid(scrollRef, gridRef, rows.length, `${view}:${gridSize}`, libraryGridPosition)
   useTypeAhead(gridRef, scrollToIndex)
+  const mix = useLibrary((s) => s.mix)
+  const shownMix = useRef(mix)
+  useLayoutEffect(() => {
+    if (shownMix.current === mix) return
+    shownMix.current = mix
+    scrollRef.current?.scrollTo({ top: 0 })
+  }, [mix])
   const title = playlistId !== null ? (playlists.find((p) => p.id === playlistId)?.name ?? t('library.playlist.label')) : folder ? (folder.folder.split('/').pop() || folders.find((f) => f.rootId === folder.rootId)?.name || t('library.folder.fallback')) : section === 'all' && filters.tag ? `#${filters.tag}` : t(SECTION_TITLES[section])
   const isGrid = view === 'grid'
   const density = gridSize < 200 ? 'compact' : 'comfortable'

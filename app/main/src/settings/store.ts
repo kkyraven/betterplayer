@@ -539,6 +539,7 @@ function readCurrent(data: Json): Settings {
       beatBounce: bool(tracking.beatBounce, true),
       beatBounceDepth: Math.max(BEAT_BOUNCE_DEPTH.min, Math.min(BEAT_BOUNCE_DEPTH.max, num(tracking.beatBounceDepth, BEAT_BOUNCE_DEPTH.default))),
       beatBounceSpeed: Math.max(BEAT_BOUNCE_SPEED.min, Math.min(BEAT_BOUNCE_SPEED.max, num(tracking.beatBounceSpeed, BEAT_BOUNCE_SPEED.default))),
+      zoneHelpSeen: bool(tracking.zoneHelpSeen, false),
     },
     game: { kind: oneOf(game.kind, GAME_KINDS, 'rhythm'), ai: bool(game.ai, true) },
     chaster: { token: str(chaster.token) ?? '' },
