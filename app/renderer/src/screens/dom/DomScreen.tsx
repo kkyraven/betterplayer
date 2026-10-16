@@ -4,9 +4,9 @@
 import * as Popover from '@radix-ui/react-popover'
 import { ChevronsUpDown, Download, ExternalLink, Flame, Lock, Play, Plus, Search, Trash2, UserRound, Waves } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { SUBSCRIBE_URL, SUPPORTER_PRICE } from '@shared/account'
 import { AGENTIC_LOVER_URL, DOM_FREE_SECONDS, domAccess, type AlPersona, type AlTier, type DomProfile } from '@shared/dom'
 import type { MessageKey } from '@shared/i18n'
+import { SupporterOffer } from '@/components/account/SupporterOffer'
 import { Button } from '@/components/ui/Button'
 import { Modal } from '@/components/ui/Modal'
 import { Prompt } from '@/components/ui/Prompt'
@@ -159,16 +159,7 @@ function DomPage({ dom, locked }: { dom: DomProfile; locked: boolean }) {
         </Button>
       </div>
       {locked && (
-        <div className="game-offer">
-          <Lock />
-          <span>
-            {t('dom.freeUsed')} <span className="game-offer-price">{t('game.priceFrom', { price: SUPPORTER_PRICE })}</span>
-          </span>
-          <Button variant="primary" onClick={() => open(SUBSCRIBE_URL)}>
-            {t('firstStart.supporter.become')}
-            <ExternalLink />
-          </Button>
-        </div>
+        <SupporterOffer message={t('dom.freeUsed')} />
       )}
       <div className="dom-tabs">
         <Segmented options={TABS.map((x) => ({ value: x, label: t(TAB_LABEL[x]) }))} value={tab} onChange={setTab} label={t('screen.dom')} />

@@ -170,6 +170,11 @@ export interface Tag {
   count: number
 }
 
+export interface TagUndo {
+  media: { id: number; tags: string[] }[]
+  blocked: string[]
+}
+
 export type LibraryCounts = Record<Section, number>
 
 export function titleStartsWith(title: string, prefix: string): boolean {

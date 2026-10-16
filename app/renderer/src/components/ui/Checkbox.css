@@ -1,0 +1,10 @@
+.checkbox { position: relative; display: inline-grid; flex: none; width: 16px; height: 16px; }
+.checkbox input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.checkbox > span {
+  display: grid; place-items: center; border-radius: 5px; border: 1.5px solid var(--line-2); color: var(--accent-ink);
+  transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.checkbox svg { width: 11px; height: 11px; stroke-width: 3.5; visibility: hidden; }
+.checkbox input:is(:checked, :indeterminate) + span { background: var(--accent); border-color: var(--accent); }
+.checkbox input:is(:checked, :indeterminate) + span svg { visibility: visible; }
+.checkbox input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }

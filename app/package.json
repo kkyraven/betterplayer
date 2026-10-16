@@ -1,6 +1,6 @@
 {
   "name": "bp-app",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "private": true,
   "description": "Better Player desktop app",
   "main": "./out/main/index.js",

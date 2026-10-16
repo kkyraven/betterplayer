@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url'
 import { net } from 'electron'
 import type { AxisId } from '@shared/axes'
 import { isMediaPath, isVideoPath, type GeneratedResult, type GeneratedScriptRow, type IpcEvent, type IpcEvents } from '@shared/ipc'
-import type { DropResult, FolderNode, LibraryChange, LibraryCounts, LibraryRoot, MediaDetail, MediaIndexRow, MediaPage, MediaQuery, MediaRow, Playlist, ScanProgress, Tag } from '@shared/library'
+import type { DropResult, FolderNode, LibraryChange, LibraryCounts, LibraryRoot, MediaDetail, MediaIndexRow, MediaPage, MediaQuery, MediaRow, Playlist, ScanProgress, Tag, TagUndo } from '@shared/library'
 import type { MatcherReport, MatcherResolveResult, OrphanSet } from '@shared/matcher'
 import type { ScriptSet } from '@shared/peer'
 import { isUrl, type RemoteLoad, type ServerInput } from '@shared/remote'
@@ -554,6 +554,33 @@ export class Library {
     this.db.deleteTag(name)
     this.changed({ kind: 'meta' })
     this.queueWrites(affected)
+  }
+
+  blockedTags(): string[] {
+    return this.db.blockedTags()
+  }
+
+  deleteTags(names: string[], block: boolean): TagUndo {
+    return this.tagsEdited(this.db.deleteTags(names, block))
+  }
+
+  mergeTags(names: string[], into: string): TagUndo {
+    return this.tagsEdited(this.db.mergeTags(names, into))
+  }
+
+  unblockTags(names: string[]): TagUndo {
+    return this.db.unblockTags(names)
+  }
+
+  undoTags(undo: TagUndo) {
+    this.db.undoTags(undo)
+    this.tagsEdited(undo)
+  }
+
+  private tagsEdited(undo: TagUndo): TagUndo {
+    this.changed({ kind: 'meta' })
+    this.queueWrites(undo.media.flatMap(({ id }) => (this.db.remoteKey(id) ? [id] : [])))
+    return undo
   }
 
   played(path: string) {

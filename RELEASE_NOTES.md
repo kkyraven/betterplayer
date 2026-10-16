@@ -1,5 +1,11 @@
 # Release notes
 
+## 1.3.0
+
+- Manage tags across your library
+- Undo tag changes
+- Block unwanted automatic tags
+
 ## 1.2.2
 
 - Improve browser, improve AL sync.

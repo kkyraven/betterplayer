@@ -172,7 +172,8 @@ export class TagQueue {
       return
     }
     if (active.cancelled) return
-    const names = selectTags(tags, probs)
+    const blocked = new Set(this.db.blockedTags())
+    const names = selectTags(tags, probs).filter((name) => !blocked.has(name.toLowerCase()))
     this.db.transaction(() => {
       this.db.addTags(job.id, names)
       this.db.setThumbState(job.id, 'tags', 'ready')

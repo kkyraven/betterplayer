@@ -1,0 +1,4 @@
+.supporter-offer { display: flex; align-items: center; gap: 10px; padding: 12px 14px; margin-bottom: 22px; border-radius: 12px; background: var(--accent-soft); border: 1px solid rgba(var(--accent-rgb), 0.35); }
+.supporter-offer > svg { width: 14px; height: 14px; color: var(--text-2); flex: none; }
+.supporter-offer > span { flex: 1; color: var(--text-2); }
+.supporter-offer-price { color: var(--text-3); font-size: 12px; }

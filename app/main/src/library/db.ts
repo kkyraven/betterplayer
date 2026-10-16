@@ -22,6 +22,7 @@ import {
   type Section,
   type Sort,
   type Tag,
+  type TagUndo,
 } from '@shared/library'
 import { PROJECTION_KINDS, type ProjectionKind } from '@shared/projection'
 import { ROOT_KINDS, type RootKind } from '@shared/remote'
@@ -306,6 +307,10 @@ const SCHEMA_V21 = `
 ALTER TABLE remote_assets ADD COLUMN validators TEXT NOT NULL DEFAULT '';
 `
 
+const SCHEMA_V22 = `
+CREATE TABLE IF NOT EXISTS blocked_tags (name TEXT PRIMARY KEY);
+`
+
 export type AssetKind = 'scripts' | 'thumb' | 'strip'
 export interface AssetJob {
   mediaId: number
@@ -319,7 +324,7 @@ export interface AssetJob {
   priority: number
 }
 
-const SCHEMA_VERSION = 21
+const SCHEMA_VERSION = 22
 
 function parseValidators(raw: string): Validators {
   if (!raw) return {}
@@ -383,6 +388,8 @@ function migrate(db: DatabaseSync) {
         db.exec(SCHEMA_V20)
       case 20:
         db.exec(SCHEMA_V21)
+      case 21:
+        db.exec(SCHEMA_V22)
       default:
         break
     }
@@ -1373,6 +1380,60 @@ export class LibraryDb {
 
   deleteTag(name: string) {
     this.stmt('DELETE FROM tags WHERE name = ?').run(name)
+  }
+
+  tagSets(names: string[]): TagUndo['media'] {
+    const list = names.map(tagName)
+    if (list.length === 0) return []
+    return this.stmt(
+      `SELECT mt.media_id AS id, json_group_array(t.name) AS tags FROM media_tags mt JOIN tags t ON t.id = mt.tag_id
+       WHERE mt.media_id IN (SELECT mt2.media_id FROM media_tags mt2 JOIN tags t2 ON t2.id = mt2.tag_id WHERE t2.name IN (SELECT value FROM json_each(?)))
+       GROUP BY mt.media_id`,
+    )
+      .all(JSON.stringify(list))
+      .map((r) => ({ id: num(r, 'id'), tags: JSON.parse(text(r, 'tags')) as string[] }))
+  }
+
+  blockedTags(): string[] {
+    return this.stmt('SELECT name FROM blocked_tags ORDER BY name').all().map((r) => text(r, 'name'))
+  }
+
+  setBlockedTags(names: string[]) {
+    this.transaction(() => {
+      this.stmt('DELETE FROM blocked_tags').run()
+      for (const name of names) this.stmt('INSERT OR IGNORE INTO blocked_tags (name) VALUES (?)').run(tagName(name))
+    })
+  }
+
+  deleteTags(names: string[], block: boolean): TagUndo {
+    const undo = { media: this.tagSets(names), blocked: this.blockedTags() }
+    this.transaction(() => {
+      for (const name of names) this.deleteTag(tagName(name))
+      if (block) this.setBlockedTags([...undo.blocked, ...names])
+    })
+    return undo
+  }
+
+  mergeTags(names: string[], into: string): TagUndo {
+    const undo = { media: this.tagSets(names), blocked: this.blockedTags() }
+    this.transaction(() => {
+      for (const name of names) this.renameTag(tagName(name), into)
+    })
+    return undo
+  }
+
+  unblockTags(names: string[]): TagUndo {
+    const blocked = this.blockedTags()
+    const drop = new Set(names.map(tagName))
+    this.setBlockedTags(blocked.filter((name) => !drop.has(name)))
+    return { media: [], blocked }
+  }
+
+  undoTags(undo: TagUndo) {
+    this.transaction(() => {
+      for (const { id, tags } of undo.media) this.setTags(id, tags)
+      this.setBlockedTags(undo.blocked)
+    })
   }
 
   mediaIdByPath(path: string): number | null {

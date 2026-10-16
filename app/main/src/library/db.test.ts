@@ -184,3 +184,56 @@ describe('suggestions', () => {
     }
   })
 })
+
+describe('tag manager edits', () => {
+  const library = () => {
+    const db = new LibraryDb(':memory:')
+    const rootId = db.addRoot('/fictional').id
+    const add = (n: number) => db.upsertMedia({ rootId, path: `/fictional/${n}.mp4`, title: `${n}`, folder: '', size: 1, mtime: 1, durationMs: 1000, width: 100, height: 100, codec: '', projection: 'flat' }, n)
+    const [a, b, c] = [add(1), add(2), add(3)]
+    db.setTags(a, ['cowgirl', 'pov'])
+    db.setTags(b, ['cowgirl', 'riding'])
+    db.setTags(c, ['riding', 'tree'])
+    return db
+  }
+  const before = [{ name: 'cowgirl', count: 2 }, { name: 'pov', count: 1 }, { name: 'riding', count: 2 }, { name: 'tree', count: 1 }]
+
+  it('merges into an existing tag and undoes back to each video\'s own tags', () => {
+    const db = library()
+    try {
+      const undo = db.mergeTags(['cowgirl'], 'Riding')
+      expect(db.tags()).toEqual([{ name: 'pov', count: 1 }, { name: 'riding', count: 3 }, { name: 'tree', count: 1 }])
+      db.undoTags(undo)
+      expect(db.tags()).toEqual(before)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('deletes several tags, blocks them for the tagger, and undo restores both', () => {
+    const db = library()
+    try {
+      const undo = db.deleteTags(['cowgirl', 'tree'], true)
+      expect(db.tags()).toEqual([{ name: 'pov', count: 1 }, { name: 'riding', count: 2 }])
+      expect(db.blockedTags()).toEqual(['cowgirl', 'tree'])
+      db.undoTags(undo)
+      expect(db.tags()).toEqual(before)
+      expect(db.blockedTags()).toEqual([])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('unblocks a tag and undo blocks it again', () => {
+    const db = library()
+    try {
+      db.deleteTags(['tree'], true)
+      const undo = db.unblockTags(['tree'])
+      expect(db.blockedTags()).toEqual([])
+      db.undoTags(undo)
+      expect(db.blockedTags()).toEqual(['tree'])
+    } finally {
+      db.close()
+    }
+  })
+})

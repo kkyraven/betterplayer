@@ -12,11 +12,6 @@
 .game-page .panel .prow { padding-block: 8px; }
 .game-form[inert] { opacity: 0.45; }
 
-.game-offer { display: flex; align-items: center; gap: 10px; padding: 12px 14px; margin-bottom: 22px; border-radius: 12px; background: var(--accent-soft); border: 1px solid rgba(var(--accent-rgb), 0.35); }
-.game-offer > svg { width: 14px; height: 14px; color: var(--text-2); flex: none; }
-.game-offer > span { flex: 1; color: var(--text-2); }
-.game-offer-price { color: var(--text-3); font-size: 12px; }
-
 .game-captures { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
 .game-capture { display: grid; gap: 6px; padding: 6px; border-radius: 11px; border: 1px solid transparent; text-align: center; transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease); }
 .game-capture:hover { background: var(--glass-light); }

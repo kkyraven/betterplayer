@@ -1,20 +1,26 @@
-import { Link, PencilRuler, type LucideIcon } from 'lucide-react'
+import { Link, Lock, PencilRuler, Tags, type LucideIcon } from 'lucide-react'
 import { useState, type ComponentType } from 'react'
 import type { MessageKey } from '@shared/i18n'
 import { Button } from '@/components/ui/Button'
 import { Modal } from '@/components/ui/Modal'
 import { cx } from '@/lib/cx'
+import { isFree, useAccount } from '@/state/account'
 import { useT } from '@/state/i18n'
 import { useUi } from '@/state/ui'
 import { Matcher } from './Matcher'
+import { TagManager } from './TagManager'
 import '@/components/ui/Prompt.css'
 import './utilities.css'
 
-const TOOLS = [{ id: 'matcher', label: 'utilities.matcher', icon: Link, screen: Matcher }] as const satisfies ReadonlyArray<{
+const TOOLS = [
+  { id: 'matcher', label: 'utilities.matcher', icon: Link, screen: Matcher, supporter: false },
+  { id: 'tags', label: 'utilities.tags', icon: Tags, screen: TagManager, supporter: true },
+] as const satisfies ReadonlyArray<{
   id: string
   label: MessageKey
   icon: LucideIcon
   screen: ComponentType
+  supporter: boolean
 }>
 
 type ToolId = (typeof TOOLS)[number]['id']
@@ -24,6 +30,7 @@ export function UtilitiesScreen() {
   const [current, setCurrent] = useState<ToolId>('matcher')
   const [alpha, setAlpha] = useState(false)
   const setScreen = useUi((s) => s.setScreen)
+  const free = useAccount(isFree)
   const tool = TOOLS.find((t) => t.id === current) ?? TOOLS[0]
   const Page = tool.screen
   return (
@@ -36,6 +43,7 @@ export function UtilitiesScreen() {
               <button type="button" className={cx('side-row', tool.id === current && 'on')} onClick={() => setCurrent(tool.id)} aria-current={tool.id === current ? 'true' : undefined}>
                 <tool.icon />
                 {t(tool.label)}
+                {tool.supporter && free && <Lock className="util-lock" aria-label={t('common.supporterOnly')} />}
               </button>
             </li>
           ))}

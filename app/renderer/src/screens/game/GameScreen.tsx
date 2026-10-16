@@ -1,18 +1,17 @@
 // SPDX-License-Identifier: LicenseRef-KinkyRaven-Proprietary
 // Copyright (c) 2026 KinkyRaven. All rights reserved. This file is not licensed under LICENSE.txt; no permission is granted to use, copy, modify or distribute it.
 
-import { AppWindow, ExternalLink, Gamepad2, Lock, Monitor, Play, RefreshCw, SlidersHorizontal, Square } from 'lucide-react'
+import { AppWindow, Gamepad2, Lock, Monitor, Play, RefreshCw, SlidersHorizontal, Square } from 'lucide-react'
 import { useEffect, useRef } from 'react'
-import { SUBSCRIBE_URL, SUPPORTER_PRICE } from '@shared/account'
 import { GAME_KINDS, GAME_KIND_LABEL, SYSTEM_AUDIO, gameSource, type GameKind } from '@shared/game'
 import { TRACK_SOURCE_LABEL } from '@shared/tracking'
+import { SupporterOffer } from '@/components/account/SupporterOffer'
 import { Button } from '@/components/ui/Button'
 import { Segmented } from '@/components/ui/Segmented'
 import { Select } from '@/components/ui/Select'
 import { Switch } from '@/components/ui/Switch'
 import { invoke } from '@/ipc'
 import { cx } from '@/lib/cx'
-import { electron } from '@/node'
 import { isFree, useAccount } from '@/state/account'
 import { outputName, useDevices } from '@/state/devices'
 import { hasSystemAudio, useGame } from '@/state/game'
@@ -81,16 +80,7 @@ function Setup({ free }: { free: boolean }) {
         </h1>
       </div>
       {free && (
-        <div className="game-offer">
-          <Lock />
-          <span>
-            {t('game.supporterOnly')} <span className="game-offer-price">{t('game.priceFrom', { price: SUPPORTER_PRICE })}</span>
-          </span>
-          <Button variant="primary" onClick={() => void electron.shell.openExternal(SUBSCRIBE_URL)}>
-            {t('firstStart.supporter.become')}
-            <ExternalLink />
-          </Button>
-        </div>
+        <SupporterOffer />
       )}
       <div className="game-form" inert={free || starting}>
         <div className="section">

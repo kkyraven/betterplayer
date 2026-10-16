@@ -10,7 +10,7 @@ import type { EditorDocument, EditorFilePage, EditorFileQuery, EditorStored, Pat
 import type { GameSources } from './game'
 import type { AlPersona, ChatMessage, ChatReply, ChatTool, DomAccount, DomAiSettings, DomMemory, DomMemoryKind, DomPose, DomProfile, DomYou, PleasurePain } from './dom'
 import type { MatcherReport, MatcherResolveResult, OrphanSet } from './matcher'
-import type { DropResult, FolderNode, LibraryChange, LibraryCounts, LibraryRoot, MediaDetail, MediaPage, MediaQuery, MediaRow, Playlist, ScanProgress, Tag } from './library'
+import type { DropResult, FolderNode, LibraryChange, LibraryCounts, LibraryRoot, MediaDetail, MediaPage, MediaQuery, MediaRow, Playlist, ScanProgress, Tag, TagUndo } from './library'
 import type { PlayerCommand, PlayingState, RemoteSourceStatus } from './peer'
 import type { RemoteLoad, ServerInput } from './remote'
 import type { PerVideoSettings, Settings } from './settings'
@@ -140,6 +140,11 @@ export interface IpcContract {
   'library:addTag': (mediaIds: number[], tag: string) => void
   'library:renameTag': (from: string, to: string) => string
   'library:deleteTag': (name: string) => void
+  'library:blockedTags': () => string[]
+  'library:deleteTags': (names: string[], block: boolean) => TagUndo
+  'library:mergeTags': (names: string[], into: string) => TagUndo
+  'library:unblockTags': (names: string[]) => TagUndo
+  'library:undoTags': (undo: TagUndo) => void
   'library:played': (path: string) => void
   'library:playlists': () => Playlist[]
   'library:importStashGroups': (rootId: number) => { created: number; updated: number; skipped: number }

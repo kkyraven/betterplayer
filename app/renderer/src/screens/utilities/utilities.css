@@ -1,2 +1,3 @@
 .util-page .page-hd .count { color: var(--text-3); font-weight: 500; font-size: 13px; margin-left: 2px; }
 .util-empty { padding: 40px 0; text-align: center; }
+.side-row .util-lock, .side-row.on .util-lock { width: 13px; height: 13px; margin-left: auto; color: var(--text-3); }
