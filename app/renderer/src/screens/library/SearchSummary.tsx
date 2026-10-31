@@ -8,7 +8,7 @@ export function SearchSummary() {
   const total = useLibrary((s) => s.total)
   const loading = useLibrary((s) => s.loading)
   if (!query.trim()) return null
-  const info = held?.query === query ? held : null
+  const info = held?.query === query.trim() ? held : null
   return (
     <div className="lib-search-summary" aria-busy={loading}>
       <div className="lib-search-conditions" role="status">

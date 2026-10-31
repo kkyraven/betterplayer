@@ -29,6 +29,7 @@ export function ModelPanel() {
   const detector = useTracking((s) => s.state?.detector ?? null)
   const motion = useTracking((s) => s.motion)
   const music = useTracking((s) => s.music)
+  const present = useTracking((s) => s.present)
 
   const all = allModels()
   const detectors = all.filter((m) => m.kind === 'detector')
@@ -104,14 +105,16 @@ export function ModelPanel() {
         <div className="panel">
           {[
             { label: t('settings.models.regionModel'), state: detector },
-            { label: t('settings.models.aiMotion'), state: motion },
-            { label: t('settings.models.aiMusic'), state: music },
-          ].map(({ label, state }) => (
+            { label: t('settings.models.aiMotion'), state: motion, kind: 'motion' as const },
+            { label: t('settings.models.aiMusic'), state: music, kind: 'music' as const },
+          ].map(({ label, state, kind }) => (
             <div className="prow" key={label}>
               <span className="lbl">{label}</span>
               <span className="spacer" />
               <span className="sub">
-                {state?.status === 'ready' ? t('settings.models.readyOn', { provider: state.provider ?? '' }) : (statusText(state) ?? t('common.off'))}
+                {state?.status === 'ready'
+                  ? t('settings.models.readyOn', { provider: state.provider ?? '' })
+                  : (statusText(state) ?? (kind && present[kind] ? t('settings.models.included') : t('common.off')))}
                 {state?.status === 'ready' && 'warmupMs' in state ? ` · ${Number(state.warmupMs).toFixed(1)} ms` : ''}
                 {state && 'tooSlow' in state && state.tooSlow ? ` · ${t('settings.models.tooSlow')}` : ''}
               </span>

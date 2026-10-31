@@ -1,0 +1,166 @@
+{
+  "controller_type": "knuckles",
+  "name": "Better Player: Index",
+  "description": "Better Player defaults",
+  "bindings": {
+    "/actions/watch": {
+      "sources": [
+        {
+          "path": "/user/hand/right/input/a",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/watch/in/play_pause"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/a",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/watch/in/play_pause"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/b",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/watch/in/back"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/b",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/watch/in/back"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/thumbstick",
+          "mode": "joystick",
+          "inputs": {
+            "click": {
+              "output": "/actions/watch/in/controls"
+            },
+            "position": {
+              "output": "/actions/watch/in/seek"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/thumbstick",
+          "mode": "dpad",
+          "parameters": {
+            "sub_mode": "touch",
+            "deadzone_pct": "70",
+            "overlap_pct": "0",
+            "sticky": "true"
+          },
+          "inputs": {
+            "north": {
+              "output": "/actions/watch/in/recentre"
+            },
+            "south": {
+              "output": "/actions/watch/in/recentre"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/thumbstick",
+          "mode": "joystick",
+          "inputs": {
+            "click": {
+              "output": "/actions/watch/in/controls"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/thumbstick",
+          "mode": "dpad",
+          "parameters": {
+            "sub_mode": "touch",
+            "deadzone_pct": "70",
+            "overlap_pct": "0",
+            "sticky": "true"
+          },
+          "inputs": {
+            "north": {
+              "output": "/actions/watch/in/volume_up"
+            },
+            "south": {
+              "output": "/actions/watch/in/volume_down"
+            },
+            "west": {
+              "output": "/actions/watch/in/turn_left"
+            },
+            "east": {
+              "output": "/actions/watch/in/turn_right"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/trigger",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/watch/in/point"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/trigger",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/watch/in/point"
+            }
+          }
+        }
+      ],
+      "chords": [
+        {
+          "output": "/actions/watch/in/stop",
+          "inputs": [
+            [
+              "/user/hand/right/input/a",
+              "click"
+            ],
+            [
+              "/user/hand/right/input/b",
+              "click"
+            ]
+          ]
+        },
+        {
+          "output": "/actions/watch/in/stop",
+          "inputs": [
+            [
+              "/user/hand/left/input/a",
+              "click"
+            ],
+            [
+              "/user/hand/left/input/b",
+              "click"
+            ]
+          ]
+        }
+      ],
+      "haptics": [
+        {
+          "output": "/actions/watch/out/haptic",
+          "path": "/user/hand/left/output/haptic"
+        },
+        {
+          "output": "/actions/watch/out/haptic",
+          "path": "/user/hand/right/output/haptic"
+        }
+      ]
+    }
+  }
+}

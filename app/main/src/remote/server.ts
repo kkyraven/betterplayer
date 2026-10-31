@@ -1,3 +1,4 @@
+import type { Socket } from 'node:dgram'
 import { Readable } from 'node:stream'
 import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
@@ -6,8 +7,9 @@ import { networkInterfaces } from 'node:os'
 import { join } from 'node:path'
 import { isAxisId } from '@shared/axes'
 import type { IpcEvent, IpcEvents, RemoteStatus } from '@shared/ipc'
+import type { QuestBeacon, QuestToys } from '@shared/quest'
 import type { MediaDetail, MediaRow } from '@shared/library'
-import { detectProjection, type Projection } from '@shared/projection'
+import type { ResolvedProjection } from '@shared/projection'
 import { isUrl } from '@shared/remote'
 import { IDLE_PLAYING, isForwarded, type ForwardedChannel, type PlayingState } from '@shared/peer'
 import { REMOTE_PORT_DEFAULT, type Settings } from '@shared/settings'
@@ -15,14 +17,22 @@ import type { Library } from '../library'
 import { deoIndex, deoScene } from './deovr'
 import { hereSphereIndex, hereSphereScene, readWrite, type HereSphereWrite } from './heresphere'
 import { t } from '../i18n'
+import { readPerVideo } from '../settings/store'
 import { authorised } from './auth'
+import { answerProbes } from './discovery'
 import { inbound, outbound, permitted } from './paths'
+import { peerHost, questBeacon, questScene, readHello, readPosition, readToyCommand, resumePosition } from './quest'
 
 export type RemoteApi = (channel: ForwardedChannel, args: unknown[]) => Promise<unknown>
+
+export type HeadsetEvent = 'headset:hello' | 'headset:bye' | 'headset:stop' | 'headset:toys'
+export type HeadsetEmit = <E extends HeadsetEvent>(event: E, data: IpcEvents[E]) => void
 
 type StreamEvent = { event: 'playing'; data: PlayingState } | { event: 'library:changed'; data: IpcEvents['library:changed'] } | { event: 'library:progress'; data: IpcEvents['library:progress'] }
 
 const HEARTBEAT_MS = 15_000
+
+const BEACON_COUNT_MS = 5000
 
 const CONTENT_TYPES: Record<string, string> = {
   mp4: 'video/mp4',
@@ -151,8 +161,13 @@ export class RemoteServer {
   private port = REMOTE_PORT_DEFAULT
   private password = ''
   private emit: (status: RemoteStatus) => void = () => {}
+  private headset: HeadsetEmit = () => {}
+  private discovery: Socket | null = null
+  private counted = { videos: 0, at: Number.NEGATIVE_INFINITY }
   private api: RemoteApi | null = null
   private playing: PlayingState = IDLE_PLAYING
+  private toys: QuestToys = { outputs: [], video: null }
+  private toysHost: string | null = null
   private readonly streams = new Set<ServerResponse>()
   private heartbeat: NodeJS.Timeout | null = null
 
@@ -163,6 +178,15 @@ export class RemoteServer {
 
   setEmitter(emit: (status: RemoteStatus) => void) {
     this.emit = emit
+  }
+
+  setHeadsetEmitter(emit: HeadsetEmit) {
+    this.headset = emit
+  }
+
+  setToys(toys: QuestToys, host: string | null) {
+    this.toys = toys
+    this.toysHost = host
   }
 
   setApi(api: RemoteApi) {
@@ -203,6 +227,8 @@ export class RemoteServer {
   stop() {
     const server = this.server
     this.server = null
+    this.discovery?.close()
+    this.discovery = null
     if (this.heartbeat) clearInterval(this.heartbeat)
     this.heartbeat = null
     for (const res of this.streams) res.end()
@@ -223,10 +249,13 @@ export class RemoteServer {
     server.on('error', (e) => {
       process.stderr.write(`remote server on ${port}: ${String(e)}\n`)
       this.server = null
+      this.discovery?.close()
+      this.discovery = null
       this.emit(this.status())
     })
     server.listen(port, '0.0.0.0', () => this.emit(this.status()))
     this.server = server
+    this.discovery = answerProbes(port, () => this.beacon())
     this.heartbeat = setInterval(() => {
       for (const res of this.streams) res.write(':\n\n')
     }, HEARTBEAT_MS)
@@ -240,10 +269,8 @@ export class RemoteServer {
     return `http://${req.headers.host ?? `127.0.0.1:${this.port}`}`
   }
 
-  private projection(row: MediaRow): Projection {
-    const override = this.library.videoSettings(row.path)?.projection
-    if (override) return override
-    return { ...detectProjection(row.title), kind: row.projection }
+  private projection(row: MediaRow): Promise<ResolvedProjection> {
+    return this.library.projection(row.path)
   }
 
   private async route(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -260,12 +287,12 @@ export class RemoteServer {
       return
     }
     const path = new URL(req.url ?? '/', 'http://library').pathname
-    const [head, second, third] = path.split('/').filter(Boolean)
-    const status = await this.dispatch(req, res, head, second, third)
+    const [head, second, third, fourth] = path.split('/').filter(Boolean)
+    const status = await this.dispatch(req, res, head, second, third, fourth)
     if (status >= 400) this.log(req, status)
   }
 
-  private async dispatch(req: IncomingMessage, res: ServerResponse, head: string | undefined, second: string | undefined, third: string | undefined): Promise<number> {
+  private async dispatch(req: IncomingMessage, res: ServerResponse, head: string | undefined, second: string | undefined, third: string | undefined, fourth: string | undefined): Promise<number> {
     if (head === undefined) {
       if (req.method === 'POST' || req.headers['heresphere-json-version'] !== undefined) return this.hereSphereIndex(req, res)
       return sendJson(res, 200, deoIndex(this.library.index('all'), this.base(req)))
@@ -273,7 +300,7 @@ export class RemoteServer {
     if (head === 'deovr') {
       const row = this.row(second)
       if (!row) return sendJson(res, 404, { error: 'not found' })
-      return sendJson(res, 200, deoScene(row, this.projection(row), this.base(req)))
+      return sendJson(res, 200, deoScene(row, (await this.projection(row)).projection, this.base(req)))
     }
     if (head === 'heresphere') {
       if (second === undefined) return this.hereSphereIndex(req, res)
@@ -317,6 +344,61 @@ export class RemoteServer {
     if (head === 'scripts') return this.scripts(req, res, second, third)
     if (head === 'api') return this.call(req, res, second)
     if (head === 'events') return this.stream(req, res)
+    if (head === 'quest') return this.quest(req, res, second, third, fourth)
+    return sendJson(res, 404, { error: 'not found' })
+  }
+
+  private beacon(): QuestBeacon {
+    const now = performance.now()
+    if (now - this.counted.at > BEACON_COUNT_MS) this.counted = { videos: this.library.counts().all, at: now }
+    return questBeacon(this.port, this.counted.videos, this.password !== '')
+  }
+
+  private async quest(req: IncomingMessage, res: ServerResponse, name: string | undefined, id: string | undefined, action: string | undefined): Promise<number> {
+    if (name === 'info' && id === undefined) return sendJson(res, 200, this.beacon())
+    if (name === 'scene' && action === undefined) {
+      const row = this.row(id)
+      if (!row) return sendJson(res, 404, { error: 'not found' })
+      const settings = this.library.videoSettings(row.path)
+      return sendJson(res, 200, questScene(row, await this.projection(row), settings?.position ?? 0, this.base(req)))
+    }
+    if (name === 'toys' && id === undefined && req.method !== 'POST') {
+      const followed = this.toysHost !== null && peerHost(req.socket.remoteAddress) === this.toysHost
+      return sendJson(res, 200, followed ? this.toys : { ...this.toys, video: null })
+    }
+    if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' })
+    if (name === 'scene' && action === 'position') {
+      const row = this.row(id)
+      if (!row) return sendJson(res, 404, { error: 'not found' })
+      const ms = readPosition(await readBody(req))
+      if (ms === null) return sendJson(res, 400, { error: 'bad request' })
+      if (!this.api) return sendJson(res, 503, { error: 'not ready' })
+      const { position: _old, ...rest } = readPerVideo(await this.api('video:get', [row.path]))
+      const position = resumePosition(ms, row.durationMs)
+      await this.api('video:set', [row.path, position === undefined ? rest : { ...rest, position }])
+      return sendJson(res, 200, {})
+    }
+    const host = peerHost(req.socket.remoteAddress)
+    if (name === 'hello' && id === undefined) {
+      const hello = readHello(await readBody(req))
+      if (!hello) return sendJson(res, 400, { error: 'bad request' })
+      this.headset('headset:hello', { ...hello, host })
+      return sendJson(res, 200, {})
+    }
+    if (name === 'bye' && id === undefined) {
+      this.headset('headset:bye', { host })
+      return sendJson(res, 200, {})
+    }
+    if (name === 'stop' && id === undefined) {
+      this.headset('headset:stop', { host })
+      return sendJson(res, 200, {})
+    }
+    if (name === 'toys' && id === undefined) {
+      const command = readToyCommand(await readBody(req))
+      if (!command) return sendJson(res, 400, { error: 'bad request' })
+      this.headset('headset:toys', { ...command, host })
+      return sendJson(res, 200, {})
+    }
     return sendJson(res, 404, { error: 'not found' })
   }
 
@@ -373,7 +455,7 @@ export class RemoteServer {
         row = this.library.media(row.id) ?? row
       }
     }
-    return sendJson(res, 200, hereSphereScene(row, this.projection(row), this.base(req)))
+    return sendJson(res, 200, hereSphereScene(row, (await this.projection(row)).projection, this.base(req)))
   }
 
   private write(row: MediaDetail, write: HereSphereWrite) {

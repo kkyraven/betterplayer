@@ -1,0 +1,137 @@
+{
+  "controller_type": "vive_controller",
+  "name": "Better Player: Vive wands",
+  "description": "Better Player defaults",
+  "bindings": {
+    "/actions/watch": {
+      "sources": [
+        {
+          "path": "/user/hand/left/input/trackpad",
+          "mode": "dpad_click",
+          "parameters": {
+            "deadzone_pct": "50",
+            "overlap_pct": "0",
+            "sticky": "true"
+          },
+          "inputs": {
+            "center": {
+              "output": "/actions/watch/in/play_pause"
+            },
+            "west": {
+              "output": "/actions/watch/in/seek_back"
+            },
+            "east": {
+              "output": "/actions/watch/in/seek_forward"
+            },
+            "north": {
+              "output": "/actions/watch/in/recentre"
+            },
+            "south": {
+              "output": "/actions/watch/in/recentre"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/trackpad",
+          "mode": "dpad_click",
+          "parameters": {
+            "deadzone_pct": "50",
+            "overlap_pct": "0",
+            "sticky": "true"
+          },
+          "inputs": {
+            "center": {
+              "output": "/actions/watch/in/play_pause"
+            },
+            "north": {
+              "output": "/actions/watch/in/volume_up"
+            },
+            "south": {
+              "output": "/actions/watch/in/volume_down"
+            },
+            "west": {
+              "output": "/actions/watch/in/turn_left"
+            },
+            "east": {
+              "output": "/actions/watch/in/turn_right"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/application_menu",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/watch/in/back"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/application_menu",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/watch/in/back"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/trigger",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/watch/in/point"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/trigger",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/watch/in/point"
+            }
+          }
+        }
+      ],
+      "chords": [
+        {
+          "output": "/actions/watch/in/stop",
+          "inputs": [
+            [
+              "/user/hand/left/input/grip",
+              "click"
+            ],
+            [
+              "/user/hand/left/input/application_menu",
+              "click"
+            ]
+          ]
+        },
+        {
+          "output": "/actions/watch/in/stop",
+          "inputs": [
+            [
+              "/user/hand/right/input/grip",
+              "click"
+            ],
+            [
+              "/user/hand/right/input/application_menu",
+              "click"
+            ]
+          ]
+        }
+      ],
+      "haptics": [
+        {
+          "output": "/actions/watch/out/haptic",
+          "path": "/user/hand/left/output/haptic"
+        },
+        {
+          "output": "/actions/watch/out/haptic",
+          "path": "/user/hand/right/output/haptic"
+        }
+      ]
+    }
+  }
+}

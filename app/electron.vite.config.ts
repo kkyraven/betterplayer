@@ -29,7 +29,7 @@ export default defineConfig({
     root: resolve(__dirname, 'renderer'),
     plugins: [react()],
     define: { __RELEASE_NOTES__: JSON.stringify(readFileSync(resolve(__dirname, '..', 'RELEASE_NOTES.md'), 'utf8')) },
-    build: { minify: 'esbuild', rollupOptions: { input: resolve(__dirname, 'renderer/index.html') } },
+    build: { minify: 'esbuild', rollupOptions: { input: { index: resolve(__dirname, 'renderer/index.html'), vr: resolve(__dirname, 'renderer/vr.html') } } },
     resolve: { alias: { '@': resolve(__dirname, 'renderer/src'), '@shared': shared } },
   },
 })

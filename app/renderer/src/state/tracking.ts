@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { BeatState, HeroState, ModelState, TrackAxis, TrackOptions, TrackState, ZoneMatch, ZoneRule } from 'bp-engine'
-import { CAPTURE_WIDTH, type Region, type RegionBox } from '@shared/browser'
+import { CAPTURE_WIDTH, type BrowserTab, type Region, type RegionBox } from '@shared/browser'
 import type { PerVideoSettings } from '@shared/settings'
 import {
   CUT_THRESHOLD,
@@ -8,13 +8,11 @@ import {
   isSupporterModel,
   MODEL_KINDS,
   FAPTAP_HOST,
-  PLAYER_ONLY_SOURCES,
-  BROWSER_STROKE_SOURCES,
   TRACK_AXIS_IDS,
   defaultTrackingDefaults,
-  looksLikeMusicVideo,
   type ModelInfo,
   type ModelKind,
+  type OwnAxes,
   type RegionSourceKind,
   type RegionTarget,
   type HeroColourRule,
@@ -40,6 +38,22 @@ import {
   type TrackingDefaults,
   type TrackingSettings,
 } from '@shared/tracking'
+import {
+  allVideosChange,
+  convertLegacy,
+  hasOverrides,
+  musicFolders,
+  musicMatters,
+  musicSignal,
+  resolve,
+  usableSource,
+  withoutOverrides,
+  type AllVideosChange,
+  type MusicInput,
+  type MusicSignal,
+  type Resolved,
+  type VideoResolveInput,
+} from '@shared/trackingRules'
 import { engine, models } from '@/engine/client'
 import { invoke } from '@/ipc'
 import { t } from '@/state/i18n'
@@ -55,6 +69,11 @@ export type TrackSource = 'browser' | 'player' | 'game'
 
 export interface GameStart {
   axes: TrackAxesConfig
+}
+
+export interface TrackToast {
+  id: number
+  kind: 'off' | 'on' | 'changed'
 }
 
 interface TrackingStore {
@@ -74,6 +93,11 @@ interface TrackingStore {
   motion: ModelState | null
   music: ModelState | null
   present: Record<ModelKind, boolean>
+  resolved: Resolved | null
+  musicSignal: MusicSignal | null
+  saved: boolean
+  hold: boolean
+  toast: TrackToast | null
   heroMusic: HeroMusicSettings
   setHeroMusicEnabled: (enabled: boolean) => void
   setHeroMusicRule: (bucket: number, patch: Partial<HeroMusicRule> | null) => void
@@ -99,8 +123,15 @@ interface TrackingStore {
   autoStart: () => Promise<void>
   stop: () => void
   flushSave: () => Promise<void>
+  pressCrosshair: () => Promise<void>
+  allVideos: () => Promise<void>
+  undoAllVideos: () => Promise<void>
+  dismissToast: () => void
+  setHold: (hold: boolean) => void
+  setNotMusic: () => void
   setSensitivity: (s: number) => void
   setAxis: (id: TrackAxisId, patch: Partial<TrackAxisConfig>) => void
+  releaseAxis: (id: TrackAxisId) => void
   setBeatTempoFactor: (factor: number) => void
   setPace: (pace: number) => void
   setBeatVolumeDepth: (on: boolean) => void
@@ -116,9 +147,10 @@ interface TrackingStore {
   setRegionSource: (kind: RegionSourceKind) => void
   setRegionTarget: (target: RegionTarget | null) => void
   setRegion: (region: Region) => void
-  setAsDefault: () => Promise<void>
   reset: () => void
+  afterOverridesReset: () => void
   refreshModels: () => Promise<void>
+  loadModel: (kind: 'motion' | 'music') => void
   unloadMusic: () => void
   update: (state: TrackState) => void
 }
@@ -137,31 +169,18 @@ const EMPTY_VIDEO: PerVideoSettings = { globalOffsetMs: 0, axes: {} }
 const CUT_EVERY_MS = 100
 const HERO_EVERY_MS = 1000 / 30
 const PACE_PUSH_MS = 250
-
-function freshAxes(defaults: TrackAxesConfig, scripted: ReadonlySet<string>, faptap: boolean, music: boolean, hero: boolean, motion: boolean): TrackAxesConfig {
-  const pick = (id: string, a: TrackAxisConfig): AxisSource => {
-    if (scripted.has(id) || a.source === 'off') return 'off'
-    if (faptap && id === 'L0') return 'faptap'
-    if (music) return 'ai-music'
-    if (hero) return id === 'L0' ? 'hero' : 'video'
-    if (a.source === 'video' || a.source === 'ai-motion') return motion ? 'ai-motion' : 'video'
-    return a.source
-  }
-  return Object.fromEntries(Object.entries(defaults).map(([id, a]) => [id, { ...a, source: pick(id, a) }])) as TrackAxesConfig
-}
-
-const GAME_FOREIGN_SOURCES: readonly AxisSource[] = ['faptap', 'hero', 'ai-music']
-
-function usableOn(source: TrackSource, axes: TrackAxesConfig): TrackAxesConfig {
-  const foreign = source === 'player' ? BROWSER_STROKE_SOURCES : source === 'game' ? GAME_FOREIGN_SOURCES : PLAYER_ONLY_SOURCES
-  return Object.fromEntries(Object.entries(axes).map(([id, a]) => [id, foreign.includes(a.source) ? { ...a, source: 'video' } : a])) as TrackAxesConfig
-}
+const MODEL_SOURCE: Partial<Record<ModelKind, AxisSource>> = { motion: 'ai-motion', music: 'ai-music' }
+const FRAME_SOURCES: readonly AxisSource[] = ['video', 'ai-motion', 'hero']
 
 const rows = (axes: TrackAxesConfig): TrackAxis[] => TRACK_AXIS_IDS.map((id) => ({ axis: id, ...axes[id] }))
+const sameRow = (a: TrackAxisConfig, b: TrackAxisConfig) =>
+  a.source === b.source && a.min === b.min && a.max === b.max && a.intensity === b.intensity && a.smoothingMs === b.smoothingMs && a.invert === b.invert
 
 function options(d: TrackingDefaults, sensitivity: number, pace: number): TrackOptions {
   return { sensitivity, pace, cutThreshold: CUT_THRESHOLD[d.cutSensitivity], easeMs: d.easeMs, flourishes: d.flourishes, clampJumps: d.clampJumps }
 }
+
+const startRegion = (d: TrackingDefaults): RegionSourceKind => (d.models.detector ? d.regionSource : 'centre')
 
 function sameModel(a: ModelState | null, b: ModelState): boolean {
   return a !== null && a.status === b.status && a.error === b.error && a.provider === b.provider && a.tooSlow === b.tooSlow && Math.round(a.runMs * 10) === Math.round(b.runMs * 10)
@@ -206,6 +225,43 @@ export function trackingSettings(s: Pick<TrackingStore, 'axes' | 'sensitivity' |
   }
 }
 
+export function needsFrames(s: Pick<TrackingStore, 'axes' | 'heroMusic' | 'zones'>): boolean {
+  const sources = Object.values(s.axes).map((a) => a.source)
+  return sources.some((src) => FRAME_SOURCES.includes(src)) || (s.heroMusic.enabled && sources.includes('ai-music')) || (s.zones.enabled && s.zones.zones.length > 0)
+}
+
+function hasOwnSetup(r: TrackingSettings | undefined, d: TrackingDefaults): boolean {
+  if (!r) return false
+  return (
+    hasOverrides(r) ||
+    (r.pace !== undefined && r.pace !== d.defaultPace) ||
+    r.region != null ||
+    (r.regionSource !== undefined && r.regionSource !== startRegion(d)) ||
+    r.regionTarget !== undefined ||
+    (r.beatTempoFactor !== undefined && r.beatTempoFactor !== 1) ||
+    r.heroZone != null ||
+    (r.heroDirection !== undefined && r.heroDirection !== 'auto') ||
+    Object.keys(r.heroColours ?? {}).length > 0 ||
+    Object.keys(r.heroAxisColours ?? {}).length > 0 ||
+    r.heroMusic !== undefined ||
+    r.zones !== undefined
+  )
+}
+
+function withOn(record: TrackingSettings, on: boolean | undefined): TrackingSettings {
+  const { on: _old, ...rest } = record
+  return on === undefined ? rest : { ...rest, on }
+}
+
+function ownWith(own: OwnAxes, id: TrackAxisId, patch: Partial<TrackAxisConfig>, auto: AxisSource, row: TrackAxisConfig): OwnAxes {
+  const entry: Partial<TrackAxisConfig> = { ...own[id], ...patch }
+  for (const field of Object.keys(patch) as (keyof TrackAxisConfig)[]) {
+    if (entry[field] === (field === 'source' ? auto : row[field])) delete entry[field]
+  }
+  const { [id]: _old, ...rest } = own
+  return Object.keys(entry).length > 0 ? { ...rest, [id]: entry } : rest
+}
+
 function zoneRule(z: EffectZone): ZoneRule {
   const { trigger, effect } = z
   return {
@@ -245,6 +301,16 @@ export function targetLabel(cls: string | undefined): string | null {
   return null
 }
 
+interface Subject {
+  side: 'player' | 'browser'
+  key: string | null
+  memory: TrackingSettings | undefined
+  music: Omit<MusicInput, 'notMusic'> | null
+  faptapPage: boolean
+  manual: boolean
+  tab?: BrowserTab
+}
+
 export const useTracking = create<TrackingStore>()((set, get) => {
   let unsubscribe: (() => void) | null = null
   let persistTimer = 0
@@ -259,12 +325,17 @@ export const useTracking = create<TrackingStore>()((set, get) => {
     playbackMultiplier = multiplier
   }
   const loaded: Record<ModelKind, string | null> = { detector: null, motion: null, music: null }
+  const available: Record<ModelKind, { id: string; paths: (string | null)[] } | null> = { detector: null, motion: null, music: null }
+  const wanted = new Set<ModelKind>()
   let modelsDir: string | null = null
   let lastBox = ''
   let showTimer = 0
   let paceTimer = 0
+  let subject: Subject | null = null
+  let pressed: { input: VideoResolveInput; started: boolean } | null = null
+  let undo: AllVideosChange['undo'] | null = null
+  let toastId = 0
 
-  const current = () => trackingSettings(get())
   const anyBeat = () => Object.values(get().axes).some((a) => a.source === 'beat' || a.source === 'ai-music')
   const anyMusic = () => Object.values(get().axes).some((a) => a.source === 'ai-music')
   const anyHero = () => Object.values(get().axes).some((a) => a.source === 'hero') || (get().heroMusic.enabled && anyMusic())
@@ -321,23 +392,47 @@ export const useTracking = create<TrackingStore>()((set, get) => {
       if (get().key === key) set({ beatError: e instanceof Error ? e.message : String(e) })
     }
   }
-  const persist = () => {
-    window.clearTimeout(persistTimer)
-    const { key, source } = get()
-    if (!key) return
-    const tracking = current()
-    if (source === 'player' && usePlayer.getState().path === key) {
-      usePlayer.getState().setTracking(tracking)
+  const save = (side: TrackSource, key: string | null, record: TrackingSettings | undefined) => {
+    if (!key || side === 'game') return
+    if (side === 'player') {
+      if (usePlayer.getState().path === key) usePlayer.getState().setTracking(record)
       return
     }
+    window.clearTimeout(persistTimer)
     pendingSave = () => {
       pendingSave = null
-      saving = saving.catch(() => {}).then(() => invoke('video:get', key)).then((existing) => invoke('video:set', key, { ...(existing ?? EMPTY_VIDEO), tracking }))
+      saving = saving.catch(() => {}).then(() => invoke('video:get', key)).then((existing) => invoke('video:set', key, { ...(existing ?? EMPTY_VIDEO), tracking: record }))
       void saving.catch((error: unknown) => console.warn('save browser tracking', error))
     }
     persistTimer = window.setTimeout(() => pendingSave?.(), 300)
   }
+  const keep = (sub: Subject, memory: TrackingSettings | undefined) => {
+    sub.memory = memory
+    set({ saved: hasOwnSetup(memory, defaults()) })
+  }
+  const persist = () => {
+    window.clearTimeout(persistTimer)
+    const { key, source } = get()
+    if (!key || !source || source === 'game') return
+    const sub = subject?.side === source && subject.key === key ? subject : null
+    const memory = sub?.memory
+    const { sensitivity: _sensitivity, ...live } = trackingSettings(get())
+    const { sensitivity } = get()
+    const record: TrackingSettings = {
+      ...live,
+      own: memory?.own ?? {},
+      ...(memory?.on !== undefined ? { on: memory.on } : {}),
+      ...(memory?.notMusic ? { notMusic: true as const } : {}),
+      ...(sensitivity !== defaults().sensitivity ? { sensitivity } : {}),
+    }
+    if (sub) keep(sub, record)
+    save(source, key, record)
+  }
   const defaults = () => useSettings.getState().settings?.tracking ?? defaultTrackingDefaults()
+  const loadSettings = async () => {
+    const store = useSettings.getState()
+    if (!store.settings) await store.load()
+  }
   const pushOptions = () => {
     engine.setTrackOptions(options(defaults(), get().sensitivity, get().pace))
   }
@@ -346,6 +441,22 @@ export const useTracking = create<TrackingStore>()((set, get) => {
     const music = engine.modelState('music')
     const { motion: m, music: u } = get()
     if (!sameModel(m, motion) || !sameModel(u, music)) set({ motion, music })
+  }
+  const inUse = (kind: ModelKind) => wanted.has(kind) || (get().source !== null && Object.values(get().axes).some((a) => a.source === MODEL_SOURCE[kind]))
+  const syncModels = () => {
+    for (const kind of MODEL_KINDS) {
+      const want = available[kind]
+      if (!want) {
+        if (loaded[kind] !== null) engine.setModel(kind, null, null, null, null)
+        loaded[kind] = null
+        continue
+      }
+      if (loaded[kind] === want.id || (kind !== 'detector' && loaded[kind] === null && !inUse(kind))) continue
+      loaded[kind] = want.id
+      if (kind === 'detector') engine.setDetector(want.id, want.paths[0] ?? '', `${modelsDir}/coreml-cache`)
+      else engine.setModel(kind, want.id, want.paths[0] ?? '', want.paths[1] ?? '', modelsDir)
+    }
+    pullModels()
   }
   const pushPageBox = () => {
     const { regionSource, region, regionShown, source } = get()
@@ -367,6 +478,178 @@ export const useTracking = create<TrackingStore>()((set, get) => {
       pushPageBox()
     }, REGION_SHOW_MS)
   }
+  const fieldsFrom = (m: TrackingSettings | undefined) => {
+    const d = defaults()
+    return {
+      sensitivity: m?.sensitivity ?? d.sensitivity,
+      pace: m?.pace ?? d.defaultPace,
+      region: m?.region ?? null,
+      regionSource: m?.regionSource ?? startRegion(d),
+      regionTarget: m?.regionTarget ?? null,
+      beatTempoFactor: m?.beatTempoFactor ?? 1,
+      heroMusic: normalizeHeroMusic(m?.heroMusic),
+      heroZone: m?.heroZone ?? null,
+      heroDirection: m?.heroDirection ?? 'auto',
+      heroColours: m?.heroColours ?? {},
+      heroAxisColours: pickTrackAxes(m?.heroAxisColours),
+      zones: normalizeZoneEffects(m?.zones),
+      heroFileStamp: m?.heroFileStamp,
+    }
+  }
+
+  const halt = () => {
+    releaseAudio()
+    window.clearTimeout(persistTimer)
+    window.clearTimeout(paceTimer)
+    pendingSave?.()
+    applyPlaybackSpeed(1)
+    set({ playbackBaseRate: null })
+    if (!get().source) return
+    unsubscribe?.()
+    unsubscribe = null
+    window.clearTimeout(showTimer)
+    void useBrowser.getState().capture(false)
+    void useBrowser.getState().setRegion(null)
+    void useBrowser.getState().setZone(null)
+    engine.trackStop()
+    engine.setZones(false, [])
+    set({ source: null, key: null, state: null, beat: null, hero: null, heroMusic: defaultHeroMusic(), zones: defaultZoneEffects(), zoneMatches: [], zonesShown: false, heroFileStamp: undefined, zoneEdit: false, heroTip: false, regionShown: false, axes: defaults().axes, sensitivity: defaults().sensitivity, pace: defaults().defaultPace })
+    pushParams()
+  }
+
+  const begin = (source: TrackSource, key: string | null, axes: TrackAxesConfig, memory: TrackingSettings | undefined, tab?: BrowserTab) => {
+    halt()
+    const fields = fieldsFrom(memory)
+    const region = source === 'game' ? { region: { ...FULL_REGION }, regionSource: 'pick' as const } : {}
+    set({ source, key, axes, beat: null, beatError: null, hero: null, zoneMatches: [], ...fields, ...region })
+    pushBeatOptions()
+    engine.trackStart(options(defaults(), get().sensitivity, get().pace), rows(axes), source === 'player')
+    set({ state: engine.trackState() })
+    syncModels()
+    pushRegion()
+    pushHero()
+    pushZones()
+    if (anyHero() && !get().heroZone) get().pickHeroZone()
+    void ensureBeat()
+    pushParams()
+    if (source !== 'browser') return
+    const syncPlayback = () => {
+      const active = useBrowser.getState().tabs.find((t) => t.active)
+      if (active?.id !== tab?.id) {
+        get().stop()
+        return
+      }
+      const video = active?.video
+      engine.trackPlayback((video?.mediaTime ?? 0) * 1000, Boolean(video?.present && video.playing), video?.rate ?? 1)
+    }
+    const stopPlayback = useBrowser.subscribe((s, prev) => { if (s.tabs !== prev.tabs) syncPlayback() })
+    const stopGray = subscribeFrames((f) => {
+      if (f.id === tab?.id) engine.trackFrame(f.bytes, f.width, f.height, f.mediaTime * 1000, f.channels)
+    })
+    const stopColour = feedColour(colourEveryMs, CAPTURE_WIDTH)
+    unsubscribe = () => {
+      stopGray()
+      stopColour()
+      stopPlayback()
+    }
+    syncPlayback()
+    if (get().source !== 'browser') return
+    void useBrowser.getState().capture(true)
+    window.setTimeout(() => {
+      if (get().source === 'browser' && (get().state?.frames ?? 0) === 0) void useBrowser.getState().capture(true)
+    }, 2000)
+  }
+
+  const applyAxes = (axes: TrackAxesConfig) => {
+    const before = get().axes
+    const changed = TRACK_AXIS_IDS.filter((id) => !sameRow(before[id], axes[id]))
+    if (changed.length === 0) return
+    const hadHero = anyHero()
+    set({ axes })
+    engine.setTrackAxes(changed.map((id) => ({ axis: id, ...axes[id] })))
+    void ensureBeat()
+    if (anyHero() && !get().heroZone) get().pickHeroZone()
+    else if (hadHero !== anyHero()) pushHero()
+    if (get().heroMusic.enabled) pushHeroMusic()
+    syncModels()
+  }
+
+  const scriptedOn = (side: Subject['side']): ReadonlySet<TrackAxisId> => {
+    if (side !== 'player') return new Set()
+    const { scripts } = usePlayer.getState()
+    return new Set(TRACK_AXIS_IDS.filter((id) => scripts.some((s) => s.axis === id && s.selected)))
+  }
+  const signalOf = (sub: Subject) => (sub.music ? musicSignal({ ...sub.music, notMusic: sub.memory?.notMusic }) : null)
+  const inputFor = (sub: Subject, manual: boolean, video: TrackingSettings | undefined, hold: boolean): VideoResolveInput => {
+    const rules = defaults()
+    const music = musicMatters(rules, manual ? true : video?.on) ? signalOf(sub) : null
+    return { side: sub.side, rules, video, scripted: scriptedOn(sub.side), music, manual, hold, faptapPage: sub.faptapPage }
+  }
+  const current = (sub: Subject) => inputFor(sub, sub.manual, sub.memory, sub.side === 'player' && get().hold)
+  const startsAlone = (sub: Subject) => resolve(inputFor(sub, false, sub.memory && withOn(sub.memory, undefined), false)).start
+
+  const rerun = (stay = false) => {
+    const sub = subject
+    if (!sub || (sub.side === 'player' && usePlayer.getState().path !== sub.key)) return
+    const input = current(sub)
+    const resolved = resolve(input)
+    set({ resolved, musicSignal: input.music })
+    const running = get().source === sub.side && get().key === sub.key
+    if (running && (resolved.start || stay)) applyAxes(resolved.axes)
+    else if (running) halt()
+    else if (resolved.start) begin(sub.side, sub.key, resolved.axes, sub.memory, sub.tab)
+  }
+
+  const adopt = (sub: Subject) => {
+    if (subject === sub) return
+    get().stop()
+    subject = sub
+    set({ saved: hasOwnSetup(sub.memory, defaults()) })
+  }
+
+  const remember = (sub: Subject, change: (memory: TrackingSettings) => TrackingSettings) => {
+    const memory = change({ ...(sub.memory ?? { region: null }), own: sub.memory?.own ?? {} })
+    keep(sub, memory)
+    save(sub.side, sub.key, { ...memory, axes: resolve(current(sub)).axes })
+  }
+  const setOn = (sub: Subject, on: boolean | undefined) => {
+    if (sub.memory?.on !== on) remember(sub, (m) => withOn(m, on))
+  }
+  const showToast = (kind: TrackToast['kind']) => set({ toast: { id: ++toastId, kind } })
+
+  const playerSubject = async (): Promise<Subject | null> => {
+    const key = usePlayer.getState().path
+    if (!key) return null
+    const local = !/^https?:\/\//i.test(key)
+    const sidecar = local ? ((await invoke('hero:sidecar', key)) ?? null) : null
+    const player = usePlayer.getState()
+    if (player.path !== key) return null
+    const title = player.media?.title ?? player.title
+    const raw = player.video.tracking
+    const file = sidecar && sidecar.stamp !== raw?.heroFileStamp ? parseHeroFile(sidecar.text) : null
+    const stored: TrackingSettings | undefined = sidecar && file
+      ? { ...(raw ?? { region: null, own: {} }), heroMusic: file.music, zones: file.zones, heroZone: file.zone, heroDirection: file.direction, heroColours: file.colours, heroAxisColours: file.axisColours, heroFileStamp: sidecar.stamp }
+      : raw
+    const memory = convertLegacy(stored, { side: 'player', rules: defaults(), scripted: scriptedOn('player'), title })
+    const music = { heroFile: sidecar !== null, tags: player.media?.tags ?? [], folders: musicFolders(key, player.media?.folder), title }
+    const sub: Subject = { side: 'player', key, memory, music, faptapPage: false, manual: false }
+    if (stored && stored !== raw) save('player', key, stored.own ? { ...stored, axes: resolve(inputFor(sub, false, memory, false)).axes } : stored)
+    return sub
+  }
+  const pageSubject = async (): Promise<Subject> => {
+    const tab = useBrowser.getState().tabs.find((t) => t.active)
+    const key = tab?.url && tab.url !== 'about:blank' ? tab.url : null
+    const stored = key ? (await invoke('video:get', key))?.tracking : undefined
+    const faptapPage = siteName(tab?.url ?? '') === FAPTAP_HOST
+    const memory = convertLegacy(stored, { side: 'browser', rules: defaults(), scripted: new Set(), title: tab?.title ?? '', faptapPage })
+    return { side: 'browser', key, memory, music: null, faptapPage, manual: true, tab }
+  }
+
+  useSettings.subscribe((s, prev) => {
+    const a = s.settings?.tracking
+    const b = prev.settings?.tracking
+    if (a && b && a !== b && (a.axes !== b.axes || a.fill !== b.fill || a.musicFill !== b.musicFill || a.fillScripted !== b.fillScripted)) rerun()
+  })
 
   return {
     source: null,
@@ -385,6 +668,11 @@ export const useTracking = create<TrackingStore>()((set, get) => {
     motion: null,
     music: null,
     present: { detector: false, motion: false, music: false },
+    resolved: null,
+    musicSignal: null,
+    saved: false,
+    hold: false,
+    toast: null,
     playbackBaseRate: null,
     heroMusic: defaultHeroMusic(),
     heroZone: null,
@@ -398,101 +686,26 @@ export const useTracking = create<TrackingStore>()((set, get) => {
     zoneEdit: false,
     heroTip: false,
     autoStart: async () => {
-      const player = usePlayer.getState()
-      const scripted = new Set(player.scripts.map((s) => s.axis))
-      const defaults = useSettings.getState().settings?.tracking.axes
-      const wants = player.video.tracking !== undefined || TRACK_AXIS_IDS.some((id) => !scripted.has(id) && defaults?.[id]?.source !== 'off')
-      if (wants) await get().start('player')
-      else get().stop()
+      await loadSettings()
+      const sub = await playerSubject()
+      if (!sub) return
+      const pressedEarly = subject?.side === 'player' && subject.key === sub.key && subject.manual
+      adopt(sub)
+      rerun()
+      if (pressedEarly && get().source !== 'player') await get().pressCrosshair()
     },
     start: async (source, game) => {
-      get().stop()
-      const settingsStore = useSettings.getState()
-      const settings = settingsStore.settings ?? (await settingsStore.load())
-      const tab = useBrowser.getState().tabs.find((t) => t.active)
-      const key = source === 'player' ? usePlayer.getState().path : source === 'browser' ? (tab?.url ?? null) : null
-      const saved = source === 'player' ? usePlayer.getState().video.tracking : key ? (await invoke('video:get', key))?.tracking : undefined
-      const player = usePlayer.getState()
-      const title = source === 'player' ? player.title : source === 'browser' ? (tab?.title ?? '') : ''
-      const scripted = new Set(source === 'player' ? player.scripts.map((s) => s.axis) : [])
-      const model = (kind: ModelKind) => get().present[kind] && Boolean(settings.tracking.models[kind])
-      const musicVideo = !saved && looksLikeMusicVideo(title)
-      const autoMusic = musicVideo && source === 'player' && model('music')
-      const autoHero = musicVideo && !autoMusic && !scripted.has('L0')
-      const motionDefault = settings.tracking.motionDefault && model('motion')
-      const faptapPage = source === 'browser' && siteName(tab?.url ?? '') === FAPTAP_HOST
-      const axes = game?.axes ?? saved?.axes ?? freshAxes(settings.tracking.axes, scripted, faptapPage, autoMusic, autoHero, motionDefault)
-      const sensitivity = saved?.sensitivity ?? settings.tracking.sensitivity
-      const pace = saved?.pace ?? settings.tracking.defaultPace
-      const region = game ? { ...FULL_REGION } : (saved?.region ?? null)
-      const regionSource = game ? 'pick' : (saved?.regionSource ?? (settings.tracking.models.detector ? settings.tracking.regionSource : 'centre'))
-      const beatTempoFactor = saved?.beatTempoFactor ?? 1
-      const local = source === 'player' && key !== null && !/^https?:\/\//i.test(key)
-      const sidecar = local ? ((await invoke('hero:sidecar', key)) ?? null) : null
-      const fromFile = sidecar && sidecar.stamp !== saved?.heroFileStamp ? parseHeroFile(sidecar.text) : null
-      const usable = usableOn(source, axes)
-      set({
-        source,
-        key: key && key !== 'about:blank' ? key : null,
-        axes: usable,
-        sensitivity,
-        pace,
-        region,
-        regionSource,
-        regionTarget: saved?.regionTarget ?? null,
-        beatTempoFactor,
-        beat: null,
-        beatError: null,
-        heroMusic: normalizeHeroMusic(fromFile ? fromFile.music : saved?.heroMusic),
-        heroZone: fromFile ? fromFile.zone : (saved?.heroZone ?? (autoHero ? { ...DEFAULT_ZONE } : null)),
-        heroTip: source === 'player' && autoHero && !fromFile,
-        heroDirection: fromFile?.direction ?? saved?.heroDirection ?? 'auto',
-        heroColours: fromFile?.colours ?? saved?.heroColours ?? {},
-        heroAxisColours: pickTrackAxes(fromFile?.axisColours ?? saved?.heroAxisColours),
-        hero: null,
-        zones: normalizeZoneEffects(fromFile ? fromFile.zones : saved?.zones),
-        zoneMatches: [],
-        heroFileStamp: fromFile ? sidecar?.stamp : saved?.heroFileStamp,
-      })
-      pushBeatOptions()
-      engine.trackStart(options(settings.tracking, sensitivity, pace), rows(usable), source === 'player')
-      set({ state: engine.trackState() })
-      pullModels()
-      pushRegion()
-      pushHero()
-      pushZones()
-      if (fromFile) persist()
-      if (anyHero() && !get().heroZone) get().pickHeroZone()
-      void ensureBeat()
-      pushParams()
-      if (source === 'browser') {
-        const syncPlayback = () => {
-          const browser = useBrowser.getState()
-          const active = browser.tabs.find((t) => t.active)
-          if (active?.id !== tab?.id) {
-            get().stop()
-            return
-          }
-          const video = active?.video
-          engine.trackPlayback((video?.mediaTime ?? 0) * 1000, Boolean(video?.present && video.playing), video?.rate ?? 1)
-        }
-        const stopPlayback = useBrowser.subscribe((s, prev) => { if (s.tabs !== prev.tabs) syncPlayback() })
-        const stopGray = subscribeFrames((f) => {
-          if (f.id === tab?.id) engine.trackFrame(f.bytes, f.width, f.height, f.mediaTime * 1000, f.channels)
-        })
-        const stopColour = feedColour(colourEveryMs, CAPTURE_WIDTH)
-        unsubscribe = () => {
-          stopGray()
-          stopColour()
-          stopPlayback()
-        }
-        syncPlayback()
-        if (get().source !== 'browser') return
-        void useBrowser.getState().capture(true)
-        window.setTimeout(() => {
-          if (get().source === 'browser' && (get().state?.frames ?? 0) === 0) void useBrowser.getState().capture(true)
-        }, 2000)
+      await loadSettings()
+      if (source === 'game') {
+        get().stop()
+        begin('game', null, resolve({ side: 'game', game: game?.axes ?? defaults().axes }).axes, undefined)
+        return
       }
+      const sub = source === 'player' ? await playerSubject() : await pageSubject()
+      if (!sub) return
+      adopt(sub)
+      sub.manual = true
+      rerun()
     },
     flushSave: async () => {
       window.clearTimeout(persistTimer)
@@ -500,23 +713,74 @@ export const useTracking = create<TrackingStore>()((set, get) => {
       await saving
     },
     stop: () => {
-      releaseAudio()
-      window.clearTimeout(persistTimer)
-      window.clearTimeout(paceTimer)
-      pendingSave?.()
-      applyPlaybackSpeed(1)
-      set({ playbackBaseRate: null })
-      if (!get().source) return
-      unsubscribe?.()
-      unsubscribe = null
-      window.clearTimeout(showTimer)
-      void useBrowser.getState().capture(false)
-      void useBrowser.getState().setRegion(null)
-      void useBrowser.getState().setZone(null)
-      engine.trackStop()
-      engine.setZones(false, [])
-      set({ source: null, key: null, state: null, beat: null, hero: null, heroMusic: defaultHeroMusic(), zones: defaultZoneEffects(), zoneMatches: [], zonesShown: false, heroFileStamp: undefined, zoneEdit: false, heroTip: false, regionShown: false, axes: defaults().axes, sensitivity: defaults().sensitivity, pace: defaults().defaultPace })
-      pushParams()
+      subject = null
+      pressed = null
+      undo = null
+      halt()
+      set({ resolved: null, musicSignal: null, saved: false, toast: null })
+    },
+    pressCrosshair: async () => {
+      const { hold } = get()
+      const running = subject?.side === 'player' && get().source === 'player' ? subject : null
+      if (running) {
+        const byRule = !hold && resolve(current(running)).byRule
+        const alone = startsAlone(running)
+        running.manual = false
+        halt()
+        if (!hold) setOn(running, alone ? false : undefined)
+        rerun()
+        pressed = byRule ? { input: { ...current(running), music: signalOf(running) }, started: false } : null
+        if (byRule) showToast('off')
+        else set({ toast: null })
+        return
+      }
+      await loadSettings()
+      const path = usePlayer.getState().path
+      const sub = subject?.side === 'player' && subject.key === path ? subject : await playerSubject()
+      if (!sub) return
+      adopt(sub)
+      const offer = !hold && !resolve(current(sub)).byRule
+      const alone = startsAlone(sub)
+      sub.manual = true
+      if (!hold) setOn(sub, alone ? undefined : true)
+      pressed = offer ? { input: { ...current(sub), music: signalOf(sub) }, started: true } : null
+      if (offer) showToast('on')
+      else set({ toast: null })
+      rerun()
+    },
+    allVideos: async () => {
+      const p = pressed
+      const sub = subject
+      if (!p || !sub) return
+      pressed = null
+      const change = allVideosChange(p.input, p.started)
+      undo = change.undo
+      showToast('changed')
+      await useSettings.getState().update((s) => ({ ...s, tracking: { ...s.tracking, ...change.rules } }))
+      if (subject !== sub) return
+      setOn(sub, change.on)
+      rerun()
+    },
+    undoAllVideos: async () => {
+      const u = undo
+      const sub = subject
+      undo = null
+      set({ toast: null })
+      if (!u) return
+      if (sub) setOn(sub, u.on)
+      await useSettings.getState().update((s) => ({ ...s, tracking: { ...s.tracking, ...u.rules } }))
+      if (sub && subject === sub) rerun()
+    },
+    dismissToast: () => {
+      pressed = null
+      set({ toast: null })
+    },
+    setHold: (hold) => set({ hold }),
+    setNotMusic: () => {
+      const sub = subject
+      if (!sub || sub.memory?.notMusic) return
+      remember(sub, (m) => ({ ...m, notMusic: true }))
+      rerun()
     },
     setSensitivity: (sensitivity) => {
       set({ sensitivity })
@@ -524,19 +788,22 @@ export const useTracking = create<TrackingStore>()((set, get) => {
       persist()
     },
     setAxis: (id, patch) => {
-      const row = { ...get().axes[id], ...patch }
       const source = get().source
-      if (source === 'game' && GAME_FOREIGN_SOURCES.includes(row.source)) return
-      if (PLAYER_ONLY_SOURCES.includes(row.source) && source !== 'player' && !(source === 'game' && row.source === 'beat')) return
-      if (BROWSER_STROKE_SOURCES.includes(row.source) && (id !== 'L0' || get().source !== 'browser')) return
-      const hadHero = anyHero()
-      set({ axes: { ...get().axes, [id]: row } })
-      engine.setTrackAxes([{ axis: id, ...row }])
+      if (patch.source !== undefined && usableSource(source ?? 'player', id, patch.source) !== patch.source) return
+      const sub = subject?.side === source && subject.key === get().key ? subject : null
+      const auto = get().resolved?.auto[id]
+      if (!sub || !auto) {
+        applyAxes({ ...get().axes, [id]: { ...get().axes[id], ...patch } })
+        persist()
+        return
+      }
+      keep(sub, { ...(sub.memory ?? { region: null }), own: ownWith(sub.memory?.own ?? {}, id, patch, auto, defaults().axes[id]) })
+      rerun(true)
       persist()
-      void ensureBeat()
-      if (anyHero() && !get().heroZone) get().pickHeroZone()
-      else if (hadHero !== anyHero()) pushHero()
-      if (get().heroMusic.enabled) pushHeroMusic()
+    },
+    releaseAxis: (id) => {
+      const auto = get().resolved?.auto[id]
+      if (auto) get().setAxis(id, { source: auto })
     },
     setBeatTempoFactor: (beatTempoFactor) => {
       set({ beatTempoFactor })
@@ -673,20 +940,41 @@ export const useTracking = create<TrackingStore>()((set, get) => {
       pushRegion()
       persist()
     },
-    setAsDefault: () => {
-      const { axes, sensitivity } = get()
-      return useSettings.getState().update((s) => ({ ...s, tracking: { ...s.tracking, axes: usableOn('player', axes), sensitivity } }))
-    },
     reset: () => {
-      const d = defaults()
-      set({ axes: usableOn(get().source ?? 'player', d.axes), sensitivity: d.sensitivity, pace: d.defaultPace, region: null, regionTarget: null, heroMusic: defaultHeroMusic(), zones: defaultZoneEffects() })
-      pushHeroMusic()
-      pushZones()
-      engine.setTrackAxes(rows(get().axes))
-      pushOptions()
-      get().setRegionSource(d.models.detector ? d.regionSource : 'centre')
+      const sub = subject
+      if (!sub) return
+      keep(sub, undefined)
+      save(sub.side, sub.key, undefined)
+      if (get().source === sub.side) {
+        for (const axis of Object.keys(get().heroAxisColours)) engine.clearHeroAxisColours(axis)
+        set({ ...fieldsFrom(undefined), heroTip: false })
+        pushOptions()
+        pushBeatOptions()
+        pushRegion()
+        pushHero()
+        pushZones()
+      }
+      rerun()
+    },
+    afterOverridesReset: () => {
+      if (useSettings.getState().settings?.remote?.source) return
+      usePlayer.getState().dropOverrides()
+      const sub = subject
+      if (!sub?.memory || !hasOverrides(sub.memory)) return
+      keep(sub, withoutOverrides(sub.memory))
+      if (sub.side === 'browser') save('browser', sub.key, sub.memory)
+      if (get().source === sub.side) {
+        set({ sensitivity: defaults().sensitivity })
+        pushOptions()
+      }
+      rerun()
+    },
+    loadModel: (kind) => {
+      wanted.add(kind)
+      syncModels()
     },
     unloadMusic: () => {
+      available.music = null
       if (loaded.music === null) return
       engine.setModel('music', null, null, null, null)
       loaded.music = null
@@ -700,22 +988,14 @@ export const useTracking = create<TrackingStore>()((set, get) => {
       const status = await invoke('models:status', all.flatMap((m) => m.files.map((f) => f.file)))
       const present = { detector: false, motion: false, music: false }
       for (const kind of MODEL_KINDS) {
-        const wanted = kind === 'music' ? entitledMusicModel(d.models.music, isPremium(useAccount.getState())) : d.models[kind]
-        const spec: ModelInfo | undefined = wanted ? all.find((m) => m.kind === kind && m.id === wanted) : undefined
+        const chosen = kind === 'music' ? entitledMusicModel(d.models.music, isPremium(useAccount.getState())) : d.models[kind]
+        const spec: ModelInfo | undefined = chosen ? all.find((m) => m.kind === kind && m.id === chosen) : undefined
         const paths = spec?.files.map((f) => status[f.file]?.path ?? null) ?? []
         present[kind] = spec !== undefined && paths.every((p) => p !== null)
-        if (!spec || !present[kind]) {
-          if (loaded[kind] !== null) engine.setModel(kind, null, null, null, null)
-          loaded[kind] = null
-          continue
-        }
-        if (loaded[kind] === spec.id) continue
-        loaded[kind] = spec.id
-        if (kind === 'detector') engine.setDetector(spec.id, paths[0] ?? '', `${modelsDir}/coreml-cache`)
-        else engine.setModel(kind, spec.id, paths[0] ?? '', paths[1] ?? '', modelsDir)
+        available[kind] = spec && present[kind] ? { id: spec.id, paths } : null
       }
       set({ present })
-      pullModels()
+      syncModels()
     },
     update: (state) => {
       const prev = get().state
@@ -726,7 +1006,7 @@ export const useTracking = create<TrackingStore>()((set, get) => {
         const old = get().beat
         if (!old || old.status !== beat.status || old.error !== beat.error || Math.round(old.bpm) !== Math.round(beat.bpm) || old.beats !== beat.beats || old.tempoFactor !== beat.tempoFactor || old.model.status !== beat.model.status || Math.round(old.model.percent) !== Math.round(beat.model.percent)) set({ beat })
       }
-      if (anyMusic() || state.frames % 30 === 0) pullModels()
+      if (anyMusic() || state.frames % 30 === 0 || state.model.status !== get().motion?.status) pullModels()
       if (anyHero()) set({ hero: engine.heroState() })
       if (get().zones.enabled && get().zones.zones.length > 0) {
         const matches = engine.zoneState()
@@ -744,6 +1024,10 @@ export const useTracking = create<TrackingStore>()((set, get) => {
     },
   }
 })
+
+export function afterOverridesReset(): void {
+  useTracking.getState().afterOverridesReset()
+}
 
 useAccount.subscribe((s, prev) => {
   if (isPremium(s) === isPremium(prev) || !engine) return

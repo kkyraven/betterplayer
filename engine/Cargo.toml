@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/player", "crates/devices", "crates/script", "crates/axes", "crates/tracking", "crates/detect", "crates/beat", "crates/model", "crates/hero", "crates/core", "crates/napi"]
+members = ["crates/player", "crates/vr", "crates/devices", "crates/script", "crates/axes", "crates/tracking", "crates/detect", "crates/beat", "crates/model", "crates/hero", "crates/core", "crates/napi"]
 
 [workspace.package]
 edition = "2024"
@@ -10,6 +10,7 @@ license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
 bp-player = { path = "crates/player" }
+bp-vr = { path = "crates/vr" }
 bp-devices = { path = "crates/devices" }
 bp-script = { path = "crates/script" }
 bp-axes = { path = "crates/axes" }

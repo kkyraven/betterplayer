@@ -67,6 +67,7 @@ export const FORWARDED_CHANNELS = [
   'library:queryIds',
   'library:jump',
   'library:media',
+  'library:projection',
   'library:suggestions',
   'library:byPath',
   'library:byTitle',
@@ -120,7 +121,7 @@ export type ForwardedChannel = (typeof FORWARDED_CHANNELS)[number]
 
 export const isForwarded = (channel: string): channel is ForwardedChannel => (FORWARDED_CHANNELS as readonly string[]).includes(channel)
 
-export const PATH_CHANNELS: readonly ForwardedChannel[] = ['video:get', 'video:set', 'library:byPath', 'library:played', 'subtitles:find']
+export const PATH_CHANNELS: readonly ForwardedChannel[] = ['video:get', 'video:set', 'library:byPath', 'library:projection', 'library:played', 'subtitles:find']
 
 export interface ScriptSet {
   media: string

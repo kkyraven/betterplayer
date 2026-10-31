@@ -1,0 +1,12 @@
+{
+  "controller_type": "generic_hmd",
+  "name": "Better Player: headset",
+  "description": "Proximity sensor",
+  "bindings": {
+    "/actions/headset": {
+      "sources": [
+        { "path": "/user/head/proximity", "mode": "button", "inputs": { "click": { "output": "/actions/headset/in/on_head" } } }
+      ]
+    }
+  }
+}

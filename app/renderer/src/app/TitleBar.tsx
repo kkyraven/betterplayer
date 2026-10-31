@@ -1,17 +1,20 @@
 import * as Popover from '@radix-ui/react-popover'
-import { Lock, Plus, RefreshCw, Settings2, Snowflake, Tv } from 'lucide-react'
+import { Lock, Play, Plus, RectangleGoggles, RefreshCw, Settings2, Snowflake, Tv } from 'lucide-react'
 import { useState } from 'react'
 import type { OutputState } from 'bp-engine'
 import { fmtSpan, type ChasterLock } from '@shared/chaster'
 import { Button } from '@/components/ui/Button'
 import { IconButton } from '@/components/ui/IconButton'
 import { Logo } from '@/components/ui/Logo'
+import { keyLabel } from '@/input/actions'
 import { useChaster, useMinuteClock } from '@/state/chaster'
 import { outputName, useDevices } from '@/state/devices'
 import { useT } from '@/state/i18n'
 import { FOLLOW_LABELS, useFollow } from '@/state/follow'
 import { useRemote } from '@/state/remote'
+import { usePlayer } from '@/state/player'
 import { useUi } from '@/state/ui'
+import { useVr } from '@/state/vr'
 import { statusDot, statusText } from '@/screens/devices/status'
 import { DownloadsMenu } from '@/components/downloads/DownloadsMenu'
 
@@ -42,12 +45,31 @@ export function TitleBar() {
             {FOLLOW_LABELS[followKind]}
           </span>
         )}
+        <ResumeDevices />
         <DevicesMenu />
         <button type="button" className="win-status-item icon" aria-label={t('app.titleBar.mediaCentre')} title={t('app.titleBar.mediaCentre')} onClick={() => setMediaCentre(true)}>
           <Tv />
         </button>
+        <HeadsetButton />
       </div>
     </header>
+  )
+}
+
+function HeadsetButton() {
+  const t = useT()
+  const shown = useVr((s) => s.available || s.active || s.starting)
+  const active = useVr((s) => s.active)
+  const starting = useVr((s) => s.starting)
+  const start = useVr((s) => s.start)
+  const stop = useVr((s) => s.stop)
+  const hasVideo = usePlayer((s) => s.path !== null)
+  if (!shown) return null
+  const label = starting ? t('common.connecting') : active ? t('vr.backToDesktop') : hasVideo ? t('vr.playInHeadset') : t('vr.openInHeadset')
+  return (
+    <button type="button" className={`win-status-item icon${active || starting ? ' on' : ''}`} aria-label={label} title={label} aria-busy={starting} onClick={starting ? undefined : () => (active ? stop() : void start())}>
+      <RectangleGoggles />
+    </button>
   )
 }
 
@@ -60,6 +82,21 @@ function ChastityTime({ lock }: { lock: ChasterLock }) {
       {lock.frozen ? <Snowflake /> : <Lock />}
       {fmtSpan(now - lock.startedAt)}
     </span>
+  )
+}
+
+function ResumeDevices() {
+  const t = useT()
+  const held = useDevices((s) => s.held)
+  const setHeld = useDevices((s) => s.setHeld)
+  if (!held) return null
+  const label = t('app.titleBar.resumeDevices')
+  const key = keyLabel('Devices.Hold.Toggle')
+  return (
+    <button type="button" className="win-status-item win-held" title={key ? `${label} (${key})` : label} onClick={() => setHeld(false)}>
+      <Play />
+      {label}
+    </button>
   )
 }
 

@@ -36,14 +36,29 @@ import { useAccount } from './account'
 const lastMusicModel = (): string | null | undefined =>
   native.setModel.mock.calls.filter((c) => c[0] === 'music').at(-1)?.[1] as string | null | undefined
 
+function musicInUse() {
+  const axes = defaultTrackAxes()
+  axes.L0.source = 'ai-music'
+  useTracking.setState({ source: 'player', axes })
+}
+
 const supporter: AccountStatus = { ...SIGNED_OUT, state: 'in', me: { id: 'test', name: '', email: 'test@example.com', friendCode: 'AAAA-BBBB', premium: true, admin: false } }
 
 beforeEach(async () => {
   chosen.music = DEFAULT_MODELS.music ?? 'music'
   useAccount.setState({ status: SIGNED_OUT })
+  useTracking.getState().unloadMusic()
   useTracking.setState({ source: null, axes: defaultTrackAxes() })
   await useTracking.getState().refreshModels()
   vi.clearAllMocks()
+})
+
+it('loads no AI model until something uses it', async () => {
+  await useTracking.getState().refreshModels()
+  expect(useTracking.getState().present).toMatchObject({ motion: true, music: true })
+  expect(native.setModel).not.toHaveBeenCalled()
+  useTracking.getState().loadModel('motion')
+  expect(native.setModel).toHaveBeenCalledWith('motion', DEFAULT_MODELS.motion, '/models/motion.onnx', '/models/motion.json', '/models')
 })
 
 it('falls back from the supporter model to CH without a subscription', () => {
@@ -59,24 +74,25 @@ it('gives a free account CH on any axis', async () => {
   expect(useTracking.getState().present).toMatchObject({ motion: true, music: true })
   useTracking.getState().setAxis('L0', { source: 'ai-music' })
   expect(useTracking.getState().axes.L0.source).toBe('ai-music')
+  expect(lastMusicModel()).toBe(DEFAULT_MODELS.music)
   vi.unstubAllGlobals()
 })
 
 it('plays CH when a free account has the supporter model picked', async () => {
   chosen.music = VARIATION
+  musicInUse()
   await useTracking.getState().refreshModels()
+  expect(lastMusicModel()).toBe(DEFAULT_MODELS.music)
   expect(useTracking.getState().present.music).toBe(true)
   expect(native.setModel).not.toHaveBeenCalledWith('music', VARIATION, expect.anything(), expect.anything(), expect.anything())
 })
 
 it('loads the supporter model on subscription and drops back to CH on sign-out', async () => {
   chosen.music = VARIATION
+  musicInUse()
   useAccount.setState({ status: supporter })
   await useTracking.getState().refreshModels()
   expect(native.setModel).toHaveBeenCalledWith('music', VARIATION, '/models/var.onnx', '/models/var.json', '/models')
-  const axes = defaultTrackAxes()
-  axes.L0.source = 'ai-music'
-  useTracking.setState({ source: 'player', axes })
   useAccount.setState({ status: SIGNED_OUT })
   expect(native.generateCancel).toHaveBeenCalledOnce()
   expect(useTracking.getState().axes.L0.source).toBe('ai-music')
@@ -87,6 +103,7 @@ it('loads the supporter model on subscription and drops back to CH on sign-out',
 
 it('drops the supporter model from the engine the moment the subscription lapses', async () => {
   chosen.music = VARIATION
+  musicInUse()
   useAccount.setState({ status: supporter })
   await useTracking.getState().refreshModels()
   vi.clearAllMocks()
@@ -97,6 +114,7 @@ it('drops the supporter model from the engine the moment the subscription lapses
 
 it('reloads after entitlement is revoked and restored before a model refresh finishes', async () => {
   chosen.music = VARIATION
+  musicInUse()
   await useTracking.getState().refreshModels()
   vi.clearAllMocks()
   useAccount.setState({ status: supporter })

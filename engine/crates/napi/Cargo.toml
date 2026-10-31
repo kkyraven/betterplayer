@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 napi = { version = "3", default-features = false, features = ["napi8"] }
 napi-derive = "3"
 bp-player.workspace = true
+bp-vr.workspace = true
 bp-devices.workspace = true
 bp-core.workspace = true
 bp-detect.workspace = true

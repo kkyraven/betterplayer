@@ -49,6 +49,7 @@
 .bar .icon-btn-lg { width: 42px; height: 42px; border-radius: 50%; background: rgba(255, 255, 255, 0.13); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); color: #fff; }
 .bar .icon-btn-lg:hover { background: rgba(255, 255, 255, 0.22); }
 .ctl-row { display: flex; align-items: center; gap: 4px; }
+.ctl-row .icon-btn[aria-busy='true'] { opacity: 0.6; cursor: default; }
 .vsep { width: 1px; height: 22px; background: var(--line); margin: 0 6px; }
 .time { font: 500 12px var(--mono); color: var(--text-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .time .t3 { color: var(--text-3); }
@@ -149,3 +150,6 @@
 .pempty { position: absolute; z-index: 3; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; font-size: 13px; }
 .pnotice b { font-weight: 600; }
 .pnotice span { color: var(--text-3); font-size: 12px; word-break: break-word; }
+
+.track-toast { position: absolute; z-index: 30; left: 0; right: 0; bottom: 74px; }
+.stage:has(.sstrip) .track-toast { bottom: 110px; }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-KinkyRaven-Proprietary
 // Copyright (c) 2026 KinkyRaven. All rights reserved. This file is not licensed under LICENSE.txt; no permission is granted to use, copy, modify or distribute it.
 
-import { Camera, Download, Plus, RefreshCw, Upload, X } from 'lucide-react'
+import { Camera, Check, Download, Plus, RefreshCw, Upload, X } from 'lucide-react'
 import { useEffect, useState, type ChangeEvent } from 'react'
 import { AXES } from '@shared/axes'
 import { DOM_LEVEL_MAX, DOM_MEMORY_KINDS, DOM_POINTS, DOM_SPANS, LORA_WEIGHT_MAX, pointAt, spanAt, type DomLora, type DomMemoryKind, type DomPoint, type DomProfile, type DomSpan, type ImageProvider, type ImageSend, type PleasurePain } from '@shared/dom'
@@ -302,11 +302,16 @@ export function MemoryTab({ dom }: { dom: DomProfile }) {
   const t = useT()
   const memories = useDom((s) => s.memories)
   const error = useDom((s) => s.memoriesError)
-  const { loadMemories, addMemory, forget, forgetAll } = useDom.getState()
+  const { loadMemories, addMemory, forget, forgetAll, pullMemories, pushMemories } = useDom.getState()
   const [kind, setKind] = useState<DomMemoryKind>('like')
   const [draft, setDraft] = useState('')
   const [confirm, setConfirm] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
+  const [syncing, setSyncing] = useState(false)
+  const [pulled, setPulled] = useState(false)
+  const [toSend, setToSend] = useState<string[]>([])
+  const [sendOpen, setSendOpen] = useState(false)
+  const synced = pulled && memories.every((m) => m.synced)
   useEffect(() => {
     void loadMemories(dom.id)
   }, [dom.id, loadMemories])
@@ -321,6 +326,24 @@ export function MemoryTab({ dom }: { dom: DomProfile }) {
       setAddError(domErrorText(err))
     }
   }
+  const syncStep = async (step: () => Promise<void>) => {
+    setSyncing(true)
+    try {
+      await step()
+      setAddError(null)
+    } catch (err) {
+      setAddError(domErrorText(err))
+    } finally {
+      setSyncing(false)
+    }
+  }
+  const pull = () => syncStep(async () => {
+    const waiting = (await pullMemories(dom.id)).map((m) => m.id)
+    setToSend(waiting)
+    setSendOpen(waiting.length > 0)
+    setPulled(true)
+  })
+  const send = (ids: string[]) => syncStep(() => pushMemories(dom.id, ids))
   return (
     <>
       <h3 className="eyebrow dom-mem-hd">{t('dom.memory.count', { count: memories.length })}</h3>
@@ -347,16 +370,17 @@ export function MemoryTab({ dom }: { dom: DomProfile }) {
         </div>
       )}
       <span className="dom-src">
-        {dom.alPersonaId && (
-          <>
-            <RefreshCw />
-            {t('dom.memory.synced')}
-            <span className="sep">·</span>
-          </>
+        {dom.alPersonaId ? (
+          <button type="button" className="dom-link" disabled={syncing || synced} onClick={() => void pull()}>
+            {synced ? <Check /> : <RefreshCw />}
+            {t(synced ? 'dom.memory.synced' : 'dom.memory.sync')}
+          </button>
+        ) : (
+          <button type="button" className="dom-link" disabled={memories.length === 0} onClick={() => setConfirm(true)}>{t('dom.memory.forgetAll')}</button>
         )}
-        <button type="button" className="dom-link" disabled={memories.length === 0} onClick={() => setConfirm(true)}>{t('dom.memory.forgetAll')}</button>
       </span>
       <Prompt open={confirm} onOpenChange={setConfirm} title={t('dom.memory.forgetAll')} confirmLabel={t('dom.memory.forgetAll')} danger onConfirm={() => void forgetAll(dom.id)} />
+      <Prompt open={sendOpen} onOpenChange={setSendOpen} title={t('dom.memory.send', { count: toSend.length })} confirmLabel={t('common.add')} onConfirm={() => void send(toSend)} />
     </>
   )
 }

@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { OutputState, ScriptInfo } from 'bp-engine'
-import { defaultSettings } from '@shared/settings'
+import type { OutputState } from 'bp-engine'
 import { defaultTrackAxes, defaultTrackingDefaults } from '@shared/tracking'
 
 const ipc = vi.hoisted(() => ({ invoke: vi.fn<(channel: string, ...args: unknown[]) => Promise<unknown>>() }))
@@ -33,13 +32,13 @@ import { useTracking } from './tracking'
 let PATH = ''
 let n = 0
 const present = { detector: false, motion: false, music: false }
-const output = (id: number, kind: 'howl' | 'serial', status = 'connected') => ({
+const output = (id: number, kind: 'howl' | 'handy' | 'serial', status = 'connected') => ({
   output: { id, config: { kind, profile: 'stroker' as const } },
   state: { id, kind, address: '', profile: 'stroker', status, error: null, device: null, tcode: null, ramp: null, howl: null, features: [], battery: null } as unknown as OutputState,
 })
 const scripts = [{ axis: 'L0', suffix: '', actions: 2, durationMs: 1000, json: '{"actions":[{"at":0,"pos":0},{"at":1000,"pos":100}]}' }]
 
-function connect(kind: 'howl' | 'serial' = 'howl') {
+function connect(kind: 'howl' | 'handy' | 'serial' = 'howl') {
   const o = output(1, kind)
   useDevices.setState({ outputs: [o.output], states: { 1: o.state } })
 }
@@ -142,25 +141,42 @@ describe('recompute', () => {
     expect(eng.generate).toHaveBeenCalledTimes(2)
   })
 
-  it('leaves a file whose stroke is its own script alone when Settings say so', async () => {
-    connect()
-    usePlayer.setState({ scripts: [{ axis: 'L0', selected: true } as ScriptInfo] })
+  it('leaves a Handy on a scripted stroke alone, while a Howl still runs for the other axes', async () => {
     useTracking.setState({ axes: { ...defaultTrackAxes(), L0: { ...defaultTrackAxes().L0, source: 'off' } } })
-    useSettings.setState({ settings: { ...defaultSettings(), tracking: { ...defaultTrackingDefaults(), generateForScripted: false } } })
+    connect('handy')
     await useRecompute.getState().check()
     expect(eng.generate).not.toHaveBeenCalled()
     expect(useRecompute.getState().busy).toBe(false)
-    useSettings.setState({ settings: defaultSettings() })
+    connect('howl')
     await useRecompute.getState().check()
     expect(eng.generate).toHaveBeenCalledTimes(1)
   })
 
-  it('still runs with the setting off when the stroke is tracked', async () => {
-    connect()
-    usePlayer.setState({ scripts: [{ axis: 'L0', selected: true } as ScriptInfo] })
-    useSettings.setState({ settings: { ...defaultSettings(), tracking: { ...defaultTrackingDefaults(), generateForScripted: false } } })
+  it('runs for a Handy when the stroke is generated', async () => {
+    connect('handy')
     await useRecompute.getState().check()
     expect(eng.generate).toHaveBeenCalledTimes(1)
+  })
+
+  it('waits for the movement model to load before the run, so flow is never saved as its result', async () => {
+    vi.useFakeTimers()
+    let motion = 'loading'
+    eng.modelState.mockImplementation(() => ({ status: motion }))
+    try {
+      useTracking.setState({ axes: { ...defaultTrackAxes(), L0: { ...defaultTrackAxes().L0, source: 'ai-motion' } } })
+      connect('handy')
+      const checking = useRecompute.getState().check()
+      await vi.advanceTimersByTimeAsync(500)
+      expect(eng.generate).not.toHaveBeenCalled()
+      motion = 'ready'
+      await vi.advanceTimersByTimeAsync(100)
+      await checking
+      expect(eng.generate).toHaveBeenCalledTimes(1)
+      expect(ipc.invoke).toHaveBeenCalledWith('generated:put', PATH, expect.any(String), expect.anything())
+    } finally {
+      eng.modelState.mockImplementation(() => ({ status: 'none' }))
+      vi.useRealTimers()
+    }
   })
 })
 

@@ -1,4 +1,4 @@
-import { Captions, CaptionsOff, Crosshair, Glasses, List, ListVideo, Maximize2, Minimize2, Pause, Play, Repeat, Repeat1, Rewind, RotateCcw, FastForward, Shuffle, SkipBack, SkipForward, SlidersHorizontal, Volume2, VolumeX } from 'lucide-react'
+import { Captions, CaptionsOff, Crosshair, Glasses, List, ListVideo, Maximize2, Minimize2, Pause, Play, RectangleGoggles, Repeat, Repeat1, Rewind, RotateCcw, FastForward, Shuffle, SkipBack, SkipForward, SlidersHorizontal, Volume2, VolumeX } from 'lucide-react'
 import { useMemo, useRef } from 'react'
 import { TooltipGroup } from '@/components/ui/TooltipGroup'
 import { IconButton } from '@/components/ui/IconButton'
@@ -12,6 +12,7 @@ import { useSettings } from '@/state/settings'
 import { useSubtitles } from '@/state/subtitles'
 import { useTracking } from '@/state/tracking'
 import { useUi } from '@/state/ui'
+import { useVr } from '@/state/vr'
 import { Scrubber } from './Scrubber'
 import { SessionStrip } from './SessionStrip'
 import { VariantMenu, variantGroups } from './VariantMenu'
@@ -47,8 +48,7 @@ export function ControlBar({ overlay, onHoverChange }: { overlay: HTMLDivElement
   const inSession = useSession((s) => s.stage === 'running')
   const hasQueue = usePlayer((s) => s.playlist !== null)
   const trackSource = useTracking((s) => s.source)
-  const startTracking = useTracking((s) => s.start)
-  const stopTracking = useTracking((s) => s.stop)
+  const pressCrosshair = useTracking((s) => s.pressCrosshair)
   const nextClip = useSession((s) => s.next)
   const previousClip = useSession((s) => s.previous)
   const clip = useSession((s) => (s.stage === 'running' ? s.plan[s.index] : undefined))
@@ -56,6 +56,11 @@ export function ControlBar({ overlay, onHoverChange }: { overlay: HTMLDivElement
   const hasSubtitles = useSubtitles((s) => s.tracks.length > 0)
   const subtitlesOn = useSettings((s) => s.settings?.subtitles.enabled) ?? true
   const updateSettings = useSettings((s) => s.update)
+  const headset = useVr((s) => s.available || s.active || s.starting)
+  const inHeadset = useVr((s) => s.active)
+  const vrStarting = useVr((s) => s.starting)
+  const startVr = useVr((s) => s.start)
+  const stopVr = useVr((s) => s.stop)
   const toggleSubtitles = () => void updateSettings((s) => ({ ...s, subtitles: { ...s.subtitles, enabled: !s.subtitles.enabled } }))
 
   const stroke = scripts.find((s) => s.axis === 'L0' && s.selected) ?? scripts.find((s) => s.selected) ?? scripts[0]
@@ -125,7 +130,7 @@ export function ControlBar({ overlay, onHoverChange }: { overlay: HTMLDivElement
             </IconButton>
           )}
           <span className="vsep" />
-          <IconButton label={trackSource === 'player' ? t('player.controls.stopTracking') : t('player.controls.trackMotion')} className={trackSource === 'player' ? 'on' : undefined} onClick={() => (trackSource === 'player' ? stopTracking() : startTracking('player'))}>
+          <IconButton label={trackSource === 'player' ? t('player.controls.stopTracking') : t('player.controls.trackMotion')} className={trackSource === 'player' ? 'on' : undefined} onClick={() => void pressCrosshair()}>
             <Crosshair />
           </IconButton>
           <IconButton label={t('player.controls.videoSettings')} className={sheet && sheet !== 'queue' ? 'on' : undefined} onClick={() => setSheet(sheet && sheet !== 'queue' ? null : 'video')}>
@@ -134,6 +139,16 @@ export function ControlBar({ overlay, onHoverChange }: { overlay: HTMLDivElement
           <IconButton label={t('player.sideSheet.projection')} className={sheet === 'projection' ? 'on' : undefined} onClick={() => setSheet('projection')}>
             <Glasses />
           </IconButton>
+          {headset && (
+            <IconButton
+              label={vrStarting ? t('common.connecting') : inHeadset ? t('vr.backToDesktop') : t('vr.playInHeadset')}
+              className={inHeadset || vrStarting ? 'on' : undefined}
+              aria-busy={vrStarting}
+              onClick={vrStarting ? undefined : () => (inHeadset ? stopVr() : void startVr())}
+            >
+              <RectangleGoggles />
+            </IconButton>
+          )}
           <IconButton label={fullscreen ? t('player.controls.exitFullscreen') : t('player.controls.fullscreen')} onClick={() => void toggleFullscreen()}>
             {fullscreen ? <Minimize2 /> : <Maximize2 />}
           </IconButton>

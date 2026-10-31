@@ -251,7 +251,8 @@ fn worker(
     reply: Sender<Reply>,
 ) {
     let mut lan: Option<LanScript> = None;
-    for c in cmd {
+    let mut pending = None;
+    while let Some(c) = next_cmd(&cmd, &mut pending) {
         let done = match c {
             Cmd::Setup { generation, bytes } => host(&api, hosting, &upload, &bytes, &mut lan)
                 .and_then(|url| {
@@ -273,6 +274,23 @@ fn worker(
             return;
         }
     }
+}
+
+fn next_cmd(rx: &Receiver<Cmd>, pending: &mut Option<Cmd>) -> Option<Cmd> {
+    let c = pending.take().or_else(|| rx.recv().ok())?;
+    if !matches!(c, Cmd::Slide { .. }) {
+        return Some(c);
+    }
+    let mut latest = c;
+    while let Ok(next) = rx.try_recv() {
+        if matches!(next, Cmd::Slide { .. }) {
+            latest = next;
+        } else {
+            *pending = Some(next);
+            break;
+        }
+    }
+    Some(latest)
 }
 
 fn host(
@@ -648,6 +666,20 @@ mod tests {
     use std::io::BufRead;
     use std::io::BufReader;
     use std::sync::Mutex;
+
+    #[test]
+    fn queued_slides_collapse_to_the_newest_without_reordering() {
+        let (tx, rx) = channel();
+        for (min, max) in [(0.4, 0.6), (0.3, 0.7), (0.2, 0.8)] { tx.send(Cmd::Slide { min, max }).unwrap(); }
+        tx.send(Cmd::Stop).unwrap();
+        tx.send(Cmd::Slide { min: 0.0, max: 1.0 }).unwrap();
+        drop(tx);
+        let mut pending = None;
+        assert!(matches!(next_cmd(&rx, &mut pending), Some(Cmd::Slide { min: 0.2, max: 0.8 })));
+        assert!(matches!(next_cmd(&rx, &mut pending), Some(Cmd::Stop)));
+        assert!(matches!(next_cmd(&rx, &mut pending), Some(Cmd::Slide { min: 0.0, max: 1.0 })));
+        assert!(next_cmd(&rx, &mut pending).is_none());
+    }
 
     #[derive(Clone, Debug)]
     struct Req {

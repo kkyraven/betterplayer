@@ -3,7 +3,7 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
 use std::sync::{Arc, Condvar, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -11,6 +11,7 @@ use crate::frames::{External, Frames, frame_len};
 use crate::gl_context::{GlContext, Gpu};
 use crate::mpv::*;
 use crate::stats::RenderStats;
+use crate::vr::{Headset, VrStatus, VrView};
 
 #[derive(Clone, Copy, Debug)]
 pub struct RenderConfig {
@@ -26,6 +27,10 @@ pub enum Msg {
     Resize(u32, u32, Option<External>, Arc<ResizeReply>),
     Presenting(bool),
     PictureBack,
+    VrStart(Sender<Result<(), String>>),
+    VrStop(Sender<Result<(), String>>),
+    VrView(VrView),
+    VrRecentre { keep_recline: bool },
     Stop,
 }
 
@@ -64,6 +69,38 @@ fn wait_for_gpu(mut poll: impl FnMut() -> u32, timeout: Duration) -> u32 {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() { return result; }
         thread::sleep(POLL.min(remaining));
+    }
+}
+
+#[derive(Default)]
+struct FeedPace {
+    last: Option<i64>,
+    held: Option<(i64, Instant)>,
+}
+
+impl FeedPace {
+    const PERIOD: Duration = Duration::from_micros(1_000_000 / 30);
+    const SLACK_US: i64 = 2_000;
+
+    fn display_us(target_time: i64, now_us: i64) -> i64 {
+        if target_time > now_us.saturating_mul(10) { target_time / 1000 } else { target_time }
+    }
+
+    fn due(&mut self, at_us: i64, now: Instant) -> bool {
+        self.held = Some((at_us, now));
+        let period = Self::PERIOD.as_micros() as i64 - Self::SLACK_US;
+        at_us <= 0 || self.last.is_none_or(|last| at_us < last || at_us - last >= period)
+    }
+
+    fn overdue(&self, now: Instant) -> Option<i64> {
+        self.held.filter(|&(_, drawn)| now.duration_since(drawn) >= Self::PERIOD).map(|(at, _)| at)
+    }
+
+    fn copied(&mut self, at_us: Option<i64>) {
+        if at_us.is_some() {
+            self.last = at_us;
+        }
+        self.held = None;
     }
 }
 
@@ -280,6 +317,7 @@ pub fn spawn(
     stats: Arc<RenderStats>,
     cfg: RenderConfig,
     has_video: Arc<AtomicBool>,
+    vr: Arc<Mutex<Option<VrStatus>>>,
     #[cfg(target_os = "macos")] apple: Arc<std::sync::Mutex<crate::enhance::AppleUpscaling>>,
     #[cfg(windows)] dlss: Arc<std::sync::Mutex<crate::enhance::DlssShared>>,
 ) -> Result<(Sender<Msg>, JoinHandle<()>, String), String> {
@@ -300,6 +338,7 @@ pub fn spawn(
                 stats,
                 cfg,
                 has_video,
+                vr,
                 ready_tx,
                 #[cfg(target_os = "macos")]
                 crate::macos::Upscaler::new(apple, wake),
@@ -330,6 +369,7 @@ fn run(
     stats: Arc<RenderStats>,
     cfg: RenderConfig,
     has_video: Arc<AtomicBool>,
+    vr: Arc<Mutex<Option<VrStatus>>>,
     ready: Sender<Result<String, String>>,
     #[cfg(target_os = "macos")] mut apple: crate::macos::Upscaler,
     #[cfg(windows)] mut dlss: crate::windows::dlss::DlssRender,
@@ -393,6 +433,13 @@ fn run(
     let mut presenting = true;
     let mut skipped_frame = false;
     let wanted = |presenting: bool| presenting && has_video.load(Ordering::Relaxed) && mpv.picture_ready.load(Ordering::Relaxed);
+    let mut headset: Option<Headset> = None;
+    let mut view = VrView::default();
+    let mut pace = FeedPace::default();
+    let source = || {
+        let s = mpv.observed_size.load(Ordering::Relaxed);
+        ((s >> 32) as u32, s as u32)
+    };
     loop {
         #[cfg(windows)]
         if dlss.has_worker() {
@@ -408,7 +455,21 @@ fn run(
             (true, None) => Some(POLL),
             (false, delay) => delay,
         };
-        let msg = if let Some(timeout) = timeout {
+        let msg = if let Some(h) = headset.as_mut() {
+            match rx.try_recv() {
+                Ok(m) => {
+                    if h.overdue() {
+                        h.frame();
+                    }
+                    Some(m)
+                }
+                Err(TryRecvError::Empty) => {
+                    h.frame();
+                    None
+                }
+                Err(TryRecvError::Disconnected) => break,
+            }
+        } else if let Some(timeout) = timeout {
             match rx.recv_timeout(timeout) {
                 Ok(m) => Some(m),
                 Err(RecvTimeoutError::Timeout) => {
@@ -451,7 +512,17 @@ fn run(
                             dlss.new_frame();
                         }
                     }
-                    if wanted(presenting) {
+                    if let Some(h) = headset.as_mut().filter(|_| wanted(true)) {
+                        skipped_frame = false;
+                        if !h.draw_video(ctx, source()) {
+                            stats.render_error();
+                        } else if presenting {
+                            let at = FeedPace::display_us(info.target_time, unsafe { mpv_get_time_us(mpv.handle) });
+                            if pace.due(at, Instant::now()) && feed(h, ctx, &mut target, &frames, &stats) {
+                                pace.copied(Some(at));
+                            }
+                        }
+                    } else if wanted(presenting) {
                         let pts = if cfg.stamp && decoded {
                             Some(f64::from_bits(mpv.observed_time.load(Ordering::Relaxed)))
                         } else {
@@ -474,7 +545,7 @@ fn run(
                             );
                         }
                     } else {
-                        if presenting && decoded {
+                        if (presenting || headset.is_some()) && decoded {
                             skipped_frame = true;
                             stats.skipped();
                         }
@@ -483,7 +554,12 @@ fn run(
                 }
             }
             Some(Msg::PictureBack) => {
-                if skipped_frame && wanted(presenting) {
+                if let Some(h) = headset.as_mut().filter(|_| skipped_frame && wanted(true)) {
+                    skipped_frame = false;
+                    if h.draw_video(ctx, source()) && presenting && feed(h, ctx, &mut target, &frames, &stats) {
+                        pace.copied(None);
+                    }
+                } else if skipped_frame && wanted(presenting) {
                     skipped_frame = false;
                     while target.busy() {
                         target.poll(ctx, &frames, &stats, true);
@@ -509,7 +585,11 @@ fn run(
                 }
                 let resumed = on && !presenting;
                 presenting = on;
-                if resumed && wanted(on) {
+                if let Some(h) = headset.as_mut().filter(|_| resumed && wanted(on)) {
+                    if h.draw_video(ctx, source()) && feed(h, ctx, &mut target, &frames, &stats) {
+                        pace.copied(None);
+                    }
+                } else if resumed && wanted(on) {
                     render_one(
                         ctx,
                         &mut target,
@@ -534,7 +614,7 @@ fn run(
                 });
                 drop(old);
                 if !applied { continue; }
-                if wanted(presenting) {
+                if wanted(presenting) && headset.is_none() {
                     render_one(
                         ctx,
                         &mut target,
@@ -550,7 +630,11 @@ fn run(
             }
             #[cfg(any(target_os = "macos", windows))]
             Some(Msg::Redraw) => {
-                if wanted(presenting) && !cfg.stamp {
+                if let Some(h) = headset.as_mut() {
+                    if wanted(true) && h.draw_video(ctx, source()) && presenting && feed(h, ctx, &mut target, &frames, &stats) {
+                        pace.copied(None);
+                    }
+                } else if wanted(presenting) && !cfg.stamp {
                     while target.busy() {
                         target.poll(ctx, &frames, &stats, true);
                     }
@@ -567,11 +651,86 @@ fn run(
                     );
                 }
             }
+            Some(Msg::VrStart(reply)) => {
+                if headset.is_none() {
+                    #[cfg(windows)]
+                    {
+                        let _gpu = gpu.section();
+                        dlss.suspend();
+                    }
+                    match Headset::start(&gl, view, vr.clone()) {
+                        Ok(mut h) => {
+                            if wanted(true) {
+                                h.draw_video(ctx, source());
+                            }
+                            headset = Some(h);
+                            pace = FeedPace::default();
+                        }
+                        Err(e) => {
+                            let _ = reply.send(Err(e));
+                            continue;
+                        }
+                    }
+                }
+                let _ = reply.send(Ok(()));
+            }
+            Some(Msg::VrStop(reply)) => {
+                if headset.take().is_some() && wanted(presenting) {
+                    render_one(
+                        ctx,
+                        &mut target,
+                        &frames,
+                        &stats,
+                        None,
+                        #[cfg(target_os = "macos")]
+                        &mut apple,
+                        #[cfg(windows)]
+                        &mut dlss,
+                    );
+                }
+                *vr.lock().unwrap() = None;
+                let _ = reply.send(Ok(()));
+            }
+            Some(Msg::VrView(v)) => {
+                view = v;
+                if let Some(h) = headset.as_mut() {
+                    h.view(v);
+                }
+            }
+            Some(Msg::VrRecentre { keep_recline }) => {
+                if let Some(h) = headset.as_mut() {
+                    h.recentre(keep_recline);
+                }
+            }
             Some(Msg::Stop) => break,
             None => {}
         }
+        if let Some(h) = headset.as_ref().filter(|_| presenting && wanted(true)) {
+            if let Some(at) = pace.overdue(Instant::now()) {
+                if feed(h, ctx, &mut target, &frames, &stats) {
+                    pace.copied(Some(at));
+                }
+            }
+        }
+        if headset.as_ref().is_some_and(Headset::ended) {
+            headset = None;
+            if wanted(presenting) {
+                render_one(
+                    ctx,
+                    &mut target,
+                    &frames,
+                    &stats,
+                    None,
+                    #[cfg(target_os = "macos")]
+                    &mut apple,
+                    #[cfg(windows)]
+                    &mut dlss,
+                );
+            }
+        }
         target.poll(ctx, &frames, &stats, false);
     }
+    drop(headset);
 
     let _gpu = gpu.section();
     unsafe {
@@ -604,16 +763,7 @@ fn render_one(
     #[cfg(not(any(target_os = "macos", windows)))]
     let redirect: Option<(u32, u32, u32)> = None;
     let (draw_fbo, draw_w, draw_h) = redirect.unwrap_or((target.fbo, target.w, target.h));
-    let mut fbo = mpv_opengl_fbo { fbo: draw_fbo as c_int, w: draw_w as c_int, h: draw_h as c_int, internal_format: 0 };
-    let mut flip: c_int = 0;
-    let mut block: c_int = 0;
-    let mut params = [
-        mpv_render_param { type_: MPV_RENDER_PARAM_OPENGL_FBO, data: &mut fbo as *mut _ as *mut c_void },
-        mpv_render_param { type_: MPV_RENDER_PARAM_FLIP_Y, data: &mut flip as *mut _ as *mut c_void },
-        mpv_render_param { type_: MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, data: &mut block as *mut _ as *mut c_void },
-        mpv_render_param { type_: MPV_RENDER_PARAM_INVALID, data: ptr::null_mut() },
-    ];
-    let r = unsafe { mpv_render_context_render(ctx, params.as_mut_ptr()) };
+    let r = draw_mpv(ctx, draw_fbo, draw_w, draw_h, 0);
     if r < 0 {
         stats.render_error();
         return;
@@ -640,7 +790,39 @@ fn render_one(
     }
 }
 
-fn take_gl_error() -> Option<u32> {
+fn feed(h: &Headset, ctx: *mut mpv_render_context, target: &mut Target, frames: &Frames, stats: &RenderStats) -> bool {
+    if !target.cfg.async_readback {
+        return true;
+    }
+    target.poll(ctx, frames, stats, false);
+    if target.inflight.iter().any(|f| f.pbo == target.cur) {
+        return false;
+    }
+    let t0 = Instant::now();
+    let _gpu = target.gpu.section();
+    if !h.copy_video(target.fbo, target.w, target.h) {
+        stats.render_error();
+        return true;
+    }
+    target.readback(ctx, frames, stats, ms(t0.elapsed()), None);
+    true
+}
+
+pub(crate) fn draw_mpv(ctx: *mut mpv_render_context, fbo: u32, w: u32, h: u32, mut depth: c_int) -> c_int {
+    let mut fbo = mpv_opengl_fbo { fbo: fbo as c_int, w: w as c_int, h: h as c_int, internal_format: 0 };
+    let mut flip: c_int = 0;
+    let mut block: c_int = 0;
+    let mut params = [
+        mpv_render_param { type_: MPV_RENDER_PARAM_OPENGL_FBO, data: &mut fbo as *mut _ as *mut c_void },
+        mpv_render_param { type_: MPV_RENDER_PARAM_FLIP_Y, data: &mut flip as *mut _ as *mut c_void },
+        mpv_render_param { type_: MPV_RENDER_PARAM_DEPTH, data: &mut depth as *mut _ as *mut c_void },
+        mpv_render_param { type_: MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, data: &mut block as *mut _ as *mut c_void },
+        mpv_render_param { type_: MPV_RENDER_PARAM_INVALID, data: ptr::null_mut() },
+    ];
+    unsafe { mpv_render_context_render(ctx, params.as_mut_ptr()) }
+}
+
+pub(crate) fn take_gl_error() -> Option<u32> {
     let first = unsafe { gl::GetError() };
     if first == gl::NO_ERROR { return None; }
     for _ in 0..16 {
@@ -649,7 +831,7 @@ fn take_gl_error() -> Option<u32> {
     Some(first)
 }
 
-fn skip_one(gpu: Gpu, ctx: *mut mpv_render_context) {
+pub(crate) fn skip_one(gpu: Gpu, ctx: *mut mpv_render_context) {
     let _gpu = gpu.section();
     let mut skip: c_int = 1;
     let mut params = [
@@ -694,6 +876,52 @@ mod tests {
         let timeout = Duration::from_millis(3);
         assert_eq!(wait_for_gpu(|| gl::TIMEOUT_EXPIRED, timeout), gl::TIMEOUT_EXPIRED);
         assert!(start.elapsed() >= timeout);
+    }
+
+    fn copied(fps: f64, n: u32) -> Vec<u32> {
+        let mut pace = FeedPace::default();
+        let now = Instant::now();
+        (0..n)
+            .filter(|&i| {
+                let at = 1_000_000 + (i as f64 * 1_000_000.0 / fps) as i64;
+                let due = pace.due(at, now);
+                if due {
+                    pace.copied(Some(at));
+                }
+                due
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_windows_copy_of_headset_frames_is_held_to_30_a_second() {
+        assert_eq!(copied(60.0, 8), [0, 2, 4, 6]);
+        assert_eq!(copied(59.94, 8), [0, 2, 4, 6]);
+        assert_eq!(copied(120.0, 9), [0, 4, 8]);
+        assert_eq!(copied(30.0, 4), [0, 1, 2, 3]);
+        assert_eq!(copied(29.97, 4), [0, 1, 2, 3]);
+        assert_eq!(copied(24.0, 4), [0, 1, 2, 3]);
+        assert_eq!(FeedPace::display_us(5_020_000_000, 5_000_000), 5_020_000);
+        assert_eq!(FeedPace::display_us(5_020_000, 5_000_000), 5_020_000);
+        assert_eq!(FeedPace::display_us(0, 5_000_000), 0);
+        let mut pace = FeedPace::default();
+        let now = Instant::now();
+        assert!(pace.due(0, now) && pace.due(0, now));
+        pace.copied(Some(5_000_000));
+        assert!(pace.due(1_000_000, now));
+    }
+
+    #[test]
+    fn a_held_frame_is_copied_once_nothing_newer_follows() {
+        let mut pace = FeedPace::default();
+        let t = Instant::now();
+        assert!(pace.due(1_000_000, t));
+        pace.copied(Some(1_000_000));
+        assert!(!pace.due(1_016_667, t));
+        assert_eq!(pace.overdue(t + Duration::from_millis(20)), None);
+        assert_eq!(pace.overdue(t + Duration::from_millis(34)), Some(1_016_667));
+        pace.copied(Some(1_016_667));
+        assert_eq!(pace.overdue(t + Duration::from_secs(1)), None);
     }
 
     #[test]

@@ -9,7 +9,7 @@ import { useT } from '@/state/i18n'
 import { usePlayer } from '@/state/player'
 import { useSettings } from '@/state/settings'
 import { useUi } from '@/state/ui'
-import { tileOptionsKey } from './tvCards'
+import { holdForOptions, playOnClick, tileOptionsKey, tileOptionsMenu } from './tvCards'
 
 interface RowSpec {
   label: MessageKey
@@ -34,8 +34,6 @@ const ROWS: Record<'library' | 'continue', RowSpec[]> = {
 }
 
 const BROWSE_AFTER = 1
-
-const noop = () => undefined
 
 export function TvRows({ kind }: { kind: 'library' | 'continue' }) {
   const t = useT()
@@ -69,12 +67,13 @@ export function TvRows({ kind }: { kind: 'library' | 'continue' }) {
   }
   if (!rows) return <div className="tv-body" data-nav-main />
   const all = rows.flatMap((r) => r.items)
+  const click = playOnClick(all, play)
   const section = ({ spec, items }: { spec: RowSpec; items: MediaRow[] }) => (
     <section key={spec.label} className="tv-sec">
       <span className="eyebrow">{t(spec.label)}</span>
       <div className="tv-row">
         {items.map((row) => (
-          <MediaCard key={row.id} row={row} density="tenfoot" resume={spec.resume} onSelect={noop} onPlay={play} />
+          <MediaCard key={row.id} row={row} density="tenfoot" resume={spec.resume} onSelect={click} onPlay={play} onPointerDown={holdForOptions} onContextMenu={tileOptionsMenu} />
         ))}
       </div>
     </section>

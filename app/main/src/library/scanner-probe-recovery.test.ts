@@ -30,7 +30,7 @@ it('recovers an unchanged video after a missing probe, then resumes incremental 
 
     db.setRating(original.id, 4)
     db.setThumbState(original.id, 'thumb', 'failed')
-    vi.mocked(probe).mockResolvedValue({ durationMs: 5000, width: 1920, height: 1080, codec: 'h264' })
+    vi.mocked(probe).mockResolvedValue({ durationMs: 5000, width: 1920, height: 1080, codec: 'h264', vr: {} })
     await scan()
     expect(db.stamp(file)).toMatchObject({ id: original.id, size: original.size, mtime: original.mtime, durationMs: 5000, thumb: 'pending' })
     expect(db.mediaRow(original.id)?.rating).toBe(4)
@@ -60,7 +60,7 @@ it('stops an active scan before it can write or enqueue work after shutdown', as
     const enqueue = vi.fn()
     const write = vi.spyOn(db, 'upsertMedia')
     const scanned = vi.spyOn(db, 'setRootScanned')
-    vi.mocked(probe).mockResolvedValue({ durationMs: 1000, width: 32, height: 18, codec: '' })
+    vi.mocked(probe).mockResolvedValue({ durationMs: 1000, width: 32, height: 18, codec: '', vr: {} })
     const scanner = new Scanner(db, { scriptsFor }, { enqueue, remove: vi.fn() }, { progress: vi.fn(), changed: vi.fn() }, { sync: vi.fn() })
     scanner.scan(root.id)
     await vi.waitFor(() => expect(scriptsFor).toHaveBeenCalled())

@@ -1,4 +1,4 @@
-import type { Projection } from '@shared/projection'
+import { flatEye, type Projection } from '@shared/projection'
 import * as client from '@/engine/client'
 import { side } from '@/engine/side'
 import { on } from '@/ipc'
@@ -7,10 +7,16 @@ import { MAX_BOXES, goonerMask } from '@/state/gooner'
 import * as live from '@/state/live'
 import { useCompare } from '@/state/compare'
 import { usePlayer } from '@/state/player'
-import { useTracking } from '@/state/tracking'
+import { needsFrames, useTracking } from '@/state/tracking'
+import { useVr } from '@/state/vr'
 
 const TRACK_MIN_INTERVAL_MS = 1000 / 30
 const RESIZE_SETTLE_MS = 120
+
+function tracksFrames(): boolean {
+  const tracking = useTracking.getState()
+  return tracking.source !== 'browser' && ((tracking.source === 'player' && needsFrames(tracking)) || client.engine.wantsFrames())
+}
 
 const VS = `#version 300 es
 out vec2 uv;
@@ -32,7 +38,7 @@ uniform float hfov;
 uniform int eyes;
 uniform int eye;
 uniform vec2 outSize;
-uniform vec2 videoSize;
+uniform vec2 eyeSize;
 uniform vec3 look;
 uniform int maskMode;
 uniform float maskLevel;
@@ -84,8 +90,7 @@ vec2 eyeOf(vec2 t) {
 void main() {
   float outA = outSize.x / outSize.y;
   if (mode == 0) {
-    float vidA = videoSize.x / videoSize.y;
-    if (eyes == 1) vidA *= 0.5; else if (eyes == 2) vidA *= 2.0;
+    float vidA = eyeSize.x / eyeSize.y;
     vec2 t = vec2(uv.x, 1.0 - uv.y) - 0.5;
     float s = vidA / outA;
     if (s > 1.005) t.y *= s; else if (s < 0.995) t.x /= s;
@@ -137,7 +142,7 @@ const DEFAULT_LOOK: Look = { yaw: 0, pitch: 0, fov: (90 * Math.PI) / 180 }
 class Stage {
   readonly canvas = document.createElement('canvas')
   private readonly gl: WebGL2RenderingContext
-  private uniforms!: Record<'mode' | 'hfov' | 'eyes' | 'eye' | 'outSize' | 'videoSize' | 'look' | 'maskMode' | 'maskLevel' | 'boxCount' | 'boxes' | 'split', WebGLUniformLocation | null>
+  private uniforms!: Record<'mode' | 'hfov' | 'eyes' | 'eye' | 'outSize' | 'eyeSize' | 'look' | 'maskMode' | 'maskLevel' | 'boxCount' | 'boxes' | 'split', WebGLUniformLocation | null>
   private lost = false
   private tex: WebGLTexture | null = null
   private tex2: WebGLTexture | null = null
@@ -151,6 +156,7 @@ class Stage {
   private frameSource: { path: string | null; seekGeneration: number; timeMs: number } | null = null
   private slot: HTMLElement | null = null
   private shown = true
+  private headset = useVr.getState().active
   private presenting = true
   private projection: Projection
   private fitted = { w: 0, h: 0 }
@@ -205,6 +211,11 @@ class Stage {
       this.shown = shown
       this.updatePresenting()
     })
+    useVr.subscribe((s) => {
+      if (s.active === this.headset) return
+      this.headset = s.active
+      this.updatePresenting()
+    })
 
     canvas.addEventListener('pointerdown', this.onPointerDown)
     canvas.addEventListener('pointermove', this.onPointerMove)
@@ -229,7 +240,7 @@ class Stage {
     gl.uniform1i(u('tex2'), 1)
     gl.uniform1i(u('bgra'), client.engine.bgra() ? 1 : 0)
     gl.uniform1i(u('split'), this.split ? 1 : 0)
-    this.uniforms = { mode: u('mode'), hfov: u('hfov'), eyes: u('eyes'), eye: u('eye'), outSize: u('outSize'), videoSize: u('videoSize'), look: u('look'), maskMode: u('maskMode'), maskLevel: u('maskLevel'), boxCount: u('boxCount'), boxes: u('boxes'), split: u('split') }
+    this.uniforms = { mode: u('mode'), hfov: u('hfov'), eyes: u('eyes'), eye: u('eye'), outSize: u('outSize'), eyeSize: u('eyeSize'), look: u('look'), maskMode: u('maskMode'), maskLevel: u('maskLevel'), boxCount: u('boxCount'), boxes: u('boxes'), split: u('split') }
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4)
   }
 
@@ -280,7 +291,7 @@ class Stage {
   }
 
   private updatePresenting() {
-    const want = this.shown && this.slot !== null
+    const want = this.shown && (this.headset ? tracksFrames() : this.slot !== null)
     if (want === this.presenting) return
     this.presenting = want
     client.engine.setPresenting(want)
@@ -411,14 +422,16 @@ class Stage {
     gl.uniform1i(u.eyes, p.layout === 'sbs' ? 1 : p.layout === 'ou' ? 2 : 0)
     gl.uniform1i(u.eye, p.swapEyes ? 1 : 0)
     gl.uniform2f(u.outSize, this.texW, this.texH)
-    gl.uniform2f(u.videoSize, client.engine.videoWidth() || 16, client.engine.videoHeight() || 9)
+    const shown = flatEye(p, client.engine.videoWidth() || 16, client.engine.videoHeight() || 9)
+    gl.uniform2f(u.eyeSize, shown.width, shown.height)
     gl.uniform3f(u.look, l.yaw, l.pitch, l.fov)
     gl.drawArrays(gl.TRIANGLES, 0, 3)
   }
 
   private readonly frame = () => {
     requestAnimationFrame(this.frame)
-    if (this.slot && this.presenting && !this.lost) {
+    if (this.headset) this.updatePresenting()
+    if ((this.slot || this.headset) && this.presenting && !this.lost) {
       const vw = client.engine.videoWidth()
       const vh = client.engine.videoHeight()
       if (this.resizeRetryAt || (vw > 0 && vh > 0 && (vw !== this.fitted.w || vh !== this.fitted.h))) this.layout()
@@ -444,8 +457,7 @@ class Stage {
         this.mips = false
         this.applyMask(now)
         this.draw()
-        const trackingSource = useTracking.getState().source
-        if (trackingSource !== 'browser' && (trackingSource === 'player' || client.engine.wantsFrames())) {
+        if (tracksFrames()) {
           if (now - this.lastTrack >= TRACK_MIN_INTERVAL_MS) {
             this.lastTrack = now
             const f = toRgb(buffer, this.texW, this.texH, client.engine.bgra())

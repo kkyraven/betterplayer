@@ -1,5 +1,6 @@
 import { useEffect, useRef, type ReactNode } from 'react'
 import { focusFirst } from '@/input/spatialNav'
+import { useUi } from '@/state/ui'
 import './tv.css'
 
 interface Props {
@@ -19,7 +20,7 @@ export function TvSheet({ title, children }: Props) {
   }, [])
   return (
     <>
-      <div className="tv-scrim" />
+      <div className="tv-scrim" onClick={() => useUi.getState().setTvOverlay('none')} />
       <div ref={ref} className="tv-sheet" role="dialog" aria-label={title} data-nav-trap>
         <h2>{title}</h2>
         <div className="tv-sheet-body">{children}</div>

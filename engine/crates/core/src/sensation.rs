@@ -6,6 +6,7 @@ const RESUME: Duration = Duration::from_millis(500);
 pub(crate) struct Sensation {
     resume_at: Option<Instant>,
     halted: bool,
+    held: bool,
 }
 
 impl Sensation {
@@ -28,6 +29,17 @@ impl Sensation {
         self.resume_at = None;
     }
 
+    pub fn hold(&mut self, held: bool, now: Instant) {
+        if self.held && !held && !self.halted {
+            self.resume_at = Some(self.resume_at.map_or(now, |at| at.max(now)));
+        }
+        self.held = held;
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self { held: self.held, ..Self::default() };
+    }
+
     pub fn is_halted(&self) -> bool {
         self.halted
     }
@@ -40,7 +52,7 @@ impl Sensation {
     }
 
     pub fn scale(&mut self, now: Instant) -> f64 {
-        if self.halted {
+        if self.halted || self.held {
             return 0.0;
         }
         let Some(at) = self.resume_at else { return 1.0 };
@@ -105,6 +117,34 @@ mod tests {
         assert_eq!(s.scale(now + Duration::from_millis(1250)), 0.5);
         assert_eq!(s.scale(now + Duration::from_millis(1500)), 1.0);
         assert_eq!(s.scale(now + Duration::from_secs(30)), 1.0);
+    }
+
+    #[test]
+    fn hold_outlasts_play_and_reset_then_releases_with_a_ramp() {
+        let now = Instant::now();
+        let mut s = Sensation::default();
+        s.hold(true, now);
+        s.resume_from_halt(now);
+        s.reset();
+        assert_eq!(s.scale(now + Duration::from_secs(3600)), 0.0);
+        s.hold(false, now + Duration::from_secs(3600));
+        assert_eq!(s.scale(now + Duration::from_millis(3600250)), 0.5);
+        assert_eq!(s.scale(now + Duration::from_millis(3600500)), 1.0);
+    }
+
+    #[test]
+    fn releasing_a_hold_keeps_a_timed_pause_and_a_halt() {
+        let now = Instant::now();
+        let mut s = Sensation::default();
+        assert!(s.stop(10.0, now));
+        s.hold(true, now);
+        s.hold(false, now + Duration::from_secs(1));
+        assert_eq!(s.scale(now + Duration::from_secs(5)), 0.0);
+        assert_eq!(s.scale(now + Duration::from_millis(10250)), 0.5);
+        s.halt();
+        s.hold(true, now);
+        s.hold(false, now);
+        assert_eq!(s.scale(now + Duration::from_secs(60)), 0.0);
     }
 
     #[test]

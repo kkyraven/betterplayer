@@ -12,8 +12,11 @@ import type { AlPersona, ChatMessage, ChatReply, ChatTool, DomAccount, DomAiSett
 import type { MatcherReport, MatcherResolveResult, OrphanSet } from './matcher'
 import type { DropResult, FolderNode, LibraryChange, LibraryCounts, LibraryRoot, MediaDetail, MediaPage, MediaQuery, MediaRow, Playlist, ScanProgress, Tag, TagUndo } from './library'
 import type { PlayerCommand, PlayingState, RemoteSourceStatus } from './peer'
+import type { QuestHello, QuestToyCommand, QuestToys } from './quest'
+import type { VrCommand, VrDeckState, VrPlayerState } from './vr'
 import type { RemoteLoad, ServerInput } from './remote'
 import type { PerVideoSettings, Settings } from './settings'
+import type { ResolvedProjection } from './projection'
 import type { Cue, SubtitleTrack } from './subtitles'
 import type { UpdateState } from './update'
 import type { SavedSession, SessionHistory, SessionRun, SessionSetup } from './session'
@@ -100,10 +103,13 @@ export interface IpcContract {
   'update:install': () => void
   'window:displayHz': () => number
   'app:reportError': (message: string) => void
+  'app:copyDebugInfo': () => void
   'settings:get': () => Settings
   'settings:set': (settings: Settings) => void
   'video:get': (path: string) => PerVideoSettings | null
   'video:set': (path: string, settings: PerVideoSettings) => void
+  'video:overrideCount': () => number
+  'video:resetOverrides': () => number
   'generated:get': (key: string) => GeneratedResult | null
   'generated:put': (key: string, hash: string, scripts: GeneratedScriptRow[]) => void
   'library:roots': () => LibraryRoot[]
@@ -120,6 +126,7 @@ export interface IpcContract {
   'library:jump': (query: MediaQuery, prefix: string) => { index: number; id: number } | null
   'library:reshuffle': () => void
   'library:media': (id: number) => MediaDetail | null
+  'library:projection': (path: string) => ResolvedProjection
   'library:suggestions': (id: number) => MediaRow[]
   'library:scriptFolders': (path: string) => Promise<string[]>
   'library:byPath': (path: string) => MediaDetail | null
@@ -174,6 +181,12 @@ export interface IpcContract {
   'remote:playing': () => PlayingState
   'remote:scripts': (url: string) => string | null
   'player:control': (command: PlayerCommand) => void
+  'remote:toys': (state: QuestToys, host: string | null) => void
+  'vr:start': () => void
+  'vr:stop': () => void
+  'vr:state': (state: VrPlayerState) => void
+  'vr:panelState': () => VrDeckState | null
+  'vr:command': (command: VrCommand) => void
   'chaster:status': () => ChasterStatus
   'account:status': () => AccountStatus
   'account:token': () => string | null
@@ -228,6 +241,7 @@ export interface IpcContract {
   'downloads:default': () => DownloadDestination | null
   'downloads:setDefault': (destination: DownloadDestination | null) => void
   'browser:close': (id: number) => void
+  'browser:tabMenu': (id: number) => void
   'browser:activate': (id: number) => void
   'browser:navigate': (id: number, url: string) => void
   'browser:back': (id: number) => void
@@ -280,8 +294,10 @@ export interface IpcContract {
   'dom:refreshPersona': (domId: string) => DomProfile
   'dom:memories': (domId: string) => DomMemory[]
   'dom:remember': (domId: string, kind: DomMemoryKind, content: string) => DomMemory
-  'dom:forget': (domId: string, memoryId: string) => void
+  'dom:forget': (memoryId: string) => void
   'dom:forgetAll': (domId: string) => void
+  'dom:pullMemories': (domId: string) => DomMemory[]
+  'dom:pushMemories': (domId: string, memoryIds: string[]) => DomMemory[]
   'dom:chat': (messages: ChatMessage[], tools: ChatTool[], freeMinutes: boolean) => ChatReply
   'dom:image': (domId: string, pose: DomPose) => string
   'dom:comfyFiles': (url: string) => { checkpoints: string[]; loras: string[] }
@@ -314,6 +330,13 @@ export interface IpcEvents {
   'remote:source': RemoteSourceStatus
   'remote:playing': PlayingState
   'player:control': PlayerCommand
+  'vr:command': VrCommand
+  'vr:state': VrDeckState
+  'vr:ended': string | null
+  'headset:hello': QuestHello & { host: string }
+  'headset:bye': { host: string }
+  'headset:stop': { host: string }
+  'headset:toys': QuestToyCommand & { host: string }
   'chaster:status': ChasterStatus
   'account:status': AccountStatus
   'browser:tabs': BrowserTab[]

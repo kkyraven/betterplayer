@@ -1,4 +1,4 @@
-import { app, safeStorage, session, webFrameMain, WebContentsView, type BrowserWindow, type IpcMain, type IpcMainEvent } from 'electron'
+import { app, Menu, safeStorage, session, webFrameMain, WebContentsView, type BrowserWindow, type IpcMain, type IpcMainEvent, type MenuItemConstructorOptions } from 'electron'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -16,6 +16,7 @@ import { BrowserDownloads, type OrdinaryBrowserDownload } from './downloads'
 import { downloadContextForNavigation, relatedNavigation, reusableDownload, type DownloadOwner, type RelatedDownloadContext } from './download-context'
 import type { SourceReveal, TransferRequest, TransferResult } from '../downloads/transport'
 import { nextZoom, zoomStep } from './zoom'
+import { t } from '../i18n'
 
 export type Emit = <E extends IpcEvent>(event: E, payload: IpcEvents[E]) => void
 
@@ -609,6 +610,28 @@ export class BrowserTabs {
     if (this.activeId === id) this.activeId = this.tabList[Math.min(index, this.tabList.length - 1)]?.id ?? null
     this.layout()
     this.push()
+  }
+
+  tabMenu(id: number) {
+    const index = this.tabList.findIndex((tab) => tab.id === id)
+    const tab = this.tabList[index]
+    if (!tab || this.win.isDestroyed()) return
+    const { url, title } = this.toTab(tab)
+    const bookmarked = this.saved.bookmarks.some((bookmark) => bookmark.url === url)
+    const left = this.tabList.slice(0, index)
+    const right = this.tabList.slice(index + 1)
+    const items: MenuItemConstructorOptions[] = []
+    if (webUrl(url)) items.push({ label: t(bookmarked ? 'browser.addr.removeBookmark' : 'browser.tab.bookmark'), click: () => this.toggleBookmark(url, title) }, { type: 'separator' })
+    items.push({ label: t('browser.tab.close'), click: () => this.close(id) })
+    if (right.length) items.push({ label: t('browser.tab.closeRight'), click: () => this.closeAllBut(id, right) })
+    if (left.length) items.push({ label: t('browser.tab.closeLeft'), click: () => this.closeAllBut(id, left) })
+    if (left.length && right.length) items.push({ label: t('browser.tab.closeOthers'), click: () => this.closeAllBut(id, [...left, ...right]) })
+    Menu.buildFromTemplate(items).popup({ window: this.win })
+  }
+
+  private closeAllBut(keep: number, tabs: Tab[]) {
+    if (tabs.some((tab) => tab.id === this.activeId)) this.activate(keep)
+    for (const tab of tabs) this.close(tab.id)
   }
 
   activate(id: number) {

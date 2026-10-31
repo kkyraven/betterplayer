@@ -1,6 +1,6 @@
 import { t } from '../../i18n'
 import { createHash } from 'node:crypto'
-import { detectProjection, type Projection } from '@shared/projection'
+import { resolveProjection, type Projection } from '@shared/projection'
 import { normalizeSearch, type ImportedPerformer } from '@shared/search'
 import type { ServerRoot } from '../db'
 import type { Adapter, RemoteEntry, RemoteScene, RemoteWrite } from './adapter'
@@ -200,7 +200,7 @@ export class HereSphereAdapter implements Adapter {
       width: best.width ?? 0,
       height: best.height ?? best.resolution ?? 0,
       codec: '',
-      projection: sceneProjection(doc) ?? detectProjection(title),
+      projection: sceneProjection(doc) ?? resolveProjection({ name: title, width: best.width ?? 0, height: best.height ?? best.resolution ?? 0 }).projection,
       rating: sceneRating(doc),
       favourite: doc.isFavorite === true,
       tags: ownTags(tags),

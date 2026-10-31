@@ -1,6 +1,7 @@
 import type { MessageKey } from '@shared/i18n'
 import { enhanceCapabilities } from '@/engine/client'
 import { skipGap } from '@/state/gapSkip'
+import { useDevices } from '@/state/devices'
 import { useEditor } from '@/state/editor'
 import { usePlayer } from '@/state/player'
 import { useSession } from '@/state/session'
@@ -52,6 +53,7 @@ export const ACTIONS = {
   'Media.Offset.Later': player('input.action.mediaOffsetLater', () => usePlayer.getState().setGlobalOffset(usePlayer.getState().video.globalOffsetMs + 10)),
   'Media.Offset.EarlierLong': player('input.action.mediaOffsetEarlierLong', () => usePlayer.getState().setGlobalOffset(usePlayer.getState().video.globalOffsetMs - 100)),
   'Media.Offset.LaterLong': player('input.action.mediaOffsetLaterLong', () => usePlayer.getState().setGlobalOffset(usePlayer.getState().video.globalOffsetMs + 100)),
+  'Devices.Hold.Toggle': anywhere('input.action.devicesHoldToggle', () => useDevices.getState().setHeld(!useDevices.getState().held)),
   'Video.Upscaling.Toggle': anywhere('input.action.videoUpscalingToggle', toggleUpscaling),
   'Video.FrameGen.Toggle': anywhere('input.action.videoFrameGenToggle', toggleFrameGen),
   'Window.Fullscreen.Toggle': anywhere('input.action.windowFullscreenToggle', () => void useUi.getState().toggleFullscreen()),

@@ -9,7 +9,7 @@ import { normaliseSource } from '@shared/peer'
 import type { Region } from '@shared/browser'
 import { LANGUAGE_PREFERENCES } from '@shared/i18n'
 import { GAME_KINDS } from '@shared/game'
-import { BEAT_BOUNCE_DEPTH, BEAT_BOUNCE_SPEED, CUT_SENSITIVITIES, DEFAULT_MODELS, DETECT_EVERY_DEFAULT_MS, HERO_DIRECTIONS, HERO_FLOURISHES, EASE_DEFAULT_MS, INTENSITY_MAX, MODEL_KINDS, PACE_DEFAULT, REGION_PADDING_DEFAULT, REGION_SOURCES, REGION_TARGETS, TRACK_AXIS_IDS, TRACK_SOURCES, defaultTrackAxes, normalizeHeroMusic, type HeroColourRules, type ModelChoice, type TrackAxesConfig, type TrackingSettings } from '@shared/tracking'
+import { BEAT_BOUNCE_DEPTH, BEAT_BOUNCE_SPEED, CUT_SENSITIVITIES, DEFAULT_MODELS, DETECT_EVERY_DEFAULT_MS, HERO_DIRECTIONS, HERO_FLOURISHES, EASE_DEFAULT_MS, INTENSITY_MAX, MODEL_KINDS, MUSIC_FILLS, PACE_DEFAULT, REGION_PADDING_DEFAULT, REGION_SOURCES, REGION_TARGETS, TRACK_AXIS_IDS, TRACK_FILLS, TRACK_SOURCES, defaultTrackAxes, normalizeHeroMusic, normalizeZoneEffects, type HeroColourRules, type ModelChoice, type MusicFill, type OwnAxes, type TrackAxesConfig, type TrackAxisConfig, type TrackFill, type TrackingSettings } from '@shared/tracking'
 import {
   DLSS_BUFFER_MAX,
   DLSS_BUFFER_MIN,
@@ -195,8 +195,40 @@ function readRegion(raw: unknown): Region | null {
   return { x, y, w, h }
 }
 
+const finite = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
+
+function readOwn(raw: unknown): OwnAxes | undefined {
+  if (!isObject(raw)) return undefined
+  const own: OwnAxes = {}
+  const clamp = (v: unknown, lo: number, hi: number) => {
+    const n = finite(v)
+    return n === undefined ? undefined : Math.max(lo, Math.min(hi, n))
+  }
+  for (const id of TRACK_AXIS_IDS) {
+    const row = raw[id]
+    if (!isObject(row)) continue
+    const source = TRACK_SOURCES.find((s) => s === row.source)
+    const intensity = clamp(row.intensity, 0, INTENSITY_MAX)
+    const min = clamp(row.min, 0, 1)
+    const max = clamp(row.max, 0, 1)
+    const smoothingMs = clamp(row.smoothingMs, 0, Infinity)
+    const entry: Partial<TrackAxisConfig> = {
+      ...(source ? { source } : {}),
+      ...(intensity !== undefined ? { intensity } : {}),
+      ...(min !== undefined ? { min } : {}),
+      ...(max !== undefined ? { max } : {}),
+      ...(smoothingMs !== undefined ? { smoothingMs } : {}),
+      ...(typeof row.invert === 'boolean' ? { invert: row.invert } : {}),
+    }
+    if (Object.keys(entry).length > 0) own[id] = entry
+  }
+  return own
+}
+
 function readTracking(raw: unknown): TrackingSettings | undefined {
   if (!isObject(raw)) return undefined
+  const own = readOwn(raw.own)
+  const sensitivity = finite(raw.sensitivity)
   const regionSource = REGION_SOURCES.find((k) => k === raw.regionSource)
   const regionTarget = REGION_TARGETS.find((k) => k === raw.regionTarget)
   const beatTempoFactor = typeof raw.beatTempoFactor === 'number' && raw.beatTempoFactor > 0 ? raw.beatTempoFactor : undefined
@@ -211,8 +243,11 @@ function readTracking(raw: unknown): TrackingSettings | undefined {
     }
   }
   return {
-    axes: readTrackAxes(raw.axes, defaultTrackAxes()),
-    sensitivity: num(raw.sensitivity, 1),
+    ...(isObject(raw.axes) ? { axes: readTrackAxes(raw.axes, defaultTrackAxes()) } : {}),
+    ...(own ? { own } : {}),
+    ...(typeof raw.on === 'boolean' ? { on: raw.on } : {}),
+    ...(raw.notMusic === true ? { notMusic: true as const } : {}),
+    ...(sensitivity !== undefined ? { sensitivity } : {}),
     region: readRegion(raw.region),
     ...(regionSource ? { regionSource } : {}),
     ...(regionTarget ? { regionTarget } : {}),
@@ -223,6 +258,8 @@ function readTracking(raw: unknown): TrackingSettings | undefined {
     ...(heroDirection ? { heroDirection } : {}),
     ...(Object.keys(heroColours).length ? { heroColours } : {}),
     ...(Object.keys(heroAxisColours).length ? { heroAxisColours } : {}),
+    ...(isObject(raw.zones) ? { zones: normalizeZoneEffects(raw.zones) } : {}),
+    ...(typeof raw.heroFileStamp === 'string' && raw.heroFileStamp ? { heroFileStamp: raw.heroFileStamp } : {}),
   }
 }
 
@@ -452,6 +489,15 @@ function readTheme(raw: unknown): ThemeSettings {
   return { mode: oneOf(t.mode, THEME_MODES, d.mode), accent: oneOf(t.accent, ACCENTS, d.accent), tint: oneOf(t.tint, TINTS, d.tint) }
 }
 
+function legacyFill(axes: TrackAxesConfig, motionDefault: boolean): { fill: TrackFill; musicFill: MusicFill } {
+  const first = TRACK_AXIS_IDS.map((id) => axes[id].source).find((s) => s !== 'off')
+  if (first === undefined) return { fill: 'off', musicFill: 'auto' }
+  if (first === 'beat') return { fill: 'beat', musicFill: 'auto' }
+  if (first === 'ai-music') return { fill: 'ai-motion', musicFill: 'ai-music' }
+  if (first === 'hero') return { fill: 'ai-motion', musicFill: 'auto' }
+  return { fill: motionDefault ? 'ai-motion' : 'off', musicFill: 'auto' }
+}
+
 function readCurrent(data: Json): Settings {
   const downloads = isObject(data.downloads) ? data.downloads : {}
   const destination = isObject(downloads.destination) ? downloads.destination : null
@@ -482,6 +528,9 @@ function readCurrent(data: Json): Settings {
   const intifacePort = Math.round(num(intiface.port, INTIFACE_PORT_DEFAULT))
   const recent = Array.isArray(general.recent) ? general.recent.filter((p): p is string => typeof p === 'string') : []
   const outputs = Array.isArray(devices.outputs) ? devices.outputs.map(readOutput).filter((o) => o !== null) : []
+  const trackAxes = readTrackAxes(tracking.axes, defaultTrackAxes())
+  const motionDefault = bool(tracking.motionDefault, true)
+  const derived = legacyFill(trackAxes, motionDefault)
   return {
     version: SETTINGS_VERSION,
     downloads: { destination: downloadDestination },
@@ -520,7 +569,7 @@ function readCurrent(data: Json): Settings {
       faptapHelpSeen: bool(intiface.faptapHelpSeen, false),
     },
     tracking: {
-      axes: readTrackAxes(tracking.axes, defaultTrackAxes()),
+      axes: trackAxes,
       sensitivity: num(tracking.sensitivity, 1),
       flourishes: bool(tracking.flourishes, true),
       cutSensitivity: oneOf(tracking.cutSensitivity, CUT_SENSITIVITIES, 'normal'),
@@ -528,7 +577,10 @@ function readCurrent(data: Json): Settings {
       clampJumps: bool(tracking.clampJumps, true),
       models: readModels(tracking.models, str(tracking.model)),
       defaultPace: Math.max(0, Math.min(1, num(tracking.defaultPace, PACE_DEFAULT))),
-      motionDefault: bool(tracking.motionDefault, true),
+      fill: oneOf(tracking.fill, TRACK_FILLS, derived.fill),
+      musicFill: oneOf(tracking.musicFill, MUSIC_FILLS, derived.musicFill),
+      fillScripted: bool(tracking.fillScripted, false),
+      motionDefault,
       generateForScripted: bool(tracking.generateForScripted, true),
       regionSource: oneOf(tracking.regionSource, ['auto', 'centre'] as const, 'auto'),
       detectEveryMs: Math.max(100, num(tracking.detectEveryMs, DETECT_EVERY_DEFAULT_MS)),

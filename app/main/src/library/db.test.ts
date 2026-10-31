@@ -237,3 +237,27 @@ describe('tag manager edits', () => {
     }
   })
 })
+
+it('adds the VR facts columns to v22 rows as not captured, and a changed file drops its picture check', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bp-vr-migration-'))
+  const path = join(dir, 'library.db')
+  try {
+    const db = new LibraryDb(path)
+    const rootId = db.addRoot('/fictional').id
+    const media = { rootId, path: '/fictional/clip.mp4', title: 'clip', folder: '', size: 1, mtime: 1, durationMs: 1000, width: 5760, height: 2880, codec: 'hevc', projection: 'equirect180' as const }
+    const id = db.upsertMedia(media, 1)
+    db.close()
+    const legacy = new DatabaseSync(path)
+    legacy.exec('ALTER TABLE media DROP COLUMN vr_probe; ALTER TABLE media DROP COLUMN vr_look; PRAGMA user_version = 22')
+    legacy.close()
+    const migrated = new LibraryDb(path)
+    try {
+      expect(migrated.stamp(media.path)).toMatchObject({ id, projection: 'equirect180', width: 5760, height: 2880, vrProbe: '', vrLook: '' })
+      expect(migrated.projectionFacts(media.path)?.input).toEqual({ name: 'clip', width: 5760, height: 2880, container: undefined, picture: undefined })
+      migrated.setVrProbe(id, '{}')
+      migrated.setVrLook(id, '{"lr":0.1,"tb":0.1,"wrap":40,"corner":1,"frames":20}')
+      migrated.upsertMedia({ ...media, mtime: 2, vrProbe: '{"stereo":"sbs"}' }, 2)
+      expect(migrated.stamp(media.path)).toMatchObject({ vrProbe: '{"stereo":"sbs"}', vrLook: '' })
+    } finally { migrated.close() }
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})

@@ -53,6 +53,7 @@ export const PlaylistCard = memo(function PlaylistCard({ entry, density = 'comfo
           </span>
         </div>
       </div>
+      <div className="strip-space" aria-hidden />
       <div className="text">
         <div className="title" title={entry.name}>
           {entry.name}

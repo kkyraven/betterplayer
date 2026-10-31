@@ -36,7 +36,7 @@ interface UiState extends TvNav {
   setDeviceWizard: (open: boolean) => void
   firstStart: boolean
   setFirstStart: (on: boolean) => void
-  setMediaCentre: (on: boolean) => void
+  setMediaCentre: (on: boolean, opts?: { fullscreen?: boolean; auto?: boolean }) => void
   setTvTab: (tab: TvTab) => void
   pushTvView: (view: TvView) => void
   setTvOverlay: (overlay: TvOverlay) => void
@@ -68,10 +68,10 @@ export const useUi = create<UiState>()((set, get) => ({
   setDeviceWizard: (deviceWizard) => set({ deviceWizard }),
   firstStart: process.argv.includes('--bp-first-start'),
   setFirstStart: (firstStart) => set({ firstStart }),
-  setMediaCentre: (mediaCentre) => {
-    if (mediaCentre) track('mediacentre')
+  setMediaCentre: (mediaCentre, { fullscreen = mediaCentre, auto = false } = {}) => {
+    if (mediaCentre && !auto) track('mediacentre')
     set({ mediaCentre, tvViews: [], tvOverlay: 'none' })
-    void get().toggleFullscreen(mediaCentre)
+    void get().toggleFullscreen(fullscreen)
   },
   setTvTab: (tvTab) => set((s) => ({ tvTab, tvViews: tvTab === 'nowplaying' ? s.tvViews : [], tvOverlay: 'none' })),
   pushTvView: (view) => set((s) => ({ tvViews: [...s.tvViews, view], tvOverlay: 'none', tvTab: s.tvTab === 'nowplaying' ? 'library' : s.tvTab })),

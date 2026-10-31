@@ -3,6 +3,7 @@
 .plmos.n1 { grid-template-columns: 1fr; grid-template-rows: 1fr; }
 .plmos.n2 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr; }
 .plmos.n3 img:first-child { grid-column: 1 / -1; }
+.card .strip-space { height: 4px; }
 
 .card .badge-pl {
   display: inline-flex; align-items: center; gap: 5px;

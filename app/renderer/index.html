@@ -7,10 +7,15 @@
   </head>
   <body>
     <div id="root">
-      <div style="position: fixed; inset: 0; background: #0a0c10; color: rgba(255, 255, 255, 0.75); font: 14px/1.6 system-ui, sans-serif; display: flex; align-items: center; justify-content: center; text-align: center; padding: 24px">
-        <p>Better Player could not start.<br />The error log is process-errors.log in the app's data folder.</p>
+      <div style="position: fixed; inset: 0; background: #0a0c10; color: rgba(255, 255, 255, 0.75); font: 14px/1.6 system-ui, sans-serif; display: flex; flex-direction: column; gap: 16px; align-items: center; justify-content: center; text-align: center; padding: 24px">
+        <p style="margin: 0">Better Player could not start.<br />The error log is process-errors.log in the app's data folder.</p>
+        <button id="boot-copy" type="button" style="font: inherit; color: inherit; background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 8px; padding: 6px 14px; cursor: pointer">Copy debug info</button>
       </div>
     </div>
+    <script>
+      document.getElementById('boot-copy').onclick = (e) =>
+        window.require('electron').ipcRenderer.invoke('app:copyDebugInfo').then(() => { e.target.textContent = 'Copied' })
+    </script>
     <script type="module" src="./src/main.tsx"></script>
   </body>
 </html>

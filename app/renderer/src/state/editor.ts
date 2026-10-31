@@ -78,6 +78,7 @@ const RECORD_HZ = 60
 const RECORD_EPS = 0.02
 const FILL_EPS = 0.01
 const DEFAULT_PERIOD_MS = 800
+const MOTION_LOAD_WAIT_MS = 30_000
 
 export interface Edit {
   lanes: Array<{ axis: AxisId; change: LaneChange }>
@@ -340,6 +341,14 @@ function lanesFromFiles(files: EditorScript[]): EditorDocument {
 }
 
 const nowMs = () => live.get().timeMs
+
+async function motionReady(): Promise<boolean> {
+  useTracking.getState().loadModel('motion')
+  for (let waited = 0; engine.modelState('motion').status === 'loading' && waited < MOTION_LOAD_WAIT_MS; waited += 100) {
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  return engine.modelState('motion').status === 'ready'
+}
 
 export const useEditor = create<EditorState>()((set, get) => {
   const pushTimers = new Map<AxisId, number>()
@@ -1109,11 +1118,13 @@ export const useEditor = create<EditorState>()((set, get) => {
       let points: EditorPoint[] = []
       try {
         if (s.ai.source === 'ai-motion') {
-          if (engine.modelState('motion').status !== 'ready') {
+          set({ analysing: true })
+          const ready = await motionReady()
+          if (opening !== stamp) return
+          if (!ready) {
             set({ message: t('editor.message.motionNotLoaded') })
             return
           }
-          set({ analysing: true })
           const r = await engine.analyseRange({ startMs, endMs, region: s.ai.region ?? undefined, model: true })
           const axis = r.model.find((m) => m.axis === lane.axis)
           if (axis) for (let i = 0; i < axis.at.length; i++) points.push({ at: round(axis.at[i] ?? 0), pos: mapPos(axis.pos[i] ?? 0.5) })

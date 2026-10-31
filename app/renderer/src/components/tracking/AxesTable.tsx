@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import { AXIS_NAME } from '@shared/axes'
 import { BEAT_SPEEDS, BROWSER_STROKE_SOURCES, DEFAULT_MODELS, INTENSITY_MAX, PLAYER_ONLY_SOURCES, SMOOTHING_MAX_MS, TRACK_AXES, TRACK_SOURCES, TRACK_SOURCE_LABEL, beatSpeed, entitledMusicModel, isSupporterModel, type ModelKind, type TrackAxesConfig, type TrackAxisConfig, type TrackAxisId, type TrackSource } from '@shared/tracking'
-import { models } from '@/engine/client'
+import type { Resolved } from '@shared/trackingRules'
 import { isPremium, useAccount } from '@/state/account'
 import { useT } from '@/state/i18n'
 import { useSettings } from '@/state/settings'
@@ -11,27 +11,27 @@ import { Slider } from '@/components/ui/Slider'
 import { Stepper } from '@/components/ui/Stepper'
 import { Switch } from '@/components/ui/Switch'
 import { cx } from '@/lib/cx'
+import { shippedMusicModels } from './MusicFillSelect'
 import './AxesTable.css'
 
 const SOURCE_MODEL: Partial<Record<TrackSource, ModelKind>> = { 'ai-motion': 'motion', 'ai-music': 'music' }
-let cachedMusicModels: { id: string; label: string }[] | null = null
-function shippedMusicModels(): { id: string; label: string }[] {
-  return (cachedMusicModels ??= models()
-    .filter((m) => m.kind === 'music')
-    .map((m) => ({ id: m.id, label: m.label })))
-}
 const percent = (v: number) => `${v}%`
+
+const AUTO = 'auto'
 
 interface Props {
   axes: TrackAxesConfig
   onChange: (id: TrackAxisId, patch: Partial<TrackAxisConfig>) => void
+  mode: 'defaults' | 'video'
+  rules?: Pick<Resolved, 'auto' | 'picked'> | null
   scripted?: ReadonlySet<string>
   beat?: boolean
   present?: Partial<Record<ModelKind, boolean>>
   faptap?: 'ready' | 'off'
+  twistBeat?: boolean
 }
 
-export function AxesTable({ axes, onChange, scripted, beat = true, present, faptap }: Props) {
+export function AxesTable({ axes, onChange, mode, rules, scripted, beat = true, present, faptap, twistBeat = false }: Props) {
   const t = useT()
   const premium = useAccount(isPremium)
   const chosenMusic = useSettings((s) => s.settings?.tracking.models.music ?? DEFAULT_MODELS.music)
@@ -47,9 +47,20 @@ export function AxesTable({ axes, onChange, scripted, beat = true, present, fapt
     await refreshModels()
   }
   const pick = (id: TrackAxisId, value: string) => {
+    if (value === AUTO) {
+      const source = rules?.auto[id]
+      if (source) onChange(id, { source })
+      return
+    }
     const [source, model] = value.split('#') as [TrackSource, string | undefined]
     if (model) void chooseMusic(model)
     onChange(id, { source })
+  }
+  const autoOption = (id: TrackAxisId, funscript: boolean) => {
+    const source = rules?.auto[id]
+    if (!source) return []
+    const label = source === 'off' && funscript ? t('tracking.axesTable.funscript') : t(TRACK_SOURCE_LABEL[source])
+    return [{ value: AUTO, label: t('settings.tracking.autoSource', { source: label }) }]
   }
   const options = (stroke: boolean, funscript: boolean) =>
     TRACK_SOURCES.filter((value) => (beat || !PLAYER_ONLY_SOURCES.includes(value)) && ((stroke && faptap !== undefined) || !BROWSER_STROKE_SOURCES.includes(value))).flatMap((value) => {
@@ -68,23 +79,27 @@ export function AxesTable({ axes, onChange, scripted, beat = true, present, fapt
       return [{ value: value as string, label: value === 'off' && funscript ? t('tracking.axesTable.funscript') : t(TRACK_SOURCE_LABEL[value]), disabled: missing || off, title }]
     })
   const valueOf = (source: TrackSource) => (source === 'ai-music' && musicModels.length > 1 && playing ? `${source}#${playing}` : source)
-  const spreadable = !BROWSER_STROKE_SOURCES.includes(axes.L0.source)
+  const spreadable = mode === 'video' && !BROWSER_STROKE_SOURCES.includes(axes.L0.source)
   const applyAll = () => {
     for (const { id } of TRACK_AXES) if (id !== 'L0') onChange(id, { source: axes.L0.source })
   }
   return (
-    <div className="axes-table">
+    <div className={cx('axes-table', mode)}>
       <div className="axrow head">
         <span />
         <span>{t('tracking.axis')}</span>
-        <span className="srchead">
-          {t('tracking.axesTable.source')}
-          {spreadable && (
-            <button type="button" className="all" onClick={applyAll} title={t('tracking.axesTable.putEveryAxis', { source: t(TRACK_SOURCE_LABEL[axes.L0.source]) })}>
-              {t('tracking.axesTable.allFrom', { axis: 'L0' })}
-            </button>
-          )}
-        </span>
+        {mode === 'defaults' ? (
+          <span>{t('common.on')}</span>
+        ) : (
+          <span className="srchead">
+            {t('tracking.axesTable.source')}
+            {spreadable && (
+              <button type="button" className="all" onClick={applyAll} title={t('tracking.axesTable.putEveryAxis', { source: t(TRACK_SOURCE_LABEL[axes.L0.source]) })}>
+                {t('tracking.axesTable.allFrom', { axis: 'L0' })}
+              </button>
+            )}
+          </span>
+        )}
         <span>{t('tracking.axesTable.limits')}</span>
         <span>{t('tracking.intensity')}</span>
         <span>{t('tracking.axesTable.smoothing')}</span>
@@ -94,6 +109,8 @@ export function AxesTable({ axes, onChange, scripted, beat = true, present, fapt
         const row = axes[id]
         const off = row.source === 'off'
         const name = t(AXIS_NAME[id])
+        const funscript = scripted?.has(id) ?? false
+        const picked = rules?.picked.includes(id) ?? false
         return (
           <div key={id} className={cx('axrow', off && 'off')}>
             <span className="axis">{id}</span>
@@ -101,7 +118,19 @@ export function AxesTable({ axes, onChange, scripted, beat = true, present, fapt
               {name}
               <span className="comp">{off ? '' : component}</span>
             </span>
-            <Select options={options(id === 'L0', scripted?.has(id) ?? false)} value={valueOf(row.source)} onChange={(v) => pick(id, v)} label={t('tracking.axesTable.sourceLabel', { name })} />
+            {mode === 'defaults' ? (
+              <span className="axon">
+                <Switch data-label={t('common.on')} checked={!off} onCheckedChange={(on) => onChange(id, { source: on ? 'video' : 'off' })} label={name} />
+              </span>
+            ) : (
+              <Select
+                className={cx(picked && 'picked')}
+                options={[...autoOption(id, funscript), ...options(id === 'L0', funscript)]}
+                value={rules && !picked ? AUTO : valueOf(row.source)}
+                onChange={(v) => pick(id, v)}
+                label={t('tracking.axesTable.sourceLabel', { name })}
+              />
+            )}
             <div className={cx('sl', off && 'dim')} data-label={t('tracking.axesTable.limits')}>
               <Slider
                 value={[Math.round(row.min * 100), Math.round(row.max * 100)]}
@@ -111,7 +140,7 @@ export function AxesTable({ axes, onChange, scripted, beat = true, present, fapt
                 onValueChange={([min, max]) => onChange(id, { min: (min ?? 0) / 100, max: (max ?? 100) / 100 })}
               />
             </div>
-            {id === 'R0' && row.source === 'beat' ? (
+            {id === 'R0' && (mode === 'defaults' ? twistBeat : row.source === 'beat') ? (
               <Stepper data-label={t('tracking.intensity')} value={BEAT_SPEEDS.indexOf(beatSpeed(row.intensity))} max={2} step={1} format={(v) => ['½×', '1×', '2×'][v] ?? '1×'} label={t('devices.output.axisSpeed', { axis: name })} onChange={(v) => onChange(id, { intensity: BEAT_SPEEDS[v] ?? 1 })} />
             ) : (
               <Stepper data-label={t('tracking.intensity')} value={Math.round(row.intensity * 100)} max={INTENSITY_MAX * 100} label={t('tracking.axesTable.intensityLabel', { name })} onChange={(v) => onChange(id, { intensity: v / 100 })} />

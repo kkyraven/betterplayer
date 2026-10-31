@@ -48,7 +48,14 @@
 .titlebar .win-status-item.icon { width: 26px; padding: 0; justify-content: center; }
 .titlebar .win-status-item svg { width: 14px; height: 14px; }
 .titlebar .win-status-item.icon svg { width: 15px; height: 15px; }
+.titlebar .win-status-item.on { color: var(--accent); }
 .titlebar .win-chastity { font-variant-numeric: tabular-nums; }
+.titlebar .win-status-item.win-held, .titlebar .win-status-item.win-held:hover { color: var(--warn); }
+.hold-toast-region { position: absolute; inset: 0; pointer-events: none; }
+.toast.hold-toast { top: 24px; bottom: auto; pointer-events: none; transition: opacity 400ms var(--ease); }
+.toast.hold-toast.off { opacity: 0; }
+.toast.hold-toast.gone { visibility: hidden; transition: none; }
+.tv .toast.hold-toast { top: 40px; font-size: 18px; min-height: 52px; padding: 0 20px; }
 .titlebar .win-chastity svg { width: 13px; height: 13px; color: var(--text-3); }
 
 .win-menu { z-index: 40; padding: 0; max-height: min(calc(100dvh - 16px), var(--radix-dropdown-menu-content-available-height, calc(100dvh - 16px))); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; min-width: 180px; background: var(--popover); backdrop-filter: var(--blur-strong); -webkit-backdrop-filter: var(--blur-strong); border: 0.5px solid var(--line-2); border-radius: 12px; box-shadow: var(--shadow); }

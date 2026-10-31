@@ -1,5 +1,5 @@
 import { invoke } from '@/ipc'
-import type { Projection } from '@shared/projection'
+import { flatEye, type Projection } from '@shared/projection'
 import { defaultDlss, type DlssSettings, type FrameGenOverride, type UpscalingSettings } from '@shared/settings'
 import { isFree, useAccount } from '@/state/account'
 import type { ModelInfo } from '@shared/tracking'
@@ -38,6 +38,7 @@ export const simplifyIndices: EngineModule['simplifyIndices'] = (...args) => get
 export const beatAnalyse: EngineModule['beatAnalyse'] = (...args) => getMod().beatAnalyse(...args)
 export const beatAnalyseAsync: EngineModule['beatAnalyseAsync'] = (...args) => getMod().beatAnalyseAsync(...args)
 export const beatGenerate: EngineModule['beatGenerate'] = (...args) => getMod().beatGenerate(...args)
+export const vrAvailable: EngineModule['vrAvailable'] = (...args) => getMod().vrAvailable(...args)
 
 export async function readScripts(path: string) {
   return getMod().readScripts(path, await invoke('library:scriptFolders', path))
@@ -60,9 +61,8 @@ export function outputSize(cssWidth: number, cssHeight: number, projection: Proj
   let w = Math.round(cssWidth * dpr)
   let h = Math.round(cssHeight * dpr)
   if (projection.kind === 'flat' && videoWidth > 0 && videoHeight > 0) {
-    const shownW = projection.layout === 'sbs' ? videoWidth / 2 : videoWidth
-    const shownH = projection.layout === 'ou' ? videoHeight / 2 : videoHeight
-    const aspect = shownW / shownH
+    const shown = flatEye(projection, videoWidth, videoHeight)
+    const aspect = shown.width / shown.height
     if (w / h > aspect) w = Math.round(h * aspect)
     else h = Math.round(w / aspect)
     if (projection.layout === 'mono' && !upscalerOn && (w > videoWidth || h > videoHeight)) {

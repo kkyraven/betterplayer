@@ -1,10 +1,11 @@
 import { create } from 'zustand'
 import type { OutputConfig } from '@shared/settings'
+import { hostedNeedsRun } from '@shared/trackingRules'
 import { engine } from '@/engine/client'
 import { invoke } from '@/ipc'
 import { outputName, useDevices, type ConfiguredOutput } from './devices'
 import { t } from './i18n'
-import { currentSetup, runGeneration, savedResult, toRows, waitForAudio, type RunSetup } from './generated'
+import { currentSetup, runGeneration, savedResult, toRows, waitForAudio, waitForModels, type RunSetup } from './generated'
 import { usePlayer } from './player'
 import { useSettings } from './settings'
 import { trackingSettings, useTracking } from './tracking'
@@ -22,14 +23,14 @@ interface RecomputeStore {
 
 const same = (a: RunSetup | null, b: RunSetup) => a !== null && a.key === b.key && a.hash === b.hash
 
-function keepsFileStroke(): boolean {
-  if (useSettings.getState().settings?.tracking.generateForScripted ?? true) return false
-  return useTracking.getState().axes.L0.source === 'off' && usePlayer.getState().scripts.some((s) => s.axis === 'L0')
-}
-
 function hosted(): ConfiguredOutput[] {
   const d = useDevices.getState()
   return d.outputs.filter((o) => HOSTED.includes(o.config.kind) && d.states[o.id]?.status === 'connected')
+}
+
+function needsRun(outputs: ConfiguredOutput[]): boolean {
+  const { axes } = useTracking.getState()
+  return outputs.length === 0 ? Object.values(axes).some((a) => a.source !== 'off') : outputs.some((o) => hostedNeedsRun(o.config.kind, axes))
 }
 
 function label(outputs: ConfiguredOutput[]): string {
@@ -41,6 +42,11 @@ export const useRecompute = create<RecomputeStore>()((set, get) => {
   let installed: RunSetup | null = null
   let declined: RunSetup | null = null
   let running: RunSetup | null = null
+  let waits: AbortController | null = null
+  const stop = () => {
+    waits?.abort()
+    engine.generateCancel()
+  }
 
   const clear = () => {
     if (!installed) return
@@ -51,11 +57,14 @@ export const useRecompute = create<RecomputeStore>()((set, get) => {
 
   const run = async (s: RunSetup, outputs: ConfiguredOutput[]) => {
     running = s
+    const waiting = new AbortController()
+    waits = waiting
     const saved = await savedResult(s)
     if (saved && !stale(s)) {
       engine.setGenerated(saved)
       installed = s
       running = null
+      waits = null
       return
     }
     set({ busy: true, devices: label(outputs), percent: null })
@@ -64,17 +73,19 @@ export const useRecompute = create<RecomputeStore>()((set, get) => {
     if (wasPlaying) player.pause()
     let scripts: Awaited<ReturnType<typeof runGeneration>> | null = null
     try {
-      if (s.sources.has('beat') || s.sources.has('ai-music')) await waitForAudio(s.key).catch(() => undefined)
+      if (s.sources.has('beat') || s.sources.has('ai-music')) await waitForAudio(s.key, waiting.signal).catch(() => undefined)
+      await waitForModels(s.key, s.sources, waiting.signal)
       scripts = await runGeneration((p) => {
         const percent = p.status === 'running' && p.durationMs > 0 ? Math.round((100 * p.timeMs) / p.durationMs) : null
         if (percent !== get().percent) set({ percent })
       })
     } catch (e) {
-      if (engine.generateState().status !== 'cancelled') console.warn('recompute', e)
-      if (!keepsFileStroke()) declined = s
+      if (!waiting.signal.aborted && engine.generateState().status !== 'cancelled') console.warn('recompute', e)
+      if (needsRun(hosted())) declined = s
       clear()
     }
     running = null
+    waits = null
     if (scripts && !stale(s)) {
       const rows = toRows(scripts)
       engine.setGenerated(rows)
@@ -91,17 +102,17 @@ export const useRecompute = create<RecomputeStore>()((set, get) => {
     devices: '',
     percent: null,
     cancel: () => {
-      if (running) engine.generateCancel()
+      if (running) stop()
     },
     check: async () => {
       const s = currentSetup()
-      if (!s || ![...s.sources].some((src) => src !== 'off') || keepsFileStroke()) {
-        if (running) engine.generateCancel()
+      if (!s || !needsRun(hosted())) {
+        if (running) stop()
         else clear()
         return
       }
       if (running) {
-        if (!same(running, s)) engine.generateCancel()
+        if (!same(running, s)) stop()
         return
       }
       if (same(installed, s) || same(declined, s)) return
@@ -110,7 +121,7 @@ export const useRecompute = create<RecomputeStore>()((set, get) => {
         clear()
         return
       }
-      await run(s, outputs)
+      await run(s, outputs.filter((o) => needsRun([o])))
     },
   }
 })

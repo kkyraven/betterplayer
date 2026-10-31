@@ -1,5 +1,5 @@
 import { Check, Film, FolderPlus, Plus, Server, X } from 'lucide-react'
-import { memo, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode, type RefObject } from 'react'
+import { memo, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode, type RefObject } from 'react'
 import type { MessageKey } from '@shared/i18n'
 import { isPlaylist, titleStartsWith, type MediaRow, type Section } from '@shared/library'
 import { FavButton } from '@/components/media/FavButton'
@@ -127,17 +127,11 @@ function Grid() {
   const folders = useLibrary((s) => s.folders)
   const view = useLibrary((s) => s.view)
   const gridSize = useLibrary((s) => s.gridSize)
+  const listId = useLibrary((s) => s.listId)
   const scrollRef = useRef<HTMLDivElement>(null)
   const gridRef = useRef<HTMLDivElement>(null)
-  const { range, scrollToIndex } = useVirtualGrid(scrollRef, gridRef, rows.length, `${view}:${gridSize}`, libraryGridPosition)
+  const { range, scrollToIndex } = useVirtualGrid(scrollRef, gridRef, rows, `${view}:${gridSize}`, listId, libraryGridPosition)
   useTypeAhead(gridRef, scrollToIndex)
-  const mix = useLibrary((s) => s.mix)
-  const shownMix = useRef(mix)
-  useLayoutEffect(() => {
-    if (shownMix.current === mix) return
-    shownMix.current = mix
-    scrollRef.current?.scrollTo({ top: 0 })
-  }, [mix])
   const title = playlistId !== null ? (playlists.find((p) => p.id === playlistId)?.name ?? t('library.playlist.label')) : folder ? (folder.folder.split('/').pop() || folders.find((f) => f.rootId === folder.rootId)?.name || t('library.folder.fallback')) : section === 'all' && filters.tag ? `#${filters.tag}` : t(SECTION_TITLES[section])
   const isGrid = view === 'grid'
   const density = gridSize < 200 ? 'compact' : 'comfortable'
@@ -182,6 +176,7 @@ function Grid() {
 function LoadMore() {
   const loadMore = useLibrary((s) => s.loadMore)
   const count = useLibrary((s) => s.rows.length)
+  const loading = useLibrary((s) => s.loading)
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => {
     const el = ref.current
@@ -194,7 +189,7 @@ function LoadMore() {
     )
     io.observe(el)
     return () => io.disconnect()
-  }, [loadMore, count])
+  }, [loadMore, count, loading])
   return <div ref={ref} className="lib-more" aria-hidden />
 }
 

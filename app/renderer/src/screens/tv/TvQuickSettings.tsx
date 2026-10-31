@@ -1,6 +1,6 @@
 import { RefreshCw } from 'lucide-react'
 import { isAxisId } from '@shared/axes'
-import { PROJECTION_KINDS, PROJECTION_LABELS, detectProjection } from '@shared/projection'
+import { PROJECTION_KINDS, PROJECTION_LABELS, PROJECTION_SOURCE_LABELS } from '@shared/projection'
 import type { MessageKey } from '@shared/i18n'
 import { FRAME_GEN_OVERRIDES, UPSCALERS, UPSCALER_LABELS, type FrameGenOverride, type Upscaler } from '@shared/settings'
 import { TvRow } from '@/components/tv/TvRow'
@@ -43,7 +43,8 @@ export function TvQuickSettings() {
   const frameGen = usePlayer((s) => s.video.frameGen ?? 'default')
   const setFrameGen = usePlayer((s) => s.setFrameGen)
   const projection = usePlayer((s) => s.projection)
-  const vr = usePlayer((s) => s.video.projection !== undefined || detectProjection(s.title).kind !== 'flat')
+  const projectionHint = PROJECTION_SOURCE_LABELS[usePlayer((s) => s.projectionSource)]
+  const vr = usePlayer((s) => s.projectionSource === 'user' || s.projection.kind !== 'flat')
   const setProjection = usePlayer((s) => s.setProjection)
   const outputs = useDevices((s) => s.outputs)
   const states = useDevices((s) => s.states)
@@ -59,7 +60,7 @@ export function TvQuickSettings() {
       <TvRow kind="options" label={t('tv.quickSettings.upscaling')} options={upscalers} value={upscaler} onChange={(u) => setUpscaling({ upscaler: u })} />
       {enhanceCapabilities.frameGen && <TvRow kind="options" label={t('tv.quickSettings.frameGeneration')} options={FRAME_GEN_OPTIONS.map((o) => ({ value: o.value, label: t(o.label) }))} value={frameGen} onChange={(v) => setFrameGen(v === 'default' ? null : v)} />}
       {vr && (
-        <TvRow kind="options" label={t('tv.quickSettings.projection')} options={PROJECTION_OPTIONS.map((o) => ({ value: o.value, label: t(o.label) }))} value={projection.kind} onChange={(kind) => setProjection({ ...projection, kind, layout: kind === 'flat' ? 'mono' : projection.layout })} />
+        <TvRow kind="options" label={t('tv.quickSettings.projection')} sub={projectionHint ? t(projectionHint) : undefined} options={PROJECTION_OPTIONS.map((o) => ({ value: o.value, label: t(o.label) }))} value={projection.kind} onChange={(kind) => setProjection({ ...projection, kind, layout: kind === 'flat' ? 'mono' : projection.layout })} />
       )}
       {outputs.map((o) => {
         const state = states[o.id]

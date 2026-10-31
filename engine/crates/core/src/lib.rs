@@ -529,6 +529,7 @@ struct Shared {
     hwdec: Mutex<Option<String>>,
     track_options: Mutex<TrackOptions>,
     lookahead: Mutex<Option<Lookahead>>,
+    lookahead_allowed: AtomicBool,
     media_path: Mutex<Option<String>>,
     load_error: Mutex<Option<String>>,
     detector_model: Mutex<Option<DetectorModel>>,
@@ -614,6 +615,7 @@ impl Engine {
             hwdec: Mutex::new(None),
             track_options: Mutex::new(TrackOptions::default()),
             lookahead: Mutex::new(None),
+            lookahead_allowed: AtomicBool::new(false),
             media_path: Mutex::new(None),
             load_error: Mutex::new(None),
             detector_model: Mutex::new(None),
@@ -686,8 +688,8 @@ impl Engine {
         self.loader().load_media(path, start_seconds, None)
     }
 
-    fn start_lookahead(&self) {
-        self.shared.restart_lookahead(self.player.hwdec_current());
+    fn sync_lookahead(&self) {
+        self.shared.sync_lookahead(|| self.player.hwdec_current());
     }
 
     pub fn load_scripts(&self, path: &str, variants: &[(Axis, String)]) -> MediaInfo {
@@ -849,6 +851,7 @@ impl Engine {
     pub fn track_start(&self, options: TrackOptions, axes: TrackAxes, lookahead: bool) {
         self.track_stop();
         self.shared.browser_tracking.store(!lookahead, Ordering::Relaxed);
+        self.shared.lookahead_allowed.store(lookahead, Ordering::Relaxed);
         self.shared.beat_live_installed.store(false, Ordering::Relaxed);
         *self.shared.browser_clock.lock().unwrap() = Clock::new();
         self.note_hwdec();
@@ -865,9 +868,7 @@ impl Engine {
             tl.active = true;
             self.shared.model_timeline.lock().unwrap().clear();
         }
-        if lookahead {
-            self.start_lookahead();
-        }
+        self.sync_lookahead();
         let shared = self.shared.clone();
         let for_frames = self.shared.clone();
         let for_model = self.shared.clone();
@@ -1220,6 +1221,7 @@ impl Engine {
 
     pub fn track_stop(&self) {
         self.shared.browser_tracking.store(false, Ordering::Relaxed);
+        self.shared.lookahead_allowed.store(false, Ordering::Relaxed);
         {
             let mut hero = self.shared.hero.lock().unwrap();
             hero.music = HeroMusicOptions::default();
@@ -1279,6 +1281,7 @@ impl Engine {
             self.shared.apply_selection();
         }
         self.note_hwdec();
+        self.sync_lookahead();
         self.shared.ensure_music();
     }
 
@@ -1639,7 +1642,15 @@ impl Engine {
     }
 
     pub fn reset_sensation(&self) {
-        *self.shared.sensation.lock().unwrap() = sensation::Sensation::default();
+        self.shared.sensation.lock().unwrap().reset();
+    }
+
+    pub fn resume_sensation(&self) {
+        self.shared.sensation.lock().unwrap().resume_from_halt(Instant::now());
+    }
+
+    pub fn hold_sensation(&self, held: bool) {
+        self.shared.sensation.lock().unwrap().hold(held, Instant::now());
     }
 
     pub fn halt_sensation(&self) {
@@ -2002,9 +2013,7 @@ impl ScriptLoader {
         *self.shared.media_path.lock().unwrap() = Some(path.to_string());
         self.shared.beat.lock().unwrap().clear();
         self.shared.beat_live_installed.store(false, Ordering::Relaxed);
-        if self.shared.lookahead.lock().unwrap().is_some() {
-            self.shared.restart_lookahead(self.media.hwdec_current());
-        }
+        self.shared.sync_lookahead(|| self.media.hwdec_current());
         self.shared
             .preset_clock(start_seconds.unwrap_or(0.0) * 1000.0);
         Ok(())
@@ -2138,19 +2147,21 @@ impl Shared {
         self.mixer.lock().unwrap().resync();
     }
 
-    fn restart_lookahead(self: &Arc<Self>, hwdec: String) {
-        let path = self
-            .media_path
-            .lock()
-            .unwrap()
-            .clone()
-            .filter(|p| is_local(p));
+    fn sync_lookahead(self: &Arc<Self>, hwdec: impl FnOnce() -> String) {
+        let path = lookahead_path(
+            self.lookahead_allowed.load(Ordering::Relaxed),
+            &self.track_axes.lock().unwrap(),
+            self.media_path.lock().unwrap().as_deref(),
+        )
+        .map(str::to_owned);
         let mut slot = self.lookahead.lock().unwrap();
         if slot.as_ref().map(|l| l.path.as_str()) == path.as_deref() {
             return;
         }
-        let hwdec = Some(hwdec).filter(|h| !h.is_empty());
-        *slot = path.map(|p| Lookahead::start(self.clone(), p, hwdec));
+        *slot = path.map(|p| {
+            let hwdec = Some(hwdec()).filter(|h| !h.is_empty());
+            Lookahead::start(self.clone(), p, hwdec)
+        });
     }
 
     fn update_expand(&self) {
@@ -2979,6 +2990,17 @@ fn is_local(path: &str) -> bool {
     !path.contains("://") || path.starts_with("file://")
 }
 
+fn lookahead_path<'a>(
+    allowed: bool,
+    axes: &TrackAxes,
+    media: Option<&'a str>,
+) -> Option<&'a str> {
+    let reads_frames = Axis::ALL
+        .iter()
+        .any(|a| axes[a.index()].source.on_frames() && track_component(*a).is_some());
+    media.filter(|p| allowed && reads_frames && is_local(p))
+}
+
 fn grow_region(r: Region) -> Region {
     let w = r.w.max(MIN_AUTO_REGION).min(1.0);
     let h = r.h.max(MIN_AUTO_REGION).min(1.0);
@@ -3272,5 +3294,36 @@ mod tests {
         assert_eq!(infos[0].bookmarks[0].at_ms, 500.0);
         assert_eq!(infos[0].duration_ms, 1000.0);
         fs::remove_dir_all(d).unwrap();
+    }
+
+    const LOCAL: Option<&str> = Some("C:/videos/v.mp4");
+
+    fn table(rows: &[(Axis, TrackSource)]) -> TrackAxes {
+        let mut axes = [TrackAxis::OFF; Axis::COUNT];
+        for (axis, source) in rows {
+            axes[axis.index()].source = *source;
+        }
+        axes
+    }
+
+    #[test]
+    fn a_beat_only_start_runs_no_lookahead() {
+        let beat = table(&[(Axis::L0, TrackSource::Beat), (Axis::R0, TrackSource::Beat)]);
+        assert_eq!(lookahead_path(true, &beat, LOCAL), None);
+        let generated = table(&[(Axis::L0, TrackSource::AiMusic), (Axis::R1, TrackSource::Hero)]);
+        assert_eq!(lookahead_path(true, &generated, LOCAL), None);
+    }
+
+    #[test]
+    fn switching_an_axis_to_a_frame_source_starts_the_lookahead() {
+        let mut axes = table(&[(Axis::L0, TrackSource::Beat)]);
+        for source in [TrackSource::Video, TrackSource::AiMotion] {
+            axes[Axis::R1.index()].source = source;
+            assert_eq!(lookahead_path(true, &axes, LOCAL), LOCAL, "{source:?}");
+        }
+        assert_eq!(lookahead_path(true, &axes, Some("https://example.com/v")), None);
+        assert_eq!(lookahead_path(false, &axes, LOCAL), None);
+        axes[Axis::R1.index()].source = TrackSource::Beat;
+        assert_eq!(lookahead_path(true, &axes, LOCAL), None);
     }
 }

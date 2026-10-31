@@ -51,6 +51,11 @@ impl GlContext {
         self.ctx.render_fd()
     }
 
+    #[cfg(windows)]
+    pub fn angle(&self) -> &crate::windows::egl::Context {
+        &self.ctx
+    }
+
     pub fn describe(&self) -> String {
         self.ctx.describe()
     }

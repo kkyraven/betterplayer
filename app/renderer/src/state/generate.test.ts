@@ -18,7 +18,7 @@ vi.mock('./tracking', async () => {
 vi.mock('./generated', () => ({
   currentSetup: mocks.currentSetup,
   savedResult: mocks.savedResult, runGeneration: mocks.runGeneration,
-  toFiles: () => [{ suffix: '', json: 'cached' }], toRows: vi.fn(), waitForAudio: mocks.waitForAudio,
+  toFiles: () => [{ suffix: '', json: 'cached' }], toRows: vi.fn(), waitForAudio: mocks.waitForAudio, waitForModels: async () => {},
 }))
 import { useAccount } from './account'
 import { useGenerate } from './generate'

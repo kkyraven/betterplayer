@@ -4,13 +4,14 @@ mod gl_context;
 mod mpv;
 mod render;
 mod stats;
+mod vr;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(windows)]
 mod windows;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -18,6 +19,7 @@ use std::time::Duration;
 pub use enhance::{DlssOptions, DlssRate, EnhanceCapabilities, EnhanceOptions, EnhanceState, GuideQuality, ModelPreset, NrPreset, NrStyle, Upscaler};
 pub use frames::{Acquired, External, FrameSlot};
 pub use stats::{Percentiles, RenderSnapshot};
+pub use vr::{VrKind, VrLayout, VrStatus, VrView};
 
 use enhance::Enhance;
 use frames::Frames;
@@ -101,6 +103,26 @@ pub struct Player {
     bgra: bool,
     enhance: Arc<Mutex<Enhance>>,
     has_video: Arc<AtomicBool>,
+    vr: Arc<Mutex<Option<VrStatus>>>,
+}
+
+pub struct VrReply {
+    answer: Result<Receiver<Result<(), String>>, String>,
+    timeout: Duration,
+}
+
+impl VrReply {
+    pub fn wait(&self) -> Result<(), String> {
+        let done = match &self.answer {
+            Ok(answer) => match answer.recv_timeout(self.timeout) {
+                Ok(done) => done,
+                Err(RecvTimeoutError::Timeout) => Err("timeout: SteamVR did not answer in time".into()),
+                Err(RecvTimeoutError::Disconnected) => Err("render thread gone".into()),
+            },
+            Err(e) => Err(e.clone()),
+        };
+        done.map_err(bp_vr::coded)
+    }
 }
 
 #[derive(Clone)]
@@ -187,6 +209,7 @@ impl Player {
         let enhance = Arc::new(Mutex::new(Enhance::new(enhance_capabilities(), (width, height))));
         let has_video = Arc::new(AtomicBool::new(false));
         let picture_back: Arc<Mutex<Option<Sender<Msg>>>> = Arc::new(Mutex::new(None));
+        let vr: Arc<Mutex<Option<VrStatus>>> = Arc::new(Mutex::new(None));
         let events = {
             let mpv = mpv.clone();
             let log = log.clone();
@@ -194,6 +217,7 @@ impl Player {
             let enhance = enhance.clone();
             let has_video = has_video.clone();
             let picture_back = picture_back.clone();
+            let vr = vr.clone();
             thread::Builder::new()
                 .name("bp-mpv-events".into())
                 .spawn(move || {
@@ -203,7 +227,15 @@ impl Player {
                         }
                     };
                     let mut size = (0u32, 0u32);
+                    let mut in_vr = false;
                     while !stop.load(Ordering::Relaxed) {
+                        let now_in_vr = vr.lock().unwrap().as_ref().is_some_and(|s| s.active);
+                        if now_in_vr != in_vr {
+                            in_vr = now_in_vr;
+                            if let Err(e) = enhance.lock().unwrap().set_vr(&mpv, in_vr) {
+                                push_log(&log, format!("enhance in the headset: {e}"));
+                            }
+                        }
                         match mpv.wait_event(0.25) {
                             Event::Shutdown => break,
                             Event::EndFile { error } => {
@@ -237,6 +269,7 @@ impl Player {
                                     let next = if next.0 > 0 && next.1 > 0 { next } else { (0, 0) };
                                     if next != size {
                                         size = next;
+                                        mpv.observed_size.store((size.0 as u64) << 32 | size.1 as u64, Ordering::Relaxed);
                                         has_video.store(size.0 > 0, Ordering::Relaxed);
                                         if size.0 == 0 {
                                             mpv.picture_ready.store(false, Ordering::Relaxed);
@@ -271,6 +304,7 @@ impl Player {
             stats.clone(),
             cfg,
             has_video.clone(),
+            vr.clone(),
             #[cfg(target_os = "macos")]
             enhance.lock().unwrap().apple(),
             #[cfg(windows)]
@@ -301,6 +335,7 @@ impl Player {
             bgra: opts.bgra,
             enhance,
             has_video,
+            vr,
         })
     }
 
@@ -415,6 +450,62 @@ impl Player {
         #[cfg(any(target_os = "macos", windows))]
         let _ = tx.send(Msg::Redraw);
         Ok(())
+    }
+
+    pub fn vr_start(&self) -> VrReply {
+        self.vr_request(Msg::VrStart, Duration::from_secs(20))
+    }
+
+    pub fn vr_stop(&self) -> VrReply {
+        self.vr_request(Msg::VrStop, Duration::from_secs(25))
+    }
+
+    fn vr_request(&self, msg: fn(Sender<Result<(), String>>) -> Msg, timeout: Duration) -> VrReply {
+        let (reply, answer) = std::sync::mpsc::channel();
+        let answer = match &self.tx {
+            Some(tx) => tx.send(msg(reply)).map(|_| answer).map_err(|_| "render thread gone".to_string()),
+            None => Err("player closed".into()),
+        };
+        VrReply { answer, timeout }
+    }
+
+    pub fn vr_view(&self, view: VrView) -> Result<(), String> {
+        let tx = self.tx.as_ref().ok_or("player closed")?;
+        tx.send(Msg::VrView(view)).map_err(|_| "render thread gone".to_string())
+    }
+
+    pub fn vr_recentre(&self, keep_recline: bool) -> Result<(), String> {
+        let tx = self.tx.as_ref().ok_or("player closed")?;
+        {
+            let mut asked = vr::ASKED.lock().unwrap();
+            asked.turn = 0.0;
+            asked.recentred = true;
+        }
+        tx.send(Msg::VrRecentre { keep_recline }).map_err(|_| "render thread gone".to_string())
+    }
+
+    pub fn vr_turn(&self, degrees: f32) -> Result<(), String> {
+        if !degrees.is_finite() {
+            return Err("turn is not a number".into());
+        }
+        vr::ASKED.lock().unwrap().turn += degrees;
+        Ok(())
+    }
+
+    pub fn vr_screen(&self, degrees: f32) -> Result<(), String> {
+        if !degrees.is_finite() {
+            return Err("screen size is not a number".into());
+        }
+        vr::ASKED.lock().unwrap().screen = degrees.clamp(10.0, 180.0);
+        Ok(())
+    }
+
+    pub fn vr_status(&self) -> Option<VrStatus> {
+        self.vr.lock().unwrap().clone()
+    }
+
+    pub fn vr_shortcuts(&self) -> Vec<bp_vr::Shortcut> {
+        self.vr.lock().unwrap().as_mut().map(|s| std::mem::take(&mut s.shortcuts)).unwrap_or_default()
     }
 
     pub fn enhance_capabilities(&self) -> EnhanceCapabilities {

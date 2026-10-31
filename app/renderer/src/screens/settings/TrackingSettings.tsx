@@ -1,14 +1,22 @@
+import { useEffect, useState } from 'react'
 import type { MessageKey } from '@shared/i18n'
-import { BEAT_BOUNCE_DEPTH, BEAT_BOUNCE_SPEED, CUT_SENSITIVITIES, defaultTrackingDefaults, paceFromSlider, paceToSlider, type CutSensitivity } from '@shared/tracking'
+import type { Settings } from '@shared/settings'
+import { BEAT_BOUNCE_DEPTH, BEAT_BOUNCE_SPEED, CUT_SENSITIVITIES, TRACK_AXIS_IDS, TRACK_FILLS, TRACK_SOURCE_LABEL, defaultTrackingDefaults, paceFromSlider, paceToSlider, type CutSensitivity, type TrackAxesConfig, type TrackAxisConfig, type TrackAxisId, type TrackingDefaults } from '@shared/tracking'
+import { changeRules } from '@shared/trackingRules'
 import { AxesTable } from '@/components/tracking/AxesTable'
+import { MusicFillSelect } from '@/components/tracking/MusicFillSelect'
+import { Button } from '@/components/ui/Button'
+import { Prompt } from '@/components/ui/Prompt'
 import { Segmented } from '@/components/ui/Segmented'
 import { Slider } from '@/components/ui/Slider'
 import { Switch } from '@/components/ui/Switch'
 import { TooltipGroup } from '@/components/ui/TooltipGroup'
+import { invoke } from '@/ipc'
 import { useT } from '@/state/i18n'
 import { useSettings } from '@/state/settings'
+import { afterOverridesReset, useTracking } from '@/state/tracking'
+import { settingTarget } from './navigation'
 import { SettingsAdvanced, SettingsLink } from './SettingsSection'
-import { useTracking } from '@/state/tracking'
 
 const REGION_OPTIONS: ReadonlyArray<{ value: 'auto' | 'centre'; label: MessageKey }> = [
   { value: 'auto', label: 'common.auto' },
@@ -17,21 +25,34 @@ const REGION_OPTIONS: ReadonlyArray<{ value: 'auto' | 'centre'; label: MessageKe
 
 const CUT_LABEL: Record<CutSensitivity, MessageKey> = { low: 'settings.tracking.cut.low', normal: 'settings.tracking.cut.normal', high: 'settings.tracking.cut.high' }
 
+const shownAxes = (axes: TrackAxesConfig) => TRACK_AXIS_IDS.map((id) => ({ ...axes[id], source: axes[id].source !== 'off' }))
+
+export function advancedCustom(tracking: TrackingDefaults): boolean {
+  const defaults = defaultTrackingDefaults()
+  return (
+    (['detectEveryMs', 'regionPadding', 'showBox', 'cutSensitivity', 'easeMs', 'clampJumps'] as const).some((key) => tracking[key] !== defaults[key]) ||
+    JSON.stringify(shownAxes(tracking.axes)) !== JSON.stringify(shownAxes(defaults.axes))
+  )
+}
+
 export function TrackingSettings() {
   const t = useT()
   const tracking = useSettings((s) => s.settings?.tracking) ?? defaultTrackingDefaults()
   const ready = useTracking((s) => s.present.detector)
-  const defaults = defaultTrackingDefaults()
-  const custom = ['detectEveryMs', 'regionPadding', 'showBox', 'cutSensitivity', 'easeMs', 'clampJumps', 'generateForScripted', 'axes'].some(
-    (key) => JSON.stringify(tracking[key as keyof typeof tracking]) !== JSON.stringify(defaults[key as keyof typeof defaults]),
-  )
+  const custom = advancedCustom(tracking)
   const updateDebounced = useSettings((s) => s.updateDebounced)
   const update = useSettings((s) => s.update)
   const regionOptions = REGION_OPTIONS.map((o) => ({ value: o.value, label: t(o.label) }))
   const cutOptions = CUT_SENSITIVITIES.map((value) => ({ value, label: t(CUT_LABEL[value]) }))
+  const fillOptions = TRACK_FILLS.map((value) => ({ value, label: t(TRACK_SOURCE_LABEL[value]) }))
+  const changeAxis = (id: TrackAxisId, patch: Partial<TrackAxisConfig>) => {
+    const change = (s: Settings): Settings => ({ ...s, tracking: { ...s.tracking, axes: { ...s.tracking.axes, [id]: { ...s.tracking.axes[id], ...patch } } } })
+    if (patch.source !== undefined) void update(change)
+    else updateDebounced(change)
+  }
   return (
     <div className="set-tracking">
-      <p className="sub">{t('settings.tracking.intro')}</p>
+      <p className="sub">{t('settings.tracking.videoDefaults')}</p>
       <div className="panel">
         <div className="prow">
           <TooltipGroup data-tooltip={t('settings.tracking.paceStartHint')}>
@@ -52,20 +73,28 @@ export function TrackingSettings() {
           <span className="val">{paceToSlider(tracking.defaultPace)}%</span>
         </div>
         <div className="prow">
-          <TooltipGroup data-tooltip={t('settings.tracking.motionDefaultHint')}>
-            <div className="lbl">{t('settings.tracking.motionDefault')}</div>
-            <div className="sub">{t('settings.tracking.motionDefaultSub')}</div>
+          <div className="lbl">{t('settings.tracking.fill')}</div>
+          <span className="spacer" />
+          <Segmented options={fillOptions} value={tracking.fill} onChange={(fill) => void update((s) => ({ ...s, tracking: changeRules(s.tracking, { fill }) }))} label={t('settings.tracking.fill')} />
+        </div>
+        <div className="prow">
+          <TooltipGroup data-tooltip={t('settings.tracking.musicFillHint')}>
+            <div className="lbl">{t('settings.tracking.musicFill')}</div>
           </TooltipGroup>
           <span className="spacer" />
+          <MusicFillSelect />
+        </div>
+        <div className="prow">
+          <div className="lbl">{t('settings.tracking.fillScripted')}</div>
+          <span className="spacer" />
           <Switch
-            checked={tracking.motionDefault}
-            onCheckedChange={(motionDefault) => void update((s) => ({ ...s, tracking: { ...s.tracking, motionDefault } }))}
-            label={t('settings.tracking.motionDefault')}
+            checked={tracking.fillScripted}
+            onCheckedChange={(fillScripted) => void update((s) => ({ ...s, tracking: changeRules(s.tracking, { fillScripted }) }))}
+            label={t('settings.tracking.fillScripted')}
           />
         </div>
       </div>
       <div className="panel">
-        {' '}
         <div className="prow">
           <TooltipGroup data-tooltip={t('settings.tracking.regionStartHint')}>
             <div className="lbl">{t('settings.tracking.regionStart')}</div>
@@ -259,31 +288,42 @@ export function TrackingSettings() {
             />
           </div>
         </div>
-        <h3 className="eyebrow">{t('settings.tracking.hosted')}</h3>
-        <div className="panel">
-          <div className="prow">
-            <span>
-              <div className="lbl">{t('settings.tracking.generateForScripted')}</div>
-              <div className="sub">{t('settings.tracking.generateForScriptedSub')}</div>
-            </span>
-            <span className="spacer" />
-            <Switch
-              checked={tracking.generateForScripted}
-              onCheckedChange={(generateForScripted) => void update((s) => ({ ...s, tracking: { ...s.tracking, generateForScripted } }))}
-              label={t('settings.tracking.generateForScripted')}
-            />
-          </div>
-        </div>
         <h3 className="eyebrow">{t('settings.tracking.generatedDefaults')}</h3>
         <div className="panel">
           <div className="axes-wrap" data-setting="generated-motion-defaults" tabIndex={-1} aria-label={t('settings.tracking.generatedDefaults')}>
-            <AxesTable
-              axes={tracking.axes}
-              onChange={(id, patch) => updateDebounced((s) => ({ ...s, tracking: { ...s.tracking, axes: { ...s.tracking.axes, [id]: { ...s.tracking.axes[id], ...patch } } } }))}
-            />
+            <AxesTable mode="defaults" axes={tracking.axes} onChange={changeAxis} twistBeat={tracking.fill === 'beat'} />
           </div>
         </div>
       </SettingsAdvanced>
+      <ResetOverrides />
     </div>
+  )
+}
+
+const overrideCount = () => invoke('video:overrideCount').catch(() => null)
+
+function ResetOverrides() {
+  const t = useT()
+  const sourced = useSettings((s) => Boolean(s.settings?.remote?.source))
+  const [count, setCount] = useState<number | null>(null)
+  const [confirming, setConfirming] = useState(false)
+  const label = t('settings.tracking.resetOverrides')
+  useEffect(() => {
+    void overrideCount().then(setCount)
+  }, [])
+  const reset = async () => {
+    await invoke('video:resetOverrides')
+    afterOverridesReset()
+    setCount(await overrideCount())
+  }
+  return (
+    <>
+      <div className="set-foot" data-setting={settingTarget(label)} tabIndex={-1}>
+        <Button variant="ghost" disabled={sourced || !count} onClick={() => setConfirming(true)}>
+          {label}
+        </Button>
+      </div>
+      <Prompt open={confirming} onOpenChange={setConfirming} title={label} body={t('library.videos', { count: count ?? 0 })} confirmLabel={t('common.reset')} onConfirm={() => void reset()} />
+    </>
   )
 }

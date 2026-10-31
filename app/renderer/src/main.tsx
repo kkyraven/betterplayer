@@ -20,15 +20,17 @@ import { useBrowser } from './state/browser'
 import { pushStopOnPause, useDevices } from './state/devices'
 import { useEditor } from './state/editor'
 import { pushEstim } from './state/estim'
-import { useFollow } from './state/follow'
+import { startHeadsets, useFollow } from './state/follow'
 import { startI18n } from './state/i18n'
 import { useLibrary } from './state/library'
 import { usePlayer } from './state/player'
+import { startQuestToys } from './state/questToys'
 import { useSession } from './state/session'
 import { useRemote } from './state/remote'
 import { useSettings } from './state/settings'
 import { useTracking } from './state/tracking'
 import { useUi } from './state/ui'
+import { startVr } from './state/vr'
 
 document.documentElement.dataset.platform = process.platform
 
@@ -72,10 +74,13 @@ async function boot() {
     on('window:fullscreen', (fullscreen) => useUi.getState().setFullscreen(fullscreen))
     if (settings.appearance.startInMediaCentre) useUi.getState().setMediaCentre(true)
     startEngineEvents()
+    startHeadsets()
+    startQuestToys()
     startChaster()
     startGooner()
     startDenial()
     startAccount()
+    startVr()
     void useRemote.getState().init()
     void startBroadcast()
     useBrowser.getState().init()

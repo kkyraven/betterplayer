@@ -1,4 +1,4 @@
-import { Component, type ReactNode } from 'react'
+import { Component, useState, type ReactNode } from 'react'
 import { Button } from '@/components/ui/Button'
 import { invoke } from '@/ipc'
 import { t } from '@/state/i18n'
@@ -8,10 +8,17 @@ const RELOADED_AT = 'bp-recovered-at'
 const RELOAD_WINDOW_MS = 30_000
 
 export function RecoverScreen() {
+  const [copied, setCopied] = useState(false)
   return (
     <div className="recover">
       <p>{t('app.recover.message')}</p>
-      <Button onClick={() => location.reload()}>{t('app.recover.restart')}</Button>
+      <div className="recover-actions">
+        <Button variant="ghost" className="recover-copy" onClick={() => void invoke('app:copyDebugInfo').then(() => setCopied(true))}>
+          <span aria-hidden={copied}>{t('app.recover.copyDebug')}</span>
+          <span aria-hidden={!copied}>{t('common.copied')}</span>
+        </Button>
+        <Button onClick={() => location.reload()}>{t('app.recover.restart')}</Button>
+      </div>
     </div>
   )
 }

@@ -1,22 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { createTranslator, ENGLISH } from './i18n'
-import { describeEffect, describeTrigger, heroFileText, looksLikeMusicVideo, normalizeZoneEffects, parseHeroFile } from './tracking'
+import { describeEffect, describeTrigger, heroFileText, normalizeZoneEffects, parseHeroFile } from './tracking'
 
 const t = createTranslator('en', ENGLISH)
-
-describe('looksLikeMusicVideo', () => {
-  it('matches the music video markers', () => {
-    for (const title of ['Cock Hero 12', 'Summer CH', 'Neon HMV', 'best pmv ever', 'Anime AMV', 'IFL Blue', 'I fucking love this', 'I Fcking Love It', 'Music mix 3']) {
-      expect(looksLikeMusicVideo(title), title).toBe(true)
-    }
-  })
-
-  it('leaves other titles alone', () => {
-    for (const title of ['Beach day', 'chapter one', 'Musical chairs', 'PMVS', 'Hi flower']) {
-      expect(looksLikeMusicVideo(title), title).toBe(false)
-    }
-  })
-})
 
 describe('hero file', () => {
   const setup = {

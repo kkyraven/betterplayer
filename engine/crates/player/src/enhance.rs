@@ -354,6 +354,7 @@ pub struct Enhance {
     applied: Applied,
     apple: Arc<Mutex<AppleUpscaling>>,
     dlss: Arc<Mutex<DlssShared>>,
+    vr: bool,
 }
 
 impl Enhance {
@@ -366,6 +367,7 @@ impl Enhance {
             applied: Applied::plain(),
             apple: Arc::default(),
             dlss: Arc::default(),
+            vr: false,
         }
     }
 
@@ -407,6 +409,11 @@ impl Enhance {
         self.apply(mpv)
     }
 
+    pub fn set_vr(&mut self, mpv: &Mpv, on: bool) -> Result<(), String> {
+        self.vr = on;
+        self.apply(mpv)
+    }
+
     fn apply(&mut self, mpv: &Mpv) -> Result<(), String> {
         {
             let request = AppleRequest { enabled: self.options.upscaler == Upscaler::Apple && self.caps.apple_vsr, source: self.source, output: self.output };
@@ -439,6 +446,9 @@ impl Enhance {
     }
 
     fn desired(&self) -> Applied {
+        if self.vr {
+            return Applied::plain();
+        }
         let fsr = self.options.upscaler == Upscaler::Fsr && fsr_shader_path().is_ok();
         let sharp = matches!(self.options.upscaler, Upscaler::Sharp | Upscaler::Apple | Upscaler::Dlss) || (self.options.upscaler == Upscaler::Fsr && !fsr);
         let scale = if sharp { SHARP_SCALE } else { DEFAULT_SCALE };
@@ -497,6 +507,7 @@ impl Enhance {
             u => u,
         };
         let factor = match upscaler {
+            _ if self.vr => 0.0,
             Upscaler::Apple => apple.factor,
             Upscaler::Rtx => self.vsr_factor().unwrap_or(0.0),
             Upscaler::Dlss => dlss.factor,
@@ -629,6 +640,21 @@ mod tests {
         assert!(e.state().upscaling);
         e.output = (960, 540);
         assert!(!e.state().upscaling);
+    }
+
+    #[test]
+    fn a_headset_turns_upscaling_off_until_it_is_left() {
+        let mut e = Enhance::new(rtx(), (2560, 1440));
+        e.source = (1920, 1080);
+        e.options.upscaler = Upscaler::Rtx;
+        e.vr = true;
+        assert_eq!(e.desired(), Applied::plain());
+        assert!(!e.state().upscaling);
+        e.options.upscaler = Upscaler::Sharp;
+        assert!(!e.state().upscaling);
+        e.options.upscaler = Upscaler::Rtx;
+        e.vr = false;
+        assert_eq!(e.desired().vf, "d3d11vpp=scale=1.33:scaling-mode=nvidia");
     }
 
     #[test]

@@ -42,6 +42,7 @@
 .tv-stage::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(180deg, rgba(10, 12, 16, 0.55), rgba(10, 12, 16, 0.2) 40%, rgba(10, 12, 16, 0.85)); transition: opacity var(--t-ui) var(--ease); }
 .tv[data-chrome='hidden'] .tv-stage::after, .tv[data-chrome='hidden'] .tv-top, .tv[data-chrome='hidden'] .np, .tv[data-chrome='hidden'] .upnext, .tv[data-chrome='hidden'] .hints { opacity: 0; }
 .tv[data-chrome='hidden'] { cursor: none; }
+.tv[data-chrome='hidden'] .upnext { pointer-events: none; }
 .np { position: relative; z-index: 2; margin-top: 60px; max-width: 760px; display: grid; gap: 18px; transition: opacity var(--t-ui) var(--ease); }
 .np .eyebrow { font-size: 14px; }
 .np h1 { font-size: 40px; letter-spacing: -0.02em; margin: 0; }
@@ -119,3 +120,6 @@
 .tv-backdrop img.on { opacity: 0.45; }
 .tv-backdrop::after { content: ''; position: absolute; inset: 0; background: linear-gradient(180deg, color-mix(in oklab, var(--bg) 40%, transparent), color-mix(in oklab, var(--bg) 85%, transparent) 70%); }
 .tv-body, .tv-settings, .tv-session { z-index: 1; }
+
+.tv[data-vr] :is(.tv-tabs button, .tv-cluster button, .tv-settings .groups button, .np .ctl button, .tv-dialog button, .tvrow:not(.dim)):hover { color: var(--text); background: rgba(var(--ink), 0.12); }
+.tv[data-vr] :is(.card, .tv-tile):hover { transform: scale(1.03); }

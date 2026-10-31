@@ -160,14 +160,14 @@ impl Generation {
         let wants_video = wants_video || (on(TrackSource::AiMotion) && model.is_none());
         let mut collected = Collected::default();
         if wants_video || hero.is_some() || model.is_some() {
-            self.decode(&mut collected, hero.as_mut(), model)?;
+            self.decode(&mut collected, hero.as_mut(), model.clone())?;
         } else {
             self.state.progress.lock().unwrap().status = GenerateStatus::Running;
         }
         if on(TrackSource::AiMusic) {
             self.wait_for_music()?;
         }
-        Ok(self.build(&axes, &collected, hero.as_ref()))
+        Ok(self.build(&axes, &collected, hero.as_ref(), model.as_ref()))
     }
 
     fn decode(
@@ -294,10 +294,10 @@ impl Generation {
         axes: &crate::TrackAxes,
         collected: &Collected,
         hero: Option<&HeroState>,
+        model: Option<&Arc<bp_model::Loaded>>,
     ) -> Vec<(Axis, Script)> {
         let flourishes = self.shared.track_options.lock().unwrap().flourishes;
         let beat = self.shared.beat.lock().unwrap();
-        let model = self.shared.motion_loaded();
         let pace = self.shared.pace();
         let mut scripts = Vec::new();
         for axis in Axis::ALL {

@@ -10,6 +10,7 @@ const m = vi.hoisted(() => ({
   close: vi.fn(),
   pause: vi.fn(),
   player: { path: null as string | null, video: { axes: {} }, snapshot: { loaded: true } },
+  tracking: { stop: vi.fn(), setHold: vi.fn() },
 }))
 vi.mock('@/ipc', () => ({ invoke: m.invoke }))
 vi.mock('@/engine/client', () => ({ engine: { setOutputSessionScale: m.scale, setAxis: vi.fn() } }))
@@ -18,7 +19,7 @@ vi.mock('./devices', () => ({ useDevices: { subscribe: vi.fn(), getState: () => 
 vi.mock('./live', () => ({ subscribe: vi.fn(), get: () => ({ timeMs: m.time }) }))
 vi.mock('./player', () => ({ usePlayer: { getState: () => ({ ...m.player, open: m.open, close: m.close, pause: m.pause, prepare: vi.fn(async () => {}) }) } }))
 vi.mock('./settings', () => ({ useSettings: { getState: () => ({ settings: null }) } }))
-vi.mock('./tracking', () => ({ useTracking: { getState: () => ({ stop: vi.fn() }) } }))
+vi.mock('./tracking', () => ({ useTracking: { getState: () => m.tracking } }))
 vi.mock('./ui', () => ({ useUi: { getState: () => ({ setScreen: vi.fn(), mediaCentre: false }) } }))
 import { useSession } from './session'
 
@@ -89,6 +90,7 @@ beforeEach(async () => {
   })
   m.close.mockClear()
   m.pause.mockClear()
+  m.tracking.setHold.mockClear()
   m.scale.mockClear()
   useSession.setState({
     setup: defaultSessionSetup(),
@@ -147,6 +149,16 @@ it('records before opening and applies toy rules using session time across clips
   expect(m.scale).toHaveBeenLastCalledWith(7, 1)
   expect(m.pause).toHaveBeenCalled()
   expect(m.invoke).toHaveBeenCalledWith('session:finish', 10, false)
+})
+it('holds tracking before each clip opens when the session does not track, and lets go at the end', async () => {
+  const run = recording()
+  run.setup.tracking = false
+  m.invoke.mockImplementation(async (channel, value) => (channel === 'session:replay' ? run : channel === 'library:media' ? row(Number(value)) : channel === 'session:start' ? 10 : null))
+  await useSession.getState().replay(4)
+  expect(m.tracking.setHold).toHaveBeenLastCalledWith(true)
+  expect(m.tracking.setHold.mock.invocationCallOrder[0]).toBeLessThan(m.open.mock.invocationCallOrder[0]!)
+  useSession.getState().end()
+  expect(m.tracking.setHold).toHaveBeenLastCalledWith(false)
 })
 it('blocks missing-media replay without starting or dropping the missing clip', async () => {
   const implementation = m.invoke.getMockImplementation()!

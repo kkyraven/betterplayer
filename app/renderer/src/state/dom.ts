@@ -92,6 +92,8 @@ interface DomState {
   addMemory: (domId: string, kind: DomMemory['kind'], content: string) => Promise<void>
   forget: (domId: string, memoryId: string) => Promise<void>
   forgetAll: (domId: string) => Promise<void>
+  pullMemories: (domId: string) => Promise<DomMemory[]>
+  pushMemories: (domId: string, memoryIds: string[]) => Promise<void>
 
   running: boolean
   domId: string | null
@@ -107,8 +109,11 @@ interface DomState {
 }
 
 export function domErrorCode(error: unknown): DomErrorCode | null {
-  const match = new RegExp(`${DOM_ERROR_PREFIX}(\\w+)`).exec(String(error))
-  return DOM_ERRORS.find((c) => c === match?.[1]) ?? null
+  for (const match of String(error).matchAll(new RegExp(`${DOM_ERROR_PREFIX}(\\w+)`, 'g'))) {
+    const code = DOM_ERRORS.find((c) => c === match[1])
+    if (code) return code
+  }
+  return null
 }
 
 const ERROR_TEXT: Record<DomErrorCode, () => string> = {
@@ -134,6 +139,8 @@ const clock = (ms: number) => {
   const s = Math.max(0, Math.round(ms / 1000))
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
+
+const USER_HELD = 'The user has paused their toys. Sensation is off until they resume it; you cannot start or pause it.'
 
 export const useDom = create<DomState>()((set, get) => {
   let history: ChatMessage[] = []
@@ -194,7 +201,8 @@ export const useDom = create<DomState>()((set, get) => {
       if (clip?.path === p.path) parts.push(clip.end_seconds === undefined ? `Current playback: start_seconds=${clip.start_seconds}.` : `Current range: start_seconds=${clip.start_seconds}, end_seconds=${clip.end_seconds}, remaining_seconds=${Math.max(0, clip.end_seconds - timeMs / 1000).toFixed(3)}.`)
     } else parts.push('Nothing is playing.')
     const pauseLeft = sensationResumeAt === null ? 0 : sensationResumeAt - Date.now()
-    parts.push(pauseLeft > 0 ? `Sensation paused for ${(pauseLeft / 1000).toFixed(1)} more seconds.` : sensationResumeAt !== null && pauseLeft > -500 ? 'Sensation ramping up over 500 ms.' : 'Sensation active, subject to playback and device settings.')
+    if (useDevices.getState().held) parts.push(USER_HELD)
+    else parts.push(pauseLeft > 0 ? `Sensation paused for ${(pauseLeft / 1000).toFixed(1)} more seconds.` : sensationResumeAt !== null && pauseLeft > -500 ? 'Sensation ramping up over 500 ms.' : 'Sensation active, subject to playback and device settings.')
     if (get().pleasurePain.enabled) {
       const h = get().held
       parts.push(h ? `Level ${h.level}, held ${Math.max(0, Math.round((h.until - Date.now()) / 1000))} s more, then ${get().level}.` : `Level ${get().level}.`)
@@ -228,6 +236,7 @@ export const useDom = create<DomState>()((set, get) => {
         const profile = get().advancedPain.profiles.find((p) => p.id === args.profile)
         if (!profile) return 'Unknown pain profile.'
         if (typeof args.intensity !== 'number' || !Number.isFinite(args.intensity) || args.intensity < 0 || args.intensity > 10 || typeof args.seconds !== 'number' || !Number.isFinite(args.seconds) || args.seconds <= 0) return 'Intensity must be 0..10 and seconds must be positive.'
+        if (useDevices.getState().held) return USER_HELD
         if (!engine.applyPain(profile, args.intensity, args.seconds)) return 'No connected Restim output or invalid pain profile.'
         act('level', profile.name, String(args.intensity))
         return `Applied ${profile.name} at intensity ${args.intensity} for ${args.seconds} seconds.`
@@ -251,12 +260,14 @@ export const useDom = create<DomState>()((set, get) => {
       case 'stop_sensation': {
         const seconds = args.seconds
         if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0 || seconds > 30) return 'seconds must be greater than 0 and at most 30.'
+        if (useDevices.getState().held) return USER_HELD
         if (!engine.stopSensation(seconds)) return 'Could not pause sensation.'
         sensationResumeAt = Date.now() + seconds * 1000
         const howl = useDevices.getState().outputs.some((o) => o.config.kind === 'howl')
         return `Sensation paused for ${seconds} seconds. It then resumes over 500 ms; the video is unaffected.${howl ? ' Howl resumes directly because it does not support output scaling.' : ''}`
       }
       case 'start_sensation': {
+        if (useDevices.getState().held) return USER_HELD
         engine.startSensation()
         if (sensationResumeAt !== null && sensationResumeAt > Date.now()) sensationResumeAt = Date.now()
         const howl = useDevices.getState().outputs.some((o) => o.config.kind === 'howl')
@@ -364,7 +375,7 @@ export const useDom = create<DomState>()((set, get) => {
         return `Remembered as ${memory.id}.`
       }
       case 'forget': {
-        await invoke('dom:forget', d.id, str('id'))
+        await invoke('dom:forget', str('id'))
         known = known.filter((m) => m.id !== str('id'))
         set((s) => ({ memories: s.memories.filter((m) => m.id !== str('id')) }))
         act('forgot', t('dom.act.forgot'))
@@ -451,6 +462,9 @@ export const useDom = create<DomState>()((set, get) => {
 
   const watch = () => {
     unsubs.push(
+      useDevices.subscribe((s, prev) => {
+        if (s.held !== prev.held) void turn(s.held ? '[Event] The user paused their toys.' : '[Event] The user resumed their toys.')
+      }),
       usePlayer.subscribe((s, prev) => {
         if (s.video !== prev.video || s.path !== prev.path) reapplyRanges()
         if (!advancing && s.snapshot.loaded && clip?.path === s.path && live.get().seekGeneration > clip.seekGeneration && live.get().playbackEnded) {
@@ -642,15 +656,29 @@ export const useDom = create<DomState>()((set, get) => {
     },
     addMemory: async (domId, kind, content) => {
       const memory = await invoke('dom:remember', domId, kind, content)
+      if (get().domId === domId) known = [memory, ...known]
       set((s) => ({ memories: [memory, ...s.memories] }))
     },
     forget: async (domId, memoryId) => {
-      await invoke('dom:forget', domId, memoryId)
+      await invoke('dom:forget', memoryId)
+      if (get().domId === domId) known = known.filter((m) => m.id !== memoryId)
       set((s) => ({ memories: s.memories.filter((m) => m.id !== memoryId) }))
     },
     forgetAll: async (domId) => {
       await invoke('dom:forgetAll', domId)
+      if (get().domId === domId) known = []
       set({ memories: [] })
+    },
+    pullMemories: async (domId) => {
+      const memories = await invoke('dom:pullMemories', domId)
+      if (get().domId === domId) known = memories
+      if (get().selectedId === domId) set({ memories, memoriesError: null })
+      return memories.filter((m) => !m.synced)
+    },
+    pushMemories: async (domId, memoryIds) => {
+      const memories = await invoke('dom:pushMemories', domId, memoryIds)
+      if (get().domId === domId) known = memories
+      if (get().selectedId === domId) set({ memories })
     },
 
     running: false,

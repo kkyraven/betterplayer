@@ -7,3 +7,21 @@
   gap: 16px;
   color: var(--text);
 }
+
+.recover-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.recover-copy {
+  display: inline-grid;
+  place-items: center;
+}
+
+.recover-copy > span {
+  grid-area: 1 / 1;
+}
+
+.recover-copy > [aria-hidden='true'] {
+  visibility: hidden;
+}

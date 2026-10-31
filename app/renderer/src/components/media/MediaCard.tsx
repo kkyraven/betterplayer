@@ -55,7 +55,7 @@ export const MediaCard = memo(function MediaCard({ row, selected = false, resume
       onPlay(row)
     } else if (e.key === ' ') {
       e.preventDefault()
-      onSelect(row.id)
+      if (density !== 'tenfoot') onSelect(row.id)
     }
   }
 

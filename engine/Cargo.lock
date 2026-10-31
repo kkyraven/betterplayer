@@ -294,6 +294,7 @@ dependencies = [
  "bp-devices",
  "bp-player",
  "bp-script",
+ "bp-vr",
  "napi",
  "napi-build",
  "napi-derive",
@@ -320,7 +321,9 @@ dependencies = [
 name = "bp-player"
 version = "0.0.1"
 dependencies = [
+ "bp-vr",
  "cc",
+ "flate2",
  "gl",
  "libc",
  "libloading",
@@ -340,6 +343,14 @@ dependencies = [
 [[package]]
 name = "bp-tracking"
 version = "0.0.1"
+
+[[package]]
+name = "bp-vr"
+version = "0.0.1"
+dependencies = [
+ "libloading",
+ "windows",
+]
 
 [[package]]
 name = "btleplug"

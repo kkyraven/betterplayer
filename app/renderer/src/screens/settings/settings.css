@@ -152,8 +152,7 @@
 .set-page .set-library { display: grid; gap: 12px; }
 @container (max-width: 760px) {
   .set-tracking .axes-table .axrow { height: auto; padding: 12px; grid-template-columns: 34px minmax(80px, 1fr) minmax(110px, 1fr); gap: 12px; border: 1px solid var(--line); margin-block: 4px; }
-  .set-tracking .axes-table .axrow.head { display: flex; border: 0; padding: 4px; }
-  .set-tracking .axes-table .axrow.head > span:not(.srchead) { display: none; }
+  .set-tracking .axes-table .axrow.head { display: none; }
   .set-tracking .axes-table .axrow > .sl { grid-column: 1 / -1; display: grid; gap: 8px; }
   .set-tracking .axes-table .axrow > .sl::before { content: attr(data-label); color: var(--text-3); font-size: 11px; }
   .set-tracking .axes-table .axrow > .stepper { grid-column: span 1; }
@@ -200,6 +199,8 @@
 @container (max-width: 760px) {
   .set-tracking .axes-table .axrow > .switch { position: relative; align-self: end; margin-bottom: 7px; }
   .set-tracking .axes-table .axrow > .switch::before { content: attr(data-label); position: absolute; bottom: calc(100% + 6px); left: 0; font-size: 11px; color: var(--text-3); }
+  .set-tracking .axes-table .axrow > .axon { display: grid; justify-items: start; padding-top: 17px; }
+  .set-tracking .axes-table .axrow > .axon > .switch::before { content: attr(data-label); position: absolute; bottom: calc(100% + 6px); left: 0; font-size: 11px; color: var(--text-3); }
 }
 .window:has(.settings-layout):not(.is-fullscreen) { grid-template-rows: 40px minmax(0, 1fr); }
 .window:has(.settings-layout) .rail { min-height: 0; overflow-y: auto; }

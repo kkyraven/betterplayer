@@ -6,11 +6,14 @@ import { Recompute } from '@/components/player/Recompute'
 import { VideoSlot } from '@/components/player/VideoSlot'
 import { resolutionLabel } from '@/components/media/MediaCard'
 import { fmtDuration } from '@/lib/format'
+import { HeadsetCard } from '@/screens/player/InHeadset'
 import { useT } from '@/state/i18n'
 import * as live from '@/state/live'
 import { useActiveAxes, usePlayer } from '@/state/player'
 import { useSession } from '@/state/session'
 import { useUi } from '@/state/ui'
+import { useVr } from '@/state/vr'
+import { playOnClick } from './tvCards'
 
 const HIDE_AFTER_MS = 4000
 const STRIP_FRAMES = 20
@@ -20,9 +23,10 @@ const HOLD_AFTER = 5
 const PREVIEW_MS = 800
 
 export function TvStage() {
+  const inHeadset = useVr((s) => s.active)
   return (
     <div className="tv-stage">
-      <VideoSlot subtitles />
+      {inHeadset ? <HeadsetCard /> : <VideoSlot subtitles />}
       <Recompute />
     </div>
   )
@@ -50,6 +54,7 @@ export function TvNowPlaying() {
   const index = useSession((s) => s.index)
   const next = useSession((s) => s.next)
   const previous = useSession((s) => s.previous)
+  const inHeadset = useVr((s) => s.active)
   const [shown, setShown] = useState(true)
   const shownRef = useRef(true)
   const timer = useRef(0)
@@ -83,9 +88,9 @@ export function TvNowPlaying() {
   }, [])
 
   useEffect(() => {
-    document.querySelector<HTMLElement>('.tv')?.setAttribute('data-chrome', shown || paused ? 'shown' : 'hidden')
+    document.querySelector<HTMLElement>('.tv')?.setAttribute('data-chrome', shown || paused || inHeadset ? 'shown' : 'hidden')
     return () => document.querySelector<HTMLElement>('.tv')?.removeAttribute('data-chrome')
-  }, [shown, paused])
+  }, [shown, paused, inHeadset])
 
   live.useLive((l) => {
     if (fill.current) fill.current.style.transform = `scaleX(${l.durationMs > 0 ? Math.min(1, l.timeMs / l.durationMs) : 0})`
@@ -114,6 +119,8 @@ export function TvNowPlaying() {
   }
 
   const upNext = inSession && revealed ? plan.slice(index + 1, index + 6) : []
+  const playNext = () => next()
+  const clickNext = playOnClick(upNext.map((c) => c.row), playNext)
   const previewFraction = preview !== null && durationMs > 0 ? preview / durationMs : 0
 
   return (
@@ -153,9 +160,11 @@ export function TvNowPlaying() {
           <button type="button" aria-label={t('tv.quickSettings.title')} onClick={() => setTvOverlay('quick')}>
             <SlidersHorizontal />
           </button>
-          <button type="button" aria-label={t('common.stop')} onClick={stop}>
-            <Square />
-          </button>
+          {!inHeadset && (
+            <button type="button" aria-label={t('common.stop')} onClick={stop}>
+              <Square />
+            </button>
+          )}
         </div>
       </div>
       {upNext.length > 0 && (
@@ -163,7 +172,7 @@ export function TvNowPlaying() {
           <span className="eyebrow">{t('tv.nowPlaying.upNext')}</span>
           <div className="tv-row">
             {upNext.map((c, i) => (
-              <MediaCard key={`${c.row.id}:${i}`} row={c.row} density="tenfoot" onSelect={() => undefined} onPlay={() => next()} />
+              <MediaCard key={`${c.row.id}:${i}`} row={c.row} density="tenfoot" onSelect={clickNext} onPlay={playNext} />
             ))}
           </div>
         </div>

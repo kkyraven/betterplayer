@@ -4,9 +4,11 @@ const state = vi.hoisted(() => ({
   ui: { screen: 'library', stripHiddenFor: null as string | null },
   player: { path: '/video.mp4' as string | null, snapshot: { loaded: true, paused: false }, togglePlay: vi.fn(), seekBy: vi.fn(), stepBookmark: vi.fn() },
   editor: { open: false, togglePlay: vi.fn() },
+  devices: { held: false, setHeld: vi.fn() },
 }))
 vi.mock('@/engine/client', () => ({ enhanceCapabilities: {} }))
 vi.mock('@/state/gapSkip', () => ({ skipGap: vi.fn() }))
+vi.mock('@/state/devices', () => ({ useDevices: { getState: () => state.devices } }))
 vi.mock('@/state/editor', () => ({ useEditor: { getState: () => state.editor } }))
 vi.mock('@/state/player', () => ({ usePlayer: { getState: () => state.player } }))
 vi.mock('@/state/session', () => ({ useSession: { getState: () => ({}) } }))
@@ -24,6 +26,7 @@ beforeEach(() => {
   state.player.snapshot.paused = false
   state.player.snapshot.loaded = true
   state.editor.open = false
+  state.devices.held = false
   setBindings({ space: 'Media.PlayPause.Toggle', 'editor:space': 'Editor.Play.Toggle', arrowright: 'Media.Seek.Forward' })
 })
 
@@ -31,6 +34,16 @@ it.each(['library', 'settings', 'devices', 'session', 'browser', 'player'])('tog
   state.ui.screen = screen
   expect(dispatch('space')).toBe(true)
   expect(state.player.togglePlay).toHaveBeenCalledOnce()
+})
+
+it('holds and resumes devices without touching playback', () => {
+  setBindings({ s: 'Devices.Hold.Toggle' })
+  expect(dispatch('s')).toBe(true)
+  expect(state.devices.setHeld).toHaveBeenLastCalledWith(true)
+  state.devices.held = true
+  dispatch('s')
+  expect(state.devices.setHeld).toHaveBeenLastCalledWith(false)
+  expect(state.player.togglePlay).not.toHaveBeenCalled()
 })
 
 it('does not consume Space without loaded media', () => {

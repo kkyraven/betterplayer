@@ -21,6 +21,7 @@ import { AccountPanel } from '@/components/account/AccountPanel'
 import { ProfilePhotoDialog } from '@/components/account/ProfilePhotoDialog'
 import { SessionPanel } from '@/components/together/SessionPanel'
 import { LibraryScreen } from '@/screens/library/LibraryScreen'
+import { VrErrorToast } from '@/screens/player/InHeadset'
 import { PlayerScreen } from '@/screens/player/PlayerScreen'
 import { SessionScreen } from '@/screens/session/SessionScreen'
 import { SettingsScreen } from '@/screens/settings/SettingsScreen'
@@ -39,6 +40,7 @@ import { NowPlayingStrip } from './NowPlayingStrip'
 import { Rail } from './Rail'
 import { TitleBar } from './TitleBar'
 import { useWindowDrop } from './useWindowDrop'
+import { HoldToast } from './HoldToast'
 import './shell.css'
 
 const SCREEN_COMPONENTS: Record<Screen, ComponentType> = {
@@ -150,12 +152,14 @@ export function App() {
       {!fullscreen && <TitleBar />}
       {!fullscreen && <Rail />}
       {fullscreen && <AccountPanel floating />}
+      {fullscreen && <HoldToast />}
       <ProfilePhotoDialog />
       <main className="main">
         <div className="screen">
           <div className="screen-content"><Current /></div>
         </div>
         {screen !== 'player' && screen !== 'editor' && !gameRunning && <NowPlayingStrip />}
+        {screen !== 'player' && <VrErrorToast />}
       </main>
       <DeviceWizard />
       <SessionPanel />

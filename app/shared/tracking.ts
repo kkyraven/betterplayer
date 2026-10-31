@@ -376,9 +376,14 @@ export const REGION_TARGETS = ['genitals', 'breasts', 'buttocks', 'faces', 'feet
 export type RegionTarget = (typeof REGION_TARGETS)[number]
 export const REGION_TARGET_LABEL: Record<RegionTarget, MessageKey> = { genitals: 'regionTarget.genitals', breasts: 'regionTarget.breasts', buttocks: 'regionTarget.buttocks', faces: 'regionTarget.faces', feet: 'regionTarget.feet' }
 
+export type OwnAxes = Partial<Record<TrackAxisId, Partial<TrackAxisConfig>>>
+
 export interface TrackingSettings {
-  axes: TrackAxesConfig
-  sensitivity: number
+  axes?: TrackAxesConfig
+  own?: OwnAxes
+  on?: boolean
+  notMusic?: true
+  sensitivity?: number
   region: Region | null
   regionSource?: RegionSourceKind
   regionTarget?: RegionTarget
@@ -428,6 +433,11 @@ export const CUT_SENSITIVITIES = ['low', 'normal', 'high'] as const
 export type CutSensitivity = (typeof CUT_SENSITIVITIES)[number]
 export const CUT_THRESHOLD: Record<CutSensitivity, number> = { low: 26, normal: 18, high: 12 }
 
+export const TRACK_FILLS = ['off', 'ai-motion', 'beat'] as const satisfies readonly TrackSource[]
+export type TrackFill = (typeof TRACK_FILLS)[number]
+export const MUSIC_FILLS = ['auto', 'same', 'beat', 'ai-music'] as const
+export type MusicFill = (typeof MUSIC_FILLS)[number]
+
 export interface TrackingDefaults {
   axes: TrackAxesConfig
   sensitivity: number
@@ -437,6 +447,9 @@ export interface TrackingDefaults {
   clampJumps: boolean
   models: ModelChoice
   defaultPace: number
+  fill: TrackFill
+  musicFill: MusicFill
+  fillScripted: boolean
   motionDefault: boolean
   generateForScripted: boolean
   regionSource: 'auto' | 'centre'
@@ -461,10 +474,6 @@ export const REGION_PADDING_DEFAULT = 0.4
 export const BEAT_BOUNCE_DEPTH = { min: 0.01, max: 1, default: 1 / 6 } as const
 export const BEAT_BOUNCE_SPEED = { min: 0.5, max: 6, default: 3 } as const
 
-export function looksLikeMusicVideo(title: string): boolean {
-  return /CH/.test(title) || /hero|\b(hmv|pmv|amv|ifl|music)\b|i f(uck|ck)ing love/i.test(title)
-}
-
 export function defaultTrackAxes(): TrackAxesConfig {
   const video = (intensity: number, min = 0.25, max = 0.75, smoothingMs = SMOOTHING_SIDE_DEFAULT_MS): TrackAxisConfig => ({ source: 'video', intensity, min, max, smoothingMs, invert: false })
   return { L0: video(1, 0, 1, SMOOTHING_DEFAULT_MS), L2: video(0.6), L1: video(0.4), R1: video(0.6), R2: video(0.4), R0: { source: 'off', intensity: 0.5, min: 0, max: 1, smoothingMs: SMOOTHING_DEFAULT_MS, invert: false } }
@@ -480,6 +489,9 @@ export function defaultTrackingDefaults(): TrackingDefaults {
     clampJumps: true,
     models: { ...DEFAULT_MODELS },
     defaultPace: PACE_DEFAULT,
+    fill: 'ai-motion',
+    musicFill: 'auto',
+    fillScripted: false,
     motionDefault: true,
     generateForScripted: true,
     regionSource: 'auto',

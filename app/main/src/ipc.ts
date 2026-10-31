@@ -12,7 +12,7 @@ import { checkDestination } from './downloads/files'
 import { downloadDestination, downloadSelection } from './download-selection'
 import { syncLanguage, t } from './i18n'
 import type { Library } from './library'
-import { logEvent } from './log'
+import { copyDebugInfo, logEvent } from './log'
 import { Audio } from './audio'
 import { GameCapture } from './game'
 import { Chaster } from './chaster'
@@ -25,6 +25,7 @@ import type { RemoteClient } from './remote/client'
 import type { RemoteServer } from './remote/server'
 import type { SettingsStore } from './settings/store'
 import type { Updater } from './update'
+import type { VrHost } from './vr/host'
 import { syncNativeTheme } from './theme'
 import { isForwarded, type ForwardedChannel } from '@shared/peer'
 import { sessionRun, sessionSetup } from '@shared/session-settings'
@@ -38,7 +39,7 @@ export function send<E extends IpcEvent>(win: BrowserWindow, event: E, payload: 
   win.webContents.send(event, payload)
 }
 
-export function registerIpc(win: BrowserWindow, store: SettingsStore, library: Library, remote: RemoteServer, client: RemoteClient, account: Account, updater: Updater, ytdlp: string | null, dom: Dom) {
+export function registerIpc(win: BrowserWindow, store: SettingsStore, library: Library, remote: RemoteServer, client: RemoteClient, account: Account, updater: Updater, ytdlp: string | null, dom: Dom, vr: VrHost) {
   function handle<C extends IpcChannel>(channel: C, handler: Handler<C>) {
     handlers.set(channel, handler as (...args: never[]) => unknown)
     ipcMain.handle(channel, (event: IpcMainInvokeEvent, ...args: Parameters<IpcContract[C]>) => {
@@ -135,6 +136,7 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   handle('window:fullscreen', (on) => setFullscreen(on ?? !win.isFullScreen()))
   handle('window:isFullscreen', () => win.isFullScreen())
   handle('app:reportError', (message) => logEvent({ processType: 'renderer', reason: 'error', message }))
+  handle('app:copyDebugInfo', () => copyDebugInfo())
   let displayBlock: number | null = null
   handle('window:playing', (playing) => {
     if (playing && displayBlock === null) displayBlock = powerSaveBlocker.start('prevent-display-sleep')
@@ -212,8 +214,10 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   handle('dom:refreshPersona', (id) => dom.refreshPersona(id))
   handle('dom:memories', (id) => dom.memories(id))
   handle('dom:remember', (id, kind, content) => dom.remember(id, kind, content))
-  handle('dom:forget', (id, memoryId) => dom.forget(id, memoryId))
+  handle('dom:forget', (memoryId) => dom.forget(memoryId))
   handle('dom:forgetAll', (id) => dom.forgetAll(id))
+  handle('dom:pullMemories', (id) => dom.pullMemories(id))
+  handle('dom:pushMemories', (id, memoryIds) => dom.pushMemories(id, memoryIds))
   handle('dom:chat', (messages, tools, free) => dom.chat(messages, tools, free))
   handle('dom:image', (id, pose) => dom.image(id, pose))
   handle('dom:comfyFiles', (url) => dom.comfyFiles(url))
@@ -223,8 +227,16 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   handle('media:tags', (path) => readTags(path))
   handle('subtitles:find', (video) => findSubtitles(video))
   handle('subtitles:read', (path) => readSubtitles(path))
-  win.on('enter-full-screen', () => send(win, 'window:fullscreen', true))
-  win.on('leave-full-screen', () => send(win, 'window:fullscreen', false))
+  win.on('enter-full-screen', () => {
+    send(win, 'window:fullscreen', true)
+    if (!win.isMinimized()) send(win, 'window:shown', true)
+  })
+  win.on('leave-full-screen', () => {
+    send(win, 'window:fullscreen', false)
+    setImmediate(() => {
+      if (!win.isDestroyed() && win.isVisible() && !win.isMinimized()) send(win, 'window:shown', true)
+    })
+  })
   win.on('minimize', () => send(win, 'window:shown', false))
   win.on('hide', () => send(win, 'window:shown', false))
   win.on('restore', () => send(win, 'window:shown', true))
@@ -295,6 +307,8 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
     library.setVideoSettings(path, settings)
     account.onVideoSet(path, settings)
   })
+  handle('video:overrideCount', () => library.overrideCount())
+  handle('video:resetOverrides', () => library.resetOverrides())
   handle('generated:get', (key) => library.generated(key))
   handle('generated:put', (key, hash, scripts) => library.setGenerated(key, hash, scripts))
 
@@ -332,6 +346,7 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   })
   handle('library:reshuffle', () => library.reshuffle())
   handle('library:media', (id) => library.media(id))
+  handle('library:projection', (path) => library.projection(path))
   handle('library:suggestions', (id) => library.suggestions(id))
   handle('library:scriptFolders', (path) => library.scriptFolders(path))
   handle('library:byPath', (path) => library.byPath(path))
@@ -473,6 +488,7 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
     store.set({ ...settings, downloads: { destination } })
   })
   handle('browser:close', (id) => browser.close(id))
+  handle('browser:tabMenu', (id) => browser.tabMenu(id))
   handle('browser:activate', (id) => browser.activate(id))
   handle('browser:navigate', (id, url) => browser.navigate(id, url))
   handle('browser:back', (id) => browser.back(id))
@@ -492,10 +508,17 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   remote.setEmitter((status) => {
     if (!win.isDestroyed()) send(win, 'remote:status', status)
   })
+  remote.setHeadsetEmitter((event, data) => send(win, event, data))
   handle('remote:status', () => remote.status())
   handle('remote:publish', (state) => remote.publish(state))
+  handle('remote:toys', (toys, host) => remote.setToys(toys, host))
   handle('remote:source', () => client.status())
   handle('remote:playing', () => client.playing)
   handle('player:control', (command) => send(win, 'player:control', command))
+  handle('vr:start', () => vr.start())
+  handle('vr:stop', () => vr.stop())
+  handle('vr:state', (state) => vr.setState(state))
+  handle('vr:panelState', () => vr.state)
+  handle('vr:command', (command) => vr.command(command))
   handle('remote:scripts', (url) => client.scripts(url))
 }

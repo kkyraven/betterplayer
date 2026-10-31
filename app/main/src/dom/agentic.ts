@@ -308,10 +308,6 @@ export class AgenticLover {
     return json.data
   }
 
-  async deleteMemory(id: string) {
-    await this.call(`/api/memories/${encodeURIComponent(id)}`, { method: 'DELETE' })
-  }
-
   async image(prompt: string, negative: string): Promise<string> {
     const json = (await this.call('/api/ag-cloud/image/generate', { method: 'POST', body: JSON.stringify({ prompt, negative_prompt: negative, width: 640, height: 960 }) })) as { image_url?: string }
     if (!json.image_url) throw domError('server', 'no image')

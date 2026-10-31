@@ -16,6 +16,8 @@ const m = vi.hoisted(() => ({
   haltSensation: vi.fn(), stopSensation: vi.fn(() => true), startSensation: vi.fn(), resetSensation: vi.fn(), clearPlaybackEnd: vi.fn(),
   open: vi.fn(), pause: vi.fn(), play: vi.fn(), seek: vi.fn(),
   replies: [] as ChatReply[],
+  held: false,
+  devicesListener: null as ((s: { held: boolean }, prev: { held: boolean }) => void) | null,
   live: { timeMs: 0, durationMs: 120000, seekGeneration: 0, playbackEnded: false },
   path: '/one.mp4',
   paused: false,
@@ -29,7 +31,7 @@ vi.mock('@/engine/client', () => ({ engine: { haltSensation: m.haltSensation, ap
 vi.mock('@/dom/level', () => ({ applyLevel: vi.fn(), reapplyRanges: vi.fn(), releaseLevel: vi.fn() }))
 vi.mock('./account', () => ({ isFree: () => false, isPremium: () => true, useAccount: { getState: () => ({}) } }))
 vi.mock('./library', () => ({ useLibrary: { getState: () => ({ tagEdits: m.tagEdits, setTags: m.setTags }) } }))
-vi.mock('./devices', () => ({ outputName: () => 'Toy', useDevices: { getState: () => ({ outputs: [] }) } }))
+vi.mock('./devices', () => ({ outputName: () => 'Toy', useDevices: { getState: () => ({ outputs: [], held: m.held }), subscribe: (fn: typeof m.devicesListener) => { m.devicesListener = fn; return () => { m.devicesListener = null } } } }))
 vi.mock('./i18n', () => ({ t: (key: string) => key }))
 vi.mock('./live', () => ({
   get: () => m.live,
@@ -49,7 +51,7 @@ vi.mock('./player', () => ({
 vi.mock('./settings', () => ({ useSettings: { subscribe: () => () => {} } }))
 vi.mock('./ui', () => ({ useUi: { getState: () => ({ setScreen: vi.fn() }) } }))
 
-import { useDom } from './dom'
+import { domErrorCode, useDom } from './dom'
 
 const call = (name: string, args: Record<string, unknown>): ChatToolCall => ({ id: crypto.randomUUID(), type: 'function', function: { name, arguments: JSON.stringify(args) } })
 const reply = (...toolCalls: ChatToolCall[]): ChatReply => ({ content: '', toolCalls })
@@ -78,6 +80,7 @@ beforeEach(() => {
   m.path = '/one.mp4'
   m.paused = false
   m.loaded = true
+  m.held = false
   m.durationMs = 120000
   m.live = { timeMs: 0, durationMs: 120000, seekGeneration: 0, playbackEnded: false }
   m.invoke.mockImplementation(async (channel: string, value: unknown) => {
@@ -99,6 +102,28 @@ it('runs fractional sensation pauses and early starts without changing video pla
   expect(m.pause).not.toHaveBeenCalled()
   expect(m.play).not.toHaveBeenCalled()
   expect(results()).toContain('Sensation paused for 2.5')
+})
+
+it('leaves the user hold to the user and says so', async () => {
+  m.held = true
+  useDom.setState({ advancedPain: { ...defaultAdvancedPain(), enabled: true } })
+  await start(call('get_playback_state', {}), call('start_sensation', {}), call('stop_sensation', { seconds: 2 }), call('apply_pain', { profile: 'whip', intensity: 5, seconds: 2 }))
+  expect(m.startSensation).not.toHaveBeenCalled()
+  expect(m.stopSensation).not.toHaveBeenCalled()
+  expect(m.applyPain).not.toHaveBeenCalled()
+  expect(results()).toContain('The user has paused their toys')
+  expect(results()).not.toContain('Sensation active')
+})
+
+it('tells the dom when the user pauses or resumes their toys', async () => {
+  await start()
+  m.devicesListener?.({ held: true }, { held: false })
+  await settle()
+  m.devicesListener?.({ held: false }, { held: true })
+  await settle()
+  const said = chatMessages().flat().map((message) => message.content).join(' ')
+  expect(said).toContain('[Event] The user paused their toys.')
+  expect(said).toContain('[Event] The user resumed their toys.')
 })
 
 it('counts one AI Dom session start and ignores duplicate or missing starts', async () => {
@@ -442,4 +467,9 @@ it('leaves ordinary chat running when the safeword is blank or only a substring'
   await settle()
   expect(useDom.getState().running).toBe(true)
   expect(m.haltSensation).not.toHaveBeenCalled()
+})
+
+it("reads the code past Electron's channel name", () => {
+  expect(domErrorCode(new Error("Error invoking remote method 'dom:pullMemories': Error: dom:signedOut"))).toBe('signedOut')
+  expect(domErrorCode(new Error("Error invoking remote method 'dom:chat': Error: boom"))).toBeNull()
 })

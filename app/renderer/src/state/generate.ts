@@ -6,7 +6,7 @@ import { useEditor } from './editor'
 import { engine } from '@/engine/client'
 import { invoke } from '@/ipc'
 import { t, useI18n } from '@/state/i18n'
-import { currentSetup, runGeneration, savedResult, toFiles, toRows, waitForAudio, type RunSetup } from './generated'
+import { currentSetup, runGeneration, savedResult, toFiles, toRows, waitForAudio, waitForModels, type RunSetup } from './generated'
 import { useRecompute } from './recompute'
 import { isUrl, usePlayer } from './player'
 import { useTracking } from './tracking'
@@ -104,7 +104,7 @@ export const useGenerate = create<GenerateStore>()((set, get) => {
       }
       if (sources.has('video') || sources.has('hero') || sources.has('ai-motion')) {
         if (tracking.regionSource === 'auto' && tracking.state?.detector.status === 'ready') steps.push({ id: 'model', label: t('editor.generate.loadDetector'), detail: null, status: 'pending' })
-        const motionModel = sources.has('ai-motion') && tracking.motion?.status === 'ready'
+        const motionModel = sources.has('ai-motion') && (tracking.motion?.status === 'ready' || tracking.motion?.status === 'loading')
         if (motionModel) steps.push({ id: 'motion', label: t('editor.generate.loadAiMotion'), detail: tracking.motion?.provider ?? null, status: 'pending' })
         const parts: string[] = []
         if (sources.has('video') || (sources.has('ai-motion') && !motionModel)) parts.push(t('editor.generate.what.motion'))
@@ -148,6 +148,11 @@ export const useGenerate = create<GenerateStore>()((set, get) => {
         }
       }
       if (signal.aborted) return
+      if (has('motion') || has('music')) {
+        if (has('motion')) mark('motion', { status: 'running' })
+        await waitForModels(target.path, setup?.sources ?? new Set(), signal).catch(() => undefined)
+        if (signal.aborted) return
+      }
       if (usePlayer.getState().path !== target.path) {
         set({ phase: 'error', error: t('editor.generate.videoChanged') })
         return

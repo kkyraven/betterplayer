@@ -12,12 +12,14 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const READ_TIMEOUT: Duration = Duration::from_millis(100);
 const KEEP_ALIVE: Duration = Duration::from_secs(1);
 const MAX_FRAME: usize = 1 << 20;
+const QUEST_STALE: Duration = Duration::from_millis(1500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FollowKind {
     DeoVr,
     HereSphere,
     Whirligig,
+    Quest,
 }
 
 impl FollowKind {
@@ -26,6 +28,7 @@ impl FollowKind {
             "deovr" => Some(FollowKind::DeoVr),
             "heresphere" => Some(FollowKind::HereSphere),
             "whirligig" => Some(FollowKind::Whirligig),
+            "quest" => Some(FollowKind::Quest),
             _ => None,
         }
     }
@@ -35,14 +38,19 @@ impl FollowKind {
             FollowKind::DeoVr => "deovr",
             FollowKind::HereSphere => "heresphere",
             FollowKind::Whirligig => "whirligig",
+            FollowKind::Quest => "quest",
         }
     }
 
     pub fn default_port(self) -> u16 {
         match self {
-            FollowKind::DeoVr | FollowKind::HereSphere => 23554,
+            FollowKind::DeoVr | FollowKind::HereSphere | FollowKind::Quest => 23554,
             FollowKind::Whirligig => 2000,
         }
+    }
+
+    fn stale_after(self) -> Option<Duration> {
+        (self == FollowKind::Quest).then_some(QUEST_STALE)
     }
 }
 
@@ -90,10 +98,8 @@ pub struct DeoFrame {
 
 impl DeoFrame {
     pub fn identity(&self) -> Option<String> {
-        self.resource
-            .clone()
-            .or_else(|| self.path.clone())
-            .filter(|s| !s.is_empty())
+        let named = |s: &Option<String>| s.clone().filter(|s| !s.is_empty());
+        named(&self.resource).or_else(|| named(&self.path))
     }
 
     pub fn playing(&self) -> bool {
@@ -275,7 +281,9 @@ fn run(inner: &Arc<Inner>, kind: FollowKind, address: &str) {
                 inner.apply(FollowEvent::Status(FollowStatus::Connected));
                 match kind {
                     FollowKind::Whirligig => read_whirligig(inner, stream),
-                    FollowKind::DeoVr | FollowKind::HereSphere => read_deo(inner, stream),
+                    FollowKind::DeoVr | FollowKind::HereSphere | FollowKind::Quest => {
+                        read_deo(inner, stream, kind.stale_after())
+                    }
                 }
             }
             Err(e) => Err(e),
@@ -305,12 +313,20 @@ fn connect(address: &str) -> Result<TcpStream, String> {
     Ok(stream)
 }
 
-fn read_deo(inner: &Arc<Inner>, mut stream: TcpStream) -> Result<(), String> {
+fn read_deo(
+    inner: &Arc<Inner>,
+    mut stream: TcpStream,
+    stale_after: Option<Duration>,
+) -> Result<(), String> {
     let mut frames = Frames::default();
     let mut buf = [0u8; 8192];
     stream.write_all(&[0u8; 4]).map_err(|e| e.to_string())?;
     let mut last_ping = Instant::now();
+    let mut last_frame = Instant::now();
     while !inner.stopping() {
+        if stale_after.is_some_and(|after| last_frame.elapsed() >= after) {
+            inner.apply(FollowEvent::Playing(false));
+        }
         if last_ping.elapsed() >= KEEP_ALIVE {
             stream.write_all(&[0u8; 4]).map_err(|e| e.to_string())?;
             last_ping = Instant::now();
@@ -320,6 +336,7 @@ fn read_deo(inner: &Arc<Inner>, mut stream: TcpStream) -> Result<(), String> {
             Ok(n) => {
                 frames.push(&buf[..n]);
                 while let Some(payload) = frames.next()? {
+                    last_frame = Instant::now();
                     if payload.is_empty() {
                         inner.apply(FollowEvent::Path(None));
                         inner.apply(FollowEvent::Playing(false));
@@ -433,6 +450,12 @@ mod tests {
         assert_eq!(f.identity().as_deref(), Some("/v/a.mp4"));
         assert_eq!(f.path.as_deref(), Some("/dl/1"));
         assert!(!f.playing());
+
+        let f: DeoFrame =
+            serde_json::from_str(r#"{"path":"http://pc:8420/media/7","resource":""}"#).unwrap();
+        assert_eq!(f.identity().as_deref(), Some("http://pc:8420/media/7"));
+        let f: DeoFrame = serde_json::from_str(r#"{"path":"","resource":""}"#).unwrap();
+        assert_eq!(f.identity(), None);
     }
 
     #[test]
@@ -510,5 +533,65 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn quest_kind_speaks_the_heresphere_protocol_with_a_watchdog() {
+        assert_eq!(FollowKind::from_str("quest"), Some(FollowKind::Quest));
+        assert_eq!(FollowKind::Quest.as_str(), "quest");
+        assert_eq!(FollowKind::Quest.default_port(), 23554);
+        assert_eq!(FollowKind::Quest.stale_after(), Some(QUEST_STALE));
+        assert_eq!(FollowKind::HereSphere.stale_after(), None);
+    }
+
+    #[test]
+    fn a_silent_quest_pauses_once_and_resumes_on_the_next_frame() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let playing = r#"{"path":"http://pc:8420/media/7","playerState":0,"duration":60,"currentTime":5,"playbackSpeed":1.0}"#;
+        let server = thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            s.write_all(&frame(playing)).unwrap();
+            thread::sleep(QUEST_STALE + Duration::from_millis(700));
+            s.write_all(&frame(playing)).unwrap();
+            thread::sleep(Duration::from_millis(400));
+        });
+
+        let events: Arc<Mutex<Vec<FollowEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink: FollowSink = {
+            let events = events.clone();
+            Arc::new(move |e| events.lock().unwrap().push(e))
+        };
+        let mut follow = Follow::start(FollowKind::Quest, "127.0.0.1", port, sink);
+        let playing_events = || {
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|e| match e {
+                    FollowEvent::Playing(p) => Some(*p),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let until = Instant::now() + Duration::from_secs(5);
+        while playing_events().len() < 3 && Instant::now() < until {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let state = follow.state();
+        follow.stop();
+        server.join().unwrap();
+
+        assert_eq!(playing_events(), vec![true, false, true]);
+        assert!(state.playing);
+        let statuses: Vec<FollowEvent> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, FollowEvent::Status(_)))
+            .cloned()
+            .collect();
+        assert_eq!(statuses, vec![FollowEvent::Status(FollowStatus::Connected)]);
     }
 }

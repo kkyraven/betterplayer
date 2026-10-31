@@ -41,6 +41,7 @@ export interface DomMemory {
   kind: DomMemoryKind
   content: string
   createdAt: number
+  synced: boolean
 }
 
 export const IMAGE_PROVIDERS = ['off', 'comfyui', 'agenticlover'] as const

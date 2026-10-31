@@ -1,0 +1,55 @@
+{
+  "default_bindings": [
+    { "controller_type": "oculus_touch", "binding_url": "bindings_oculus_touch.json" },
+    { "controller_type": "knuckles", "binding_url": "bindings_knuckles.json" },
+    { "controller_type": "vive_controller", "binding_url": "bindings_vive_controller.json" },
+    { "controller_type": "generic_hmd", "binding_url": "bindings_generic_hmd.json" },
+    { "controller_type": "rift", "binding_url": "bindings_rift.json" },
+    { "controller_type": "indexhmd", "binding_url": "bindings_indexhmd.json" },
+    { "controller_type": "vive", "binding_url": "bindings_vive.json" },
+    { "controller_type": "vive_pro", "binding_url": "bindings_vive_pro.json" },
+    { "controller_type": "vive_cosmos", "binding_url": "bindings_vive_cosmos.json" },
+    { "controller_type": "holographic_hmd", "binding_url": "bindings_holographic_hmd.json" }
+  ],
+  "action_sets": [
+    { "name": "/actions/watch", "usage": "single" },
+    { "name": "/actions/headset", "usage": "hidden" }
+  ],
+  "actions": [
+    { "name": "/actions/watch/in/play_pause", "type": "boolean", "requirement": "suggested" },
+    { "name": "/actions/watch/in/back", "type": "boolean", "requirement": "suggested" },
+    { "name": "/actions/watch/in/controls", "type": "boolean", "requirement": "suggested" },
+    { "name": "/actions/watch/in/point", "type": "boolean", "requirement": "optional" },
+    { "name": "/actions/watch/in/recentre", "type": "boolean", "requirement": "suggested" },
+    { "name": "/actions/watch/in/seek", "type": "vector2", "requirement": "suggested" },
+    { "name": "/actions/watch/in/seek_back", "type": "boolean", "requirement": "optional" },
+    { "name": "/actions/watch/in/seek_forward", "type": "boolean", "requirement": "optional" },
+    { "name": "/actions/watch/in/volume_up", "type": "boolean", "requirement": "optional" },
+    { "name": "/actions/watch/in/volume_down", "type": "boolean", "requirement": "optional" },
+    { "name": "/actions/watch/in/turn_left", "type": "boolean", "requirement": "optional" },
+    { "name": "/actions/watch/in/turn_right", "type": "boolean", "requirement": "optional" },
+    { "name": "/actions/watch/in/stop", "type": "boolean", "requirement": "suggested" },
+    { "name": "/actions/watch/out/haptic", "type": "vibration" },
+    { "name": "/actions/headset/in/on_head", "type": "boolean", "requirement": "optional" }
+  ],
+  "localization": [
+    {
+      "language_tag": "en_US",
+      "/actions/watch": "Watching",
+      "/actions/watch/in/play_pause": "Play or pause",
+      "/actions/watch/in/back": "Back",
+      "/actions/watch/in/controls": "Controls",
+      "/actions/watch/in/point": "Show controls",
+      "/actions/watch/in/recentre": "Recentre",
+      "/actions/watch/in/seek": "Seek",
+      "/actions/watch/in/seek_back": "Back 10 seconds",
+      "/actions/watch/in/seek_forward": "Forward 10 seconds",
+      "/actions/watch/in/volume_up": "Volume up",
+      "/actions/watch/in/volume_down": "Volume down",
+      "/actions/watch/in/turn_left": "Turn left",
+      "/actions/watch/in/turn_right": "Turn right",
+      "/actions/watch/in/stop": "Stop",
+      "/actions/watch/out/haptic": "Vibration"
+    }
+  ]
+}

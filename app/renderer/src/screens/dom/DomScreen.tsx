@@ -167,7 +167,7 @@ function DomPage({ dom, locked }: { dom: DomProfile; locked: boolean }) {
       <div className="dom-body">
         {tab === 'personality' && <PersonalityTab dom={dom} edit={(d) => void save(d)} />}
         {tab === 'images' && <ImagesTab dom={dom} edit={(d) => void save(d)} />}
-        {tab === 'memory' && <MemoryTab dom={dom} />}
+        {tab === 'memory' && <MemoryTab key={dom.id} dom={dom} />}
       </div>
       <Prompt open={deleting} onOpenChange={setDeleting} title={t('dom.delete', { name: dom.name || t('dom.newName') })} confirmLabel={t('common.delete')} danger onConfirm={() => void remove(dom.id)} />
     </>

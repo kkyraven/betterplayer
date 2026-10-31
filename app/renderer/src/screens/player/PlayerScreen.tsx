@@ -1,6 +1,7 @@
 import { ChevronLeft } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/Button'
+import { Toast } from '@/components/ui/Toast'
 import { TooltipGroup } from '@/components/ui/TooltipGroup'
 import { IconButton } from '@/components/ui/IconButton'
 import { DeviceViz } from '@/components/player/DeviceViz'
@@ -20,6 +21,7 @@ import { useTracking } from '@/state/tracking'
 import { SCREEN_LABEL, useUi } from '@/state/ui'
 import { ControlBar } from './ControlBar'
 import { EndGrid } from './EndGrid'
+import { InHeadset } from './InHeadset'
 import { SideSheet } from './SideSheet'
 import './player.css'
 
@@ -111,6 +113,8 @@ export function PlayerScreen() {
       <ZoneBox />
       <ZoneBoxes />
       <HeroTip />
+      <InHeadset />
+      <CrosshairToast />
       {!path && (
         <div className="pempty">
           <span className="faint">{t('player.empty.nothingPlaying')}</span>
@@ -141,7 +145,7 @@ export function PlayerScreen() {
               </IconButton>
               {heading && <h2 className={sessionTitle ? 'faint' : undefined}>{heading}</h2>}
             </div>
-            <TrackBar variant="player" />
+            <TrackBar variant="player" overlay={overlay} />
           </TooltipGroup>
           )}
           {!sheet && !suggesting && <DeviceViz />}
@@ -152,5 +156,30 @@ export function PlayerScreen() {
     </div>
     {domRunning && <DomColumn />}
     </>
+  )
+}
+
+function CrosshairToast() {
+  const t = useT()
+  const toast = useTracking((s) => s.toast)
+  const allVideos = useTracking((s) => s.allVideos)
+  const undoAllVideos = useTracking((s) => s.undoAllVideos)
+  const dismissToast = useTracking((s) => s.dismissToast)
+  useEffect(() => dismissToast, [dismissToast])
+  if (!toast) return null
+  const changed = toast.kind === 'changed'
+  return (
+    <div className="track-toast">
+      <Toast
+        key={toast.id}
+        message={t(changed ? 'player.toast.changedAll' : toast.kind === 'off' ? 'player.toast.trackingOff' : 'player.toast.trackingOn')}
+        action={
+          <Button variant="ghost" onClick={() => void (changed ? undoAllVideos() : allVideos())}>
+            {t(changed ? 'common.undo' : 'library.section.all')}
+          </Button>
+        }
+        onHide={dismissToast}
+      />
+    </div>
   )
 }

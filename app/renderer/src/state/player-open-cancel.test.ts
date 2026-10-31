@@ -4,7 +4,7 @@ import type { MediaDetail } from '@shared/library'
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(), settings: null as Settings | null, settingsLoad: vi.fn(),
-  engine: { load: vi.fn(), play: vi.fn(), setAxis: vi.fn(), setGlobalOffsetMs: vi.fn(), setVolume: vi.fn(), setMuted: vi.fn() },
+  engine: { load: vi.fn(), play: vi.fn(), setAxis: vi.fn(), setGlobalOffsetMs: vi.fn(), setVolume: vi.fn(), setMuted: vi.fn(), prepare: vi.fn() },
 }))
 vi.mock('@/ipc', () => ({ invoke: mocks.invoke }))
 vi.mock('@/engine/client', () => ({ engine: mocks.engine, applyEnhance: vi.fn() }))
@@ -91,6 +91,19 @@ it('passes cancellation to native loading and suppresses playback after an abort
   expect(mocks.engine.play).not.toHaveBeenCalled()
 })
 
+it("shows the library's quick projection answer before the file loads, not the name's first", async () => {
+  const vr180 = { projection: { kind: 'equirect180', layout: 'sbs', fov: 190, swapEyes: false }, source: 'picture' }
+  mocks.invoke.mockImplementation(async (channel) => channel === 'library:projection' ? vr180 : null)
+  let atLoad: unknown = null
+  mocks.engine.load.mockImplementation(async () => {
+    atLoad = player.getState().projectionSource
+    return { scripts: [] }
+  })
+  await player.getState().open('/videos/untagged.mp4')
+  expect(atLoad).toBe('picture')
+  expect(player.getState().projection).toEqual(vr180.projection)
+})
+
 it('passes matching script folders to playback', async () => {
   mocks.invoke.mockImplementation(async (channel) => channel === 'library:scriptFolders' ? ['/scripts'] : null)
   await player.getState().open('/videos/scene.mp4')
@@ -122,4 +135,22 @@ it('cancels while matching script folders are being found', async () => {
   await opening
   expect(mocks.engine.load).not.toHaveBeenCalled()
   expect(player.getState().path).toBeNull()
+})
+
+it('drops overrides from settings read before Reset all overrides', async () => {
+  const tracking = { region: null, own: { L0: { source: 'beat' as const } }, on: false, pace: 0.8 }
+  mocks.engine.prepare.mockResolvedValue(undefined)
+  mocks.invoke.mockImplementation(async (channel) => channel === 'video:get' ? { globalOffsetMs: 0, axes: {}, tracking } : null)
+  await player.getState().prepare('/next.mp4')
+  player.getState().dropOverrides()
+  await player.getState().open('/next.mp4')
+  expect(player.getState().video.tracking).toEqual({ region: null, own: {}, pace: 0.8 })
+  const video = deferred<{ globalOffsetMs: number; axes: object; tracking: typeof tracking }>()
+  mocks.invoke.mockImplementation(async (channel) => channel === 'video:get' ? video.promise : null)
+  const opening = player.getState().open('/other.mp4')
+  await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith('video:get', '/other.mp4'))
+  player.getState().dropOverrides()
+  video.resolve({ globalOffsetMs: 0, axes: {}, tracking })
+  await opening
+  expect(player.getState().video.tracking).toEqual({ region: null, own: {}, pace: 0.8 })
 })

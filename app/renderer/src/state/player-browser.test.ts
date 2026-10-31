@@ -3,7 +3,7 @@ import { defaultSettings } from '@shared/settings'
 import type { BrowserHandoff } from '@shared/browser'
 
 const mocks = vi.hoisted(() => ({
-  timeMs: 0, invoke: vi.fn(), addRecent: vi.fn(), autoStart: vi.fn(), setBasePlaybackRate: vi.fn(),
+  timeMs: 0, invoke: vi.fn(), addRecent: vi.fn(), start: vi.fn(), setBasePlaybackRate: vi.fn(),
   engine: { load: vi.fn(), play: vi.fn(), unload: vi.fn(), setAxis: vi.fn(), setGlobalOffsetMs: vi.fn(), setVolume: vi.fn(), setMuted: vi.fn() },
 }))
 vi.mock('@/ipc', () => ({ invoke: mocks.invoke }))
@@ -16,7 +16,7 @@ vi.mock('./i18n', () => ({ t: (key: string) => key }))
 vi.mock('./library', () => ({ useLibrary: {} }))
 vi.mock('./settings', () => ({ useSettings: { getState: () => ({ settings: defaultSettings(), addRecent: mocks.addRecent }) } }))
 vi.mock('./subtitles', () => ({ useSubtitles: { getState: () => ({ load: vi.fn(), clear: vi.fn() }) } }))
-vi.mock('./tracking', () => ({ useTracking: { getState: () => ({ stop: vi.fn(), autoStart: mocks.autoStart, setBasePlaybackRate: mocks.setBasePlaybackRate }) } }))
+vi.mock('./tracking', () => ({ useTracking: { getState: () => ({ stop: vi.fn(), start: mocks.start, autoStart: vi.fn(), setBasePlaybackRate: mocks.setBasePlaybackRate }) } }))
 vi.mock('./ui', () => ({ useUi: { getState: () => ({ setScreen: vi.fn() }) } }))
 
 const handoff: BrowserHandoff = { pageUrl: 'https://example.com/watch/123', url: 'https://cdn.example.com/video.mp4', headers: 'Referer: https://example.com/watch/123,Cookie: session=test', position: 42, rate: 1.5 }
@@ -60,9 +60,9 @@ it('loads browser media directly while keeping page identity, position and speed
   expect(mocks.invoke).toHaveBeenCalledWith('video:get', handoff.pageUrl)
   expect(mocks.invoke).toHaveBeenCalledWith('library:played', handoff.pageUrl)
   expect(mocks.addRecent).toHaveBeenCalledWith(handoff.pageUrl)
-  expect(mocks.autoStart).toHaveBeenCalledOnce()
+  expect(mocks.start).toHaveBeenCalledExactlyOnceWith('player')
   expect(mocks.setBasePlaybackRate).toHaveBeenCalledWith(1.5)
-  expect(mocks.setBasePlaybackRate.mock.invocationCallOrder[0]).toBeGreaterThan(mocks.autoStart.mock.invocationCallOrder[0]!)
+  expect(mocks.setBasePlaybackRate.mock.invocationCallOrder[0]).toBeGreaterThan(mocks.start.mock.invocationCallOrder[0]!)
 })
 
 it('falls back to page extraction without browser headers when direct loading rejects', async () => {
@@ -70,7 +70,7 @@ it('falls back to page extraction without browser headers when direct loading re
   await open()
   expect(mocks.engine.load).toHaveBeenCalledTimes(2)
   expect(mocks.engine.load).toHaveBeenLastCalledWith(handoff.pageUrl, 42, undefined, undefined, undefined, expect.any(AbortSignal), undefined, undefined)
-  expect(mocks.autoStart).toHaveBeenCalledOnce()
+  expect(mocks.start).toHaveBeenCalledOnce()
 })
 
 it('retries a delayed native media error once and exposes a failed fallback', async () => {

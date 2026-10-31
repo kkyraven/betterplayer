@@ -1,0 +1,20 @@
+.in-headset { position: absolute; z-index: 1; inset: 0; display: grid; place-content: center; justify-items: center; gap: 10px; text-align: center; background: rgba(5, 6, 9, 0.8); }
+.in-headset .ih-icon { width: 64px; height: 64px; margin-bottom: 4px; color: var(--accent); stroke-width: 1.6; }
+.in-headset h2 { font-size: 22px; font-weight: 650; }
+.in-headset .muted { margin-top: -4px; font-size: 14px; }
+.in-headset .btn { margin-top: 10px; }
+.ih-toast { position: absolute; z-index: 30; left: 0; right: 0; bottom: 96px; }
+
+.tv-stage .in-headset {
+  inset: auto 64px auto auto; top: 50%; transform: translateY(-50%); min-width: 360px; padding: 44px 64px; gap: 14px;
+  border-radius: 24px; background: var(--bg-2); border: 1px solid var(--line-2); box-shadow: var(--shadow);
+}
+.tv-stage .in-headset .ih-icon { width: 88px; height: 88px; }
+.tv-stage .in-headset h2 { margin: 0; font-size: 34px; letter-spacing: -0.02em; }
+.tv-stage .in-headset .muted { margin-top: -6px; font-size: 20px; }
+.tv-stage .in-headset .btn { margin-top: 16px; height: 64px; padding: 0 28px; font-size: 20px; border-radius: 16px; }
+.tv:has(.tv-stage .in-headset) .np { max-width: min(760px, calc(100% - 392px)); }
+
+.tv .ih-toast { bottom: 64px; }
+.tv:not([data-stage]) .ih-toast { bottom: 136px; }
+.tv .ih-toast .toast { min-height: 64px; padding: 0 24px; border-radius: 16px; font-size: 20px; background: var(--bg-2); backdrop-filter: none; -webkit-backdrop-filter: none; }

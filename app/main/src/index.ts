@@ -15,6 +15,7 @@ import { ACCOUNT_URL_DEFAULT } from '@shared/account'
 import { SettingsStore } from './settings/store'
 import { startStashApp } from './stash-app'
 import { Updater } from './update'
+import { VrHost } from './vr/host'
 import { syncNativeTheme, watchNativeTheme } from './theme'
 
 if (process.platform === 'darwin' && !app.isPackaged) {
@@ -54,6 +55,7 @@ const mediaArg = (args: string[], cwd: string) => {
 }
 let launchFile = mediaArg(argv, process.cwd())
 const screenshot = flag('screenshot')
+const vrPreview = !app.isPackaged && argv.includes('--vr-preview')
 function writableDir(dir: string): boolean {
   const probe = join(dir, '.writable')
   try {
@@ -106,12 +108,13 @@ function createWindow(store: SettingsStore, library: Library, remote: RemoteServ
       contextIsolation: false,
       sandbox: false,
       backgroundThrottling: false,
-      additionalArguments: [`--bp-engine=${enginePath}`, `--bp-languages=${app.getPreferredSystemLanguages().join(',')}`, `--bp-language=${store.get().general.language}`, ...(store.get().general.setupDone ? [] : ['--bp-first-start']), ...(ytdlp ? [`--bp-ytdlp=${ytdlp}`] : []), ...(launchFile ? [`--bp-file=${launchFile}`] : []), ...(flag('start') ? [`--bp-start=${flag('start')}`] : [])],
+      additionalArguments: [`--bp-engine=${enginePath}`, `--bp-languages=${app.getPreferredSystemLanguages().join(',')}`, `--bp-language=${store.get().general.language}`, ...(store.get().general.setupDone ? [] : ['--bp-first-start']), ...(ytdlp ? [`--bp-ytdlp=${ytdlp}`] : []), ...(launchFile ? [`--bp-file=${launchFile}`] : []), ...(flag('start') ? [`--bp-start=${flag('start')}`] : []), ...(vrPreview ? ['--bp-vr-preview'] : [])],
     },
   })
 
   watchNativeTheme(store, win)
-  registerIpc(win, store, library, remote, client, account, updater, ytdlp, dom)
+  const vr = new VrHost(win, enginePath, store, vrPreview)
+  registerIpc(win, store, library, remote, client, account, updater, ytdlp, dom, vr)
   let reloadedAt = 0
   win.webContents.on('render-process-gone', (_event, details) => {
     logProcessExit('renderer', details)
@@ -152,6 +155,8 @@ function createWindow(store: SettingsStore, library: Library, remote: RemoteServ
       }
       await new Promise((r) => setTimeout(r, 200))
       writeFileSync(screenshot, (await win.webContents.capturePage()).toPNG())
+      const deck = vr.deckWindow
+      if (deck) writeFileSync(`${screenshot.replace(/\.png$/i, '')}-deck.png`, (await deck.webContents.capturePage()).toPNG())
       app.quit()
     }, Number(flag('seconds') ?? 4) * 1000)
   }

@@ -12,10 +12,14 @@ import type { ScriptSet } from '@shared/peer'
 import { isUrl, type RemoteLoad, type ServerInput } from '@shared/remote'
 import { contains } from '../remote/paths'
 import type { PerVideoSettings } from '@shared/settings'
+import { needsLook, resolveProjection, type Projection, type ResolvedProjection } from '@shared/projection'
+import { hasOverrides, withoutOverrides } from '@shared/trackingRules'
 import { isEmptyPerVideo, readPerVideo } from '../settings/store'
-import { LibraryDb, type TagRow } from './db'
+import { LibraryDb, type TagRow, type VideoSettingsRow } from './db'
 import { EditorStore } from '../editor'
+import { lookAtFile, LookQueue } from './look'
 import { buildReport, resolveSet } from './matcher'
+import { probe } from './probe'
 import { Scanner, type JobSink } from './scanner'
 import { ScriptScanner } from './scripts'
 import { detectServer, makeAdapter, type Adapter } from './servers/adapter'
@@ -93,11 +97,23 @@ function fileStamp(path: string): string | null {
   }
 }
 
+function perVideo(row: VideoSettingsRow): PerVideoSettings {
+  let raw: unknown = null
+  try {
+    raw = JSON.parse(row.settings)
+  } catch {
+    raw = null
+  }
+  const settings = readPerVideo(raw)
+  return row.positionMs === null ? settings : { ...settings, position: row.positionMs }
+}
+
 export class Library {
   private readonly db: LibraryDb
   readonly editor: EditorStore
   private readonly thumbs: ThumbQueue
   private readonly tagger: TagQueue
+  private readonly looks: LookQueue
   private readonly jobs: JobSink
   private readonly scanner: Scanner
   private readonly scriptScanner: ScriptScanner
@@ -121,7 +137,8 @@ export class Library {
     this.db = new LibraryDb(join(options.dataDir, 'library.db'))
     this.writeBack = new RemoteWrites(this.db, (root) => this.adapter(root), () => this.changed({ kind: 'meta' }))
     this.editor = new EditorStore(this.db)
-    this.thumbs = new ThumbQueue(options.dataDir, this.db, { done: (id) => this.thumbsDone.add(id), progress: this.progressChanged })
+    this.looks = new LookQueue(this.db, (id) => this.thumbs.file('strip', id), (row) => this.syncKind(row.path, this.videoSettings(row.path)?.projection))
+    this.thumbs = new ThumbQueue(options.dataDir, this.db, { done: (id) => { this.thumbsDone.add(id); this.looks.enqueue(id) }, progress: this.progressChanged })
     const scripts = this.scriptScanner = new ScriptScanner(options.enginePath)
     this.servers = new ServerSync(this.db, scripts, join(options.dataDir, 'remote'), (id) => this.thumbs.file('thumb', id), (id) => this.thumbs.file('strip', id), {
       changed: this.serverChanged,
@@ -143,6 +160,7 @@ export class Library {
       enqueue: (job) => {
         this.thumbs.enqueue(job)
         if (job.tags) this.tagger.enqueue(job)
+        if (job.look) this.looks.enqueue(job.id)
       },
       remove: async (ids) => {
         this.tagger.remove(ids)
@@ -238,6 +256,7 @@ export class Library {
     this.tagsDone.close()
     this.writeBack.close()
     this.tagger.close()
+    this.looks.close()
     this.scanner.close()
     this.servers.close()
     this.posterDecoder.close()
@@ -620,27 +639,70 @@ export class Library {
     return this.db.recentSessionMediaIds(sessions);
   }
 
+  async projection(path: string): Promise<ResolvedProjection> {
+    const user = this.videoSettings(path)?.projection
+    if (user) return { projection: user, source: 'user' }
+    const row = this.db.projectionFacts(path)
+    if (!row) {
+      const name = (path.split(/[\\/]/).pop() ?? '').replace(/[?#].*$/, '').replace(/\.[^.]*$/, '')
+      const local = !isUrl(path) && !/^[\\/]{2}/.test(path) && isVideoPath(path)
+      const probed = local ? await probe(path).catch(() => null) : null
+      const input = { name, width: probed?.width ?? 0, height: probed?.height ?? 0, container: probed?.vr }
+      const picture = probed && needsLook(input) ? await lookAtFile(path, probed.durationMs).catch(() => null) : null
+      return resolveProjection({ ...input, picture })
+    }
+    if (!row.remote && row.input.container === undefined) {
+      const probed = await probe(path).catch(() => null)
+      if (this.closed) return resolveProjection(row.input)
+      if (probed) this.db.setVrProbe(row.id, JSON.stringify(probed.vr))
+    }
+    await this.looks.atOpen(this.db.projectionFacts(path)).catch(() => false)
+    if (this.closed) return resolveProjection(row.input)
+    return this.syncKind(path, undefined) ?? resolveProjection(row.input)
+  }
+
+  private syncKind(path: string, pick: Projection | undefined): ResolvedProjection | null {
+    const row = this.db.projectionFacts(path)
+    if (!row) return null
+    const auto = resolveProjection(row.input)
+    const kind = pick?.kind ?? auto.projection.kind
+    if (kind !== row.kind) {
+      this.db.setProjection(row.id, kind)
+      this.changed({ kind: 'meta' })
+    }
+    return auto
+  }
+
   videoSettings(key: string): PerVideoSettings | null {
     const row = this.db.videoSettings(key)
-    if (!row) return null
-    let raw: unknown = null
-    try {
-      raw = JSON.parse(row.settings)
-    } catch {
-      raw = null
-    }
-    const settings = readPerVideo(raw)
-    return row.positionMs === null ? settings : { ...settings, position: row.positionMs }
+    return row ? perVideo(row) : null
   }
 
   setVideoSettings(key: string, settings: PerVideoSettings) {
     const entry = readPerVideo(settings)
-    if (isEmptyPerVideo(entry)) {
-      this.db.removeVideoSettings(key)
-      return
+    if (isEmptyPerVideo(entry)) this.db.removeVideoSettings(key)
+    else {
+      const { position, ...rest } = entry
+      this.db.setVideoSettings(key, { positionMs: position ?? null, settings: JSON.stringify(rest) }, Date.now())
     }
-    const { position, ...rest } = entry
-    this.db.setVideoSettings(key, { positionMs: position ?? null, settings: JSON.stringify(rest) }, Date.now())
+    this.syncKind(key, entry.projection)
+  }
+
+  overrideCount(): number {
+    return this.db.trackedVideoSettings().filter((row) => hasOverrides(perVideo(row).tracking)).length
+  }
+
+  resetOverrides(): number {
+    return this.db.transaction(() => {
+      let changed = 0
+      for (const row of this.db.trackedVideoSettings()) {
+        const entry = perVideo(row)
+        if (!entry.tracking || !hasOverrides(entry.tracking)) continue
+        this.setVideoSettings(row.key, { ...entry, tracking: withoutOverrides(entry.tracking) })
+        changed++
+      }
+      return changed
+    })
   }
 
   generated(key: string): GeneratedResult | null {

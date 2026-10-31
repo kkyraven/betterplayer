@@ -131,6 +131,7 @@ export const useSession = create<SessionState>()((set, get) => {
     try {
       const { activeRun, plan, index } = get()
       applyToyOutput(activeRun, sessionElapsedMs(plan, index, clip.startMs))
+      useTracking.getState().setHold(!activeRun?.setup.tracking)
       await usePlayer.getState().open(clip.row.path, clip.startMs / 1000)
       if (token !== playToken || get().stage !== 'running') return
       const { sessionId } = get()
@@ -138,7 +139,6 @@ export const useSession = create<SessionState>()((set, get) => {
       const next = plan[index + 1]
       if (next) void usePlayer.getState().prepare(next.row.path, next.row).catch(fail)
       holdAxes(clip.axesOff)
-      if (!activeRun?.setup.tracking) useTracking.getState().stop()
     } catch (error) {
       if (token === playToken) {
         get().end()
@@ -330,6 +330,7 @@ export const useSession = create<SessionState>()((set, get) => {
       opening = false
       usePlayer.getState().pause()
       useTracking.getState().stop()
+      useTracking.getState().setHold(false)
       const current = plan[index]
       set({ stage: 'summary', played: current ? [...played, current] : played, sessionId: null, busy: false })
       try {

@@ -71,6 +71,16 @@ export async function waitForAudio(key: string, signal?: AbortSignal): Promise<s
   }
 }
 
+export async function waitForModels(key: string, sources: ReadonlySet<TrackSource>, signal?: AbortSignal): Promise<void> {
+  const kinds = (['motion', 'music'] as const).filter((kind) => sources.has(kind === 'motion' ? 'ai-motion' : 'ai-music'))
+  for (;;) {
+    signal?.throwIfAborted()
+    if (usePlayer.getState().path !== key) throw new Error(t('editor.generate.videoChanged'))
+    if (!kinds.some((kind) => engine.modelState(kind).status === 'loading')) return
+    await new Promise((r) => setTimeout(r, 100))
+  }
+}
+
 const PROGRESS_MS = 250
 
 export async function runGeneration(onProgress: (p: GenerateState) => void): Promise<GeneratedScript[]> {

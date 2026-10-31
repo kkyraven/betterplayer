@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import { create } from 'zustand'
 import { track } from '@/state/usage'
 import type { TrackingSettings } from '@shared/tracking'
+import { hasOverrides, withoutOverrides } from '@shared/trackingRules'
 import type { ScriptInfo } from 'bp-engine'
 import type { MediaDetail, MediaRow } from '@shared/library'
 import type { BrowserHandoff } from '@shared/browser'
@@ -10,7 +11,7 @@ import { isAudioPath, type MediaTags } from '@shared/ipc'
 import { basicAuth, isRemoteMedia, mediaIdFromUrl, type PlayerCommand } from '@shared/peer'
 import { AXIS_IDS, type AxisId } from '@shared/axes'
 import { plainParam, pushParams } from './params'
-import { detectProjection, type Projection } from '@shared/projection'
+import { FLAT, resolveProjection, type Projection, type ProjectionSource, type ResolvedProjection } from '@shared/projection'
 import { isUrl } from '@shared/remote'
 import { defaultAxisSettings, type AxisSettings, type DlssSettings, type FrameGenOverride, type PerVideoSettings, type UpscalingSettings, type ParamAxisId, type ParamSourceSettings } from '@shared/settings'
 import { applyEnhance, engine, warm } from '@/engine/client'
@@ -47,6 +48,7 @@ export const REPEAT_ORDER = ['off', 'once', 'all'] as const
 export type RepeatMode = (typeof REPEAT_ORDER)[number]
 
 const PLAYBACK_KEY = 'bp.playback'
+const PROJECTION_WAIT_MS = 300
 
 export const END_WINDOW_MS = 500
 
@@ -84,6 +86,7 @@ interface PlayerState {
   audio: MediaTags | null
   video: PerVideoSettings
   projection: Projection
+  projectionSource: ProjectionSource
   volume: number
   muted: boolean
   autoplay: AutoplayMode
@@ -108,7 +111,8 @@ interface PlayerState {
   mark: number | null
   open: (path: string, startSeconds?: number, playlist?: PlaylistPlayback, showPlayer?: boolean, signal?: AbortSignal, handoff?: BrowserHandoff, endSeconds?: number) => Promise<void>
   prepare: (path: string, size?: { width: number; height: number }) => Promise<void>
-  setTracking: (tracking: TrackingSettings) => void
+  setTracking: (tracking: TrackingSettings | undefined) => void
+  dropOverrides: () => void
   close: () => void
   play: (userInitiated?: boolean) => void
   pause: () => void
@@ -187,7 +191,14 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     pendingVideoSave?.()
     pendingVideoSave = null
   }
-  let prepared: { path: string; video: PerVideoSettings } | null = null
+  let prepared: { path: string; video: PerVideoSettings; readAt: number } | null = null
+  let resets = 0
+  const cleared = (video: PerVideoSettings, readAt: number): PerVideoSettings => {
+    if (readAt === resets || !video.tracking) return video
+    const { tracking, ...rest } = video
+    const kept = withoutOverrides(tracking)
+    return kept ? { ...rest, tracking: kept } : rest
+  }
   let pauseRequested = false
   let openToken = 0
   let retryBrowserPage: (() => void) | null = null
@@ -200,6 +211,22 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     window.clearTimeout(persistTimer)
     pendingVideoSave = () => { void invoke('video:set', path, video) }
     persistTimer = window.setTimeout(flushVideoSave, 300)
+  }
+
+  const named = (path: string, pick: Projection | undefined) => {
+    const { projection, source } = resolveProjection({ name: fileTitle(path), width: 0, height: 0, user: pick })
+    return { projection, projectionSource: source }
+  }
+  const askProjection = (path: string): Promise<ResolvedProjection | null> =>
+    invoke('library:projection', path).catch((error: unknown) => {
+      console.warn('projection', error)
+      return null
+    })
+  const resolveAuto = (path: string, answer = askProjection(path)) => {
+    void answer.then((auto) => {
+      if (!auto || get().path !== path || get().projectionSource === 'user' || auto.source === 'user') return
+      set({ projection: auto.projection, projectionSource: auto.source })
+    })
   }
 
   const savePositionAt = (timeMs: number) => {
@@ -223,7 +250,8 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     media: null,
     audio: null,
     video: EMPTY_VIDEO,
-    projection: detectProjection(''),
+    projection: FLAT,
+    projectionSource: 'none',
     volume: playback.volume,
     muted: playback.muted,
     autoplay: playback.autoplay,
@@ -249,14 +277,20 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       const settingsStore = useSettings.getState()
       const settings = settingsStore.settings ?? (await settingsStore.load())
       if (signal?.aborted || token !== openToken) return
+      const asked = path !== get().path ? askProjection(path) : null
       const { snapshot } = get()
       const same = endSeconds === undefined && !handoff && path === get().path && snapshot.loaded && !snapshot.error
-      const video = same ? get().video : prepared?.path === path ? prepared.video : ((await invoke('video:get', path)) ?? EMPTY_VIDEO)
+      const ready = prepared?.path === path ? prepared : null
+      const readAt = ready?.readAt ?? resets
+      const video = same ? get().video : ready ? ready.video : ((await invoke('video:get', path)) ?? EMPTY_VIDEO)
       if (signal?.aborted || token !== openToken) return
       prepared = null
       const remote = !same && isUrl(path) && !isRemoteMedia(path) ? await invoke('library:remote', path) : null
       const scriptFolders = !same && !isUrl(path) ? await invoke('library:scriptFolders', path) : undefined
       if (signal?.aborted || token !== openToken) return
+      const early = !same && !video.projection && asked ? await Promise.race([asked, new Promise<null>((done) => window.setTimeout(() => done(null), PROJECTION_WAIT_MS))]) : null
+      if (signal?.aborted || token !== openToken) return
+      const auto = early && early.source !== 'user' ? { projection: early.projection, projectionSource: early.source } : null
       if (!same) {
         if (get().path) get().savePosition()
         flushVideoSave()
@@ -276,12 +310,13 @@ export const usePlayer = create<PlayerState>()((set, get) => {
           scripts: [],
           media: null,
           audio: isAudioPath(path) ? { video: false, title: null, artist: null, album: null, year: null, cover: null } : null,
-          video,
-          projection: video.projection ?? detectProjection(fileTitle(path)),
+          video: cleared(video, readAt),
+          ...(auto ?? named(path, video.projection)),
           mark: null,
           replayed: false,
           ended: false,
         })
+        if (!video.projection && !auto) resolveAuto(path, asked ?? undefined)
         const mediaId = mediaIdFromUrl(path)
         if (mediaId !== null) told({ kind: 'open', mediaId })
         void useSubtitles.getState().load(path)
@@ -299,11 +334,11 @@ export const usePlayer = create<PlayerState>()((set, get) => {
         if (useUi.getState().mediaCentre) useUi.getState().setTvTab('nowplaying')
       }
       if (!same) {
-        void invoke('library:byPath', path).then((media) => {
+        const row = invoke('library:byPath', path).then((media) => {
           if (get().path !== path) return
-          if (media && isUrl(path)) set({ media, title: media.title, projection: video.projection ?? { ...detectProjection(media.title), kind: media.projection } })
+          if (media && isUrl(path)) set({ media, title: media.title })
           else set({ media, ...(media ? { title: media.titleSet ? media.title : get().audio?.title ?? media.title } : {}) })
-        })
+        }, (error: unknown) => console.warn('library row', error))
         const password = isRemoteMedia(path) ? settings.remote.sourcePassword : ''
         const start = startSeconds ?? (video.position !== undefined ? video.position / 1000 : undefined)
         const current = () => !signal?.aborted && token === openToken && get().path === path
@@ -342,7 +377,9 @@ export const usePlayer = create<PlayerState>()((set, get) => {
         applyEnhance(settings.upscaling, video.frameGen)
         engine.play()
         set({ scripts: info.scripts })
-        await useTracking.getState().autoStart()
+        await row
+        if (!current()) return
+        await (handoff ? useTracking.getState().start('player') : useTracking.getState().autoStart())
         if (handoff && current()) get().setRate(handoff.rate)
       }
       if (signal?.aborted || token !== openToken) return
@@ -402,11 +439,12 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       set({ playlist: { ...playlist, ids, orderedIds: ids, index: ids.indexOf(playlist.ids[playlist.index]!) } })
     },
     prepare: async (path, size) => {
+      const readAt = resets
       const [stored, remote, scriptFolders] = await Promise.all([invoke('video:get', path), isUrl(path) && !isRemoteMedia(path) ? invoke('library:remote', path) : null, !isUrl(path) ? invoke('library:scriptFolders', path) : undefined])
       const video = stored ?? EMPTY_VIDEO
-      prepared = { path, video }
+      prepared = { path, video, readAt }
       engine.prepare(path, remote?.scriptsPath, scriptFolders).catch((e: unknown) => console.debug(`prepare: ${String(e)}`))
-      if (size) warm(video.projection ?? detectProjection(fileTitle(path)), size.width, size.height)
+      if (size) warm(resolveProjection({ name: fileTitle(path), ...size, user: video.projection }).projection, size.width, size.height)
     },
     close: () => {
       browserLoad?.abort()
@@ -572,10 +610,14 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     dismissSuggestions: () => set({ suggestions: null }),
     setSheet: (sheet) => set({ sheet }),
     setProjection: (projection) => {
-      const { video, title } = get()
+      const { video, path } = get()
       const { projection: _dropped, ...rest } = video
       persist(projection ? { ...rest, projection } : rest)
-      set({ projection: projection ?? detectProjection(title) })
+      if (projection) return set({ projection, projectionSource: 'user' })
+      set(named(path ?? '', undefined))
+      if (!path) return
+      flushVideoSave()
+      resolveAuto(path)
     },
     setFrameGen: (override) => {
       const { frameGen: _dropped, ...rest } = get().video
@@ -638,10 +680,15 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       persist({ ...video, variants: Object.keys(variants).length > 0 ? variants : undefined })
     },
     setTracking: (tracking) => {
-      const before = get().video.tracking
-      const heroChanged = before?.heroMusic !== tracking.heroMusic || before?.zones !== tracking.zones
-      persist({ ...get().video, tracking })
+      const { tracking: before, ...rest } = get().video
+      const heroChanged = before?.heroMusic !== tracking?.heroMusic || before?.zones !== tracking?.zones
+      persist(tracking ? { ...rest, tracking } : rest)
       if (heroChanged) flushVideoSave()
+    },
+    dropOverrides: () => {
+      resets++
+      const { tracking } = get().video
+      if (tracking && hasOverrides(tracking)) get().setTracking(withoutOverrides(tracking))
     },
     savePosition: () => savePositionAt(live.get().timeMs),
     setSnapshot: (snapshot) => {

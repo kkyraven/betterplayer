@@ -20,6 +20,8 @@ interface DevicesState {
   outputs: ConfiguredOutput[]
   states: Record<number, OutputState>
   selectedId: number | null
+  held: boolean
+  setHeld: (held: boolean) => void
   connectSaved: (configs: OutputConfig[]) => void
   add: (config: OutputConfig) => Promise<number>
   remove: (id: number) => Promise<void>
@@ -116,6 +118,11 @@ export const useDevices = create<DevicesState>()((set, get) => {
     outputs: [],
     states: {},
     selectedId: null,
+    held: false,
+    setHeld: (held) => {
+      engine.holdSensation(held)
+      set({ held })
+    },
     connectSaved: (configs) => {
       engine.setPishockEnabled(isPremium(useAccount.getState()))
       for (const c of configs) track(`device.${c.kind}`)

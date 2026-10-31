@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { IDLE_PLAYING, isRemoteMedia, mediaUrl, sourceBase, SYNC_SEEK_MS, syncRate, type PlayingState, type RemoteSourceStatus } from '@shared/peer'
 import { engine } from '@/engine/client'
 import { invoke, on } from '@/ipc'
-import { useLibrary } from './library'
+import { libraryGridPosition, useLibrary } from './library'
 import { onPlayback, usePlayer } from './player'
 import { useSelect } from './select'
 import { useSettings } from './settings'
@@ -100,7 +100,8 @@ export const useRemote = create<RemoteState>()((set, get) => {
     if (get().followed) stopFollowing()
     else if (player.path && isRemoteMedia(player.path)) player.close()
     useSelect.getState().clear()
-    useLibrary.setState({ section: 'all', folder: null, playlistId: null, search: '', filters: {}, rows: [], continueRows: [], total: 0, rev: null, selectedId: null, detail: null })
+    libraryGridPosition.current = null
+    useLibrary.setState((s) => ({ section: 'all', folder: null, playlistId: null, search: '', filters: {}, rows: [], continueRows: [], total: 0, rev: null, listId: s.listId + 1, selectedId: null, detail: null }))
     const library = useLibrary.getState()
     void library.refresh()
     void library.query('reset')

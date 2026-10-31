@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { SessionPanel } from '@/components/together/SessionPanel'
 import { installGamepad } from '@/input/gamepad'
 import { spaceIsClaimed } from '@/input/keyboard'
@@ -21,9 +21,14 @@ import { TvSession } from '@/screens/tv/TvSession'
 import { TvSettings } from '@/screens/tv/TvSettings'
 import { TvTileOptions } from '@/screens/tv/TvTileOptions'
 import { TvToast } from '@/screens/tv/TvToast'
+import { HoldToast } from './HoldToast'
+import { VrErrorToast } from '@/screens/player/InHeadset'
 import { TvTopBar } from '@/screens/tv/TvTopBar'
 import { useUi } from '@/state/ui'
+import { useVr } from '@/state/vr'
 import './tv.css'
+
+const VR_LAYOUT_WIDTH = 1600
 
 function viewKey(tab: string, views: TvView[]): string {
   if (tab === 'nowplaying') return tab
@@ -40,6 +45,8 @@ export function MediaCentreShell() {
   const setTvTab = useUi((s) => s.setTvTab)
   const path = usePlayer((s) => s.path)
   const incoming = useTogether((s) => s.session?.status === 'incoming')
+  const inHeadset = useVr((s) => s.active)
+  const zoom = useVrZoom(inHeadset)
   const container = useRef<HTMLDivElement>(null)
   const top = tab === 'nowplaying' ? undefined : views[views.length - 1]
 
@@ -159,7 +166,14 @@ export function MediaCentreShell() {
   const hint: HintContext = overlay !== 'none' ? 'overlay' : top?.kind === 'settings' ? 'settings' : top ? 'grid' : tab === 'nowplaying' ? 'nowplaying' : tab === 'session' ? 'session' : 'rows'
 
   return (
-    <div ref={container} className="tv" data-tab={tab} data-stage={stage ? '' : undefined}>
+    <div
+      ref={container}
+      className="tv"
+      data-tab={tab}
+      data-stage={stage ? '' : undefined}
+      data-vr={inHeadset ? '' : undefined}
+      style={zoom > 1 ? { zoom, width: `calc(100vw / ${zoom})`, height: `calc(100vh / ${zoom})` } : undefined}
+    >
       {stage && <TvStage />}
       {!stage && <TvBackdrop container={container} />}
       <TvTopBar />
@@ -171,14 +185,28 @@ export function MediaCentreShell() {
       {!top && tab === 'continue' && <TvRows kind="continue" />}
       {!top && tab === 'session' && <TvSession />}
       {!stage && path && <TvNowPlayingBar />}
-      <TvHints context={hint} />
+      {!inHeadset && <TvHints context={hint} />}
       <TvToast />
+      <HoldToast />
+      <VrErrorToast />
       {overlay === 'power' && <TvPowerMenu />}
       {overlay === 'quick' && <TvQuickSettings />}
       {overlay === 'options' && optionsRow && <TvTileOptions key={optionsRow.id} row={optionsRow} />}
       <SessionPanel />
     </div>
   )
+}
+
+function useVrZoom(inHeadset: boolean): number {
+  const [width, setWidth] = useState(() => window.innerWidth)
+  useEffect(() => {
+    if (!inHeadset) return
+    const resize = () => setWidth(window.innerWidth)
+    resize()
+    window.addEventListener('resize', resize)
+    return () => window.removeEventListener('resize', resize)
+  }, [inHeadset])
+  return inHeadset ? Math.max(1, width / VR_LAYOUT_WIDTH) : 1
 }
 
 function TvNowPlayingBar() {
@@ -189,8 +217,10 @@ function TvNowPlayingBar() {
   const fill = useRef<HTMLElement>(null)
   live.useLive((l) => {
     const text = `${fmtDuration(l.timeMs)} / ${fmtDuration(durationMs)}`
-    if (time.current && time.current.textContent !== text) time.current.textContent = text
-    if (fill.current) fill.current.style.transform = `scaleX(${durationMs > 0 ? Math.min(1, l.timeMs / durationMs) : 0})`
+    const el = time.current
+    const changed = el !== null && el.textContent !== text
+    if (changed) el.textContent = text
+    if (fill.current && (changed || !useVr.getState().active)) fill.current.style.transform = `scaleX(${durationMs > 0 ? Math.min(1, l.timeMs / durationMs) : 0})`
   }, [durationMs])
   return (
     <button type="button" className="tv-np" data-focus-key="nowplayingbar" onClick={() => setTvTab('nowplaying')}>

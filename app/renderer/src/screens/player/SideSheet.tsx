@@ -2,7 +2,7 @@ import { ChevronDown, ChevronRight, Minus, Plus, X } from 'lucide-react'
 import { useState } from 'react'
 import type { MessageKey } from '@shared/i18n'
 import { AXES, AXIS_LABEL, AXIS_NAME, isAxisId, type AxisId } from '@shared/axes'
-import { FLAT, LAYOUTS, LAYOUT_LABELS, PROJECTION_KINDS, PROJECTION_LABELS, detectProjection } from '@shared/projection'
+import { LAYOUTS, LAYOUT_LABELS, PROJECTION_KINDS, PROJECTION_LABELS, PROJECTION_SOURCE_LABELS } from '@shared/projection'
 import { PARAM_AXES, PARAM_SOURCES, defaultAxisSettings, type AxisSettings, type FrameGenOverride, type ParamAxisId, type ParamSourceKind } from '@shared/settings'
 import { DetectionFields } from '@/components/estim/DetectionFields'
 import { LiveMarker } from '@/components/player/LiveMarker'
@@ -368,21 +368,21 @@ function RangeRow({ id, name }: { id: AxisId; name: string }) {
 function ProjectionTab() {
   const t = useT()
   const projection = usePlayer((s) => s.projection)
-  const overridden = usePlayer((s) => s.video.projection !== undefined)
-  const title = usePlayer((s) => s.title)
+  const source = usePlayer((s) => s.projectionSource)
   const setProjection = usePlayer((s) => s.setProjection)
-  const detected = detectProjection(title)
+  const hint = PROJECTION_SOURCE_LABELS[source]
   const kinds = PROJECTION_KINDS.map((k) => ({ value: k, label: t(PROJECTION_LABELS[k]) }))
   const layouts = LAYOUTS.map((l) => ({ value: l, label: t(LAYOUT_LABELS[l]) }))
   return (
     <>
       <div className="grp">
         <div className="lbl">
-          {t('player.sideSheet.source')}<span className="hint">{overridden ? t('player.sideSheet.hintThisVideo') : t('player.sideSheet.fromFileName')}</span>
+          {t('player.sideSheet.source')}
+          {hint && <span className="hint">{t(hint)}</span>}
         </div>
         <Segmented options={kinds} value={projection.kind} onChange={(kind) => setProjection({ ...projection, kind, layout: kind === 'flat' ? 'mono' : projection.layout })} label={t('player.sideSheet.projection')} />
       </div>
-      {projection.kind !== 'flat' && (
+      {(projection.kind !== 'flat' || projection.layout !== 'mono') && (
         <div className="grp">
           <div className="lbl">{t('player.sideSheet.eyes')}</div>
           <Segmented options={layouts} value={projection.layout} onChange={(layout) => setProjection({ ...projection, layout })} label={t('player.sideSheet.layout')} />
@@ -401,12 +401,11 @@ function ProjectionTab() {
           <Slider value={[projection.fov]} min={150} max={240} label={t('player.sideSheet.lensCoverage')} onValueChange={([fov]) => setProjection({ ...projection, fov: fov ?? 190 })} />
         </div>
       )}
-      {overridden && (
+      {source === 'user' && (
         <Button variant="ghost" onClick={() => setProjection(null)}>
-          {t('player.sideSheet.useFileName', { projection: `${t(PROJECTION_LABELS[detected.kind])}${detected.kind !== 'flat' ? ` ${t(LAYOUT_LABELS[detected.layout])}` : ''}` })}
+          {t('common.auto')}
         </Button>
       )}
-      {!overridden && projection.kind === 'flat' && detected === FLAT && <p className="muted">{t('player.sideSheet.noVrTag')}</p>}
     </>
   )
 }

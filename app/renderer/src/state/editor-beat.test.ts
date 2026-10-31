@@ -4,7 +4,7 @@ import { defaultTrackAxes } from '@shared/tracking'
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(), analyse: vi.fn(), generate: vi.fn(),
-  engine: { analyseCancel: vi.fn(), clearDraft: vi.fn(), analyseClose: vi.fn() },
+  engine: { analyseCancel: vi.fn(), clearDraft: vi.fn(), analyseClose: vi.fn(), modelState: vi.fn(), analyseRange: vi.fn() },
   tracking: vi.fn(),
   settings: vi.fn(),
 }))
@@ -83,4 +83,16 @@ it('leaves the document alone when a short or silent selection produces no strok
   expect(editor.getState().ghost).toBeNull()
   expect(editor.getState().message).toBeNull()
   expect(editor.getState().lanes[0]?.points).toEqual([{ at: 500, pos: 0 }, { at: 1000, pos: 0 }])
+})
+
+it('loads the movement model for an AI Motion fill and waits for it', async () => {
+  const loadModel = vi.fn()
+  mocks.tracking.mockReturnValue({ loadModel })
+  mocks.engine.modelState.mockReturnValueOnce({ status: 'loading' }).mockReturnValue({ status: 'ready' })
+  mocks.engine.analyseRange.mockResolvedValue({ model: [{ axis: 'L0', at: [500, 750, 1000], pos: [0, 1, 0] }] })
+  editor.setState({ ai: { source: 'ai-motion', min: 10, max: 90, region: null, picking: false } })
+  await editor.getState().aiFill()
+  expect(loadModel).toHaveBeenCalledWith('motion')
+  expect(mocks.engine.analyseRange).toHaveBeenCalledWith(expect.objectContaining({ startMs: 500, endMs: 1000, model: true }))
+  expect(editor.getState().message).toBeNull()
 })

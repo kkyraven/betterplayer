@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FocusEvent } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { MessageKey } from '@shared/i18n'
 import { isPlaylist, type MediaQuery, type MediaRow, type Sort } from '@shared/library'
 import { MediaCard } from '@/components/media/MediaCard'
@@ -8,11 +8,9 @@ import { useT } from '@/state/i18n'
 import { usePlayer } from '@/state/player'
 import { useUi } from '@/state/ui'
 import type { TvGridSource } from '@/state/tvNav'
-import { tileOptionsKey } from './tvCards'
+import { holdForOptions, playOnClick, tileOptionsKey, tileOptionsMenu } from './tvCards'
 
 const PAGE = 48
-const COLUMNS = 4
-const AHEAD = COLUMNS * 2
 
 const SORT_OPTIONS: ReadonlyArray<{ value: Sort; label: MessageKey }> = [
   { value: 'recommended', label: 'tv.grid.sort.recommended' },
@@ -24,8 +22,6 @@ const SORT_OPTIONS: ReadonlyArray<{ value: Sort; label: MessageKey }> = [
   { value: 'lastPlayed', label: 'tv.grid.sort.lastPlayed' },
 ]
 
-const noop = () => undefined
-
 export function TvGrid({ source }: { source: TvGridSource }) {
   const t = useT()
   const [sort, setSort] = useState<Sort>('recommended')
@@ -34,6 +30,7 @@ export function TvGrid({ source }: { source: TvGridSource }) {
   const loading = useRef(false)
   const done = useRef(false)
   const count = useRef(0)
+  const end = useRef<HTMLDivElement>(null)
   const open = usePlayer((s) => s.open)
   const setTvTab = useUi((s) => s.setTvTab)
 
@@ -87,15 +84,24 @@ export function TvGrid({ source }: { source: TvGridSource }) {
     }
   }, [query])
 
-  const onFocus = (e: FocusEvent<HTMLDivElement>) => {
-    const id = Number(e.target.getAttribute('data-media-id'))
-    const i = rows.findIndex((r) => r.id === id)
-    if (i >= 0 && i >= rows.length - AHEAD) void loadMore()
-  }
+  useEffect(() => {
+    const el = end.current
+    if (!el) return
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) void loadMore()
+      },
+      { root: el.closest('.tv-body'), rootMargin: '600px 0px' },
+    )
+    io.observe(el)
+    return () => io.disconnect()
+  }, [loadMore, rows])
+
   const play = (row: MediaRow) => {
     void open(row.path)
     setTvTab('nowplaying')
   }
+  const click = playOnClick(rows, play)
   return (
     <div className="tv-body tv-gridview" data-nav-main onKeyDown={(e) => tileOptionsKey(e, rows)}>
       <div className="tv-gridhd">
@@ -104,11 +110,12 @@ export function TvGrid({ source }: { source: TvGridSource }) {
         <TvRow kind="options" className="sort" label={t('tv.grid.sort')} options={SORT_OPTIONS.map((o) => ({ value: o.value, label: t(o.label) }))} value={sort} onChange={setSort} />
       </div>
       {rows.length === 0 && done.current && <p className="tv-empty">{t('tv.grid.empty')}</p>}
-      <div className="tv-grid" onFocus={onFocus}>
+      <div className="tv-grid">
         {rows.map((row) => (
-          <MediaCard key={row.id} row={row} density="tenfoot" onSelect={noop} onPlay={play} />
+          <MediaCard key={row.id} row={row} density="tenfoot" onSelect={click} onPlay={play} onPointerDown={holdForOptions} onContextMenu={tileOptionsMenu} />
         ))}
       </div>
+      <div ref={end} aria-hidden />
     </div>
   )
 }

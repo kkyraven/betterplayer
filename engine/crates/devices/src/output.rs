@@ -68,17 +68,21 @@ impl Vibration {
     }
 }
 
-fn session_clamps(mut clamps: [AxisClamp; Axis::COUNT], scale: f64, profile: Profile) -> [AxisClamp; Axis::COUNT] {
+fn is_position(axis: Axis) -> bool {
+    matches!(axis.kind(), Kind::Position | Kind::Rotation)
+}
+
+fn session_clamps(mut clamps: [AxisClamp; Axis::COUNT], position: f64, level: f64, profile: Profile) -> [AxisClamp; Axis::COUNT] {
     if profile == Profile::Stroker {
         for axis in Axis::ALL {
             let c = &mut clamps[axis.index()];
             match axis.kind() {
                 Kind::Position | Kind::Rotation => {
                     let centre = (c.min + c.max) / 2.0;
-                    c.min = centre + (c.min - centre) * scale;
-                    c.max = centre + (c.max - centre) * scale;
+                    c.min = centre + (c.min - centre) * position;
+                    c.max = centre + (c.max - centre) * position;
                 }
-                Kind::Intensity | Kind::Aux => { c.min *= scale; c.max *= scale; }
+                Kind::Intensity | Kind::Aux => { c.min *= level; c.max *= level; }
                 _ => {}
             }
         }
@@ -103,6 +107,8 @@ pub struct Output {
     pub pain_frame: Option<crate::pain::Frame>,
     pain_previous: Option<[f64; 4]>,
     sensation_muted: bool,
+    rest: [Option<f64>; Axis::COUNT],
+    at: [Option<f64>; Axis::COUNT],
     volume: Volume,
     state: State,
     last: Units,
@@ -175,6 +181,8 @@ impl Output {
             pain_frame: None,
             pain_previous: None,
             sensation_muted: false,
+            rest: [None; Axis::COUNT],
+            at: [None; Axis::COUNT],
             volume: Volume::default(),
             state: State::Error(String::new()),
             last: [None; Axis::COUNT],
@@ -405,18 +413,21 @@ impl Output {
         let muted = scale == 0.0;
         let just_muted = self.sensation_scale == 0.0 && !self.sensation_muted;
         self.sensation_muted = self.sensation_scale == 0.0;
+        if self.sensation_scale == 1.0 { self.rest = [None; Axis::COUNT]; }
         if just_muted {
+            self.rest = std::array::from_fn(|i| (driven[i] && is_position(Axis::ALL[i])).then(|| self.at[i].unwrap_or(values[i])));
+            let rest: [f64; Axis::COUNT] = std::array::from_fn(|i| self.rest[i].unwrap_or(values[i]));
             let stopped = match &mut self.state {
                 State::Connected(Link::Buttplug(link)) => link.stop(),
                 State::Connected(Link::Toy(link)) => link.stop(),
                 State::Connected(Link::Lines(conn)) if self.profile == Profile::Stroker => {
                     let mut positions = *driven;
                     for axis in Axis::ALL {
-                        positions[axis.index()] &= matches!(axis.kind(), Kind::Position | Kind::Rotation);
+                        positions[axis.index()] &= is_position(axis);
                         if positions[axis.index()] { self.last[axis.index()] = None; }
                     }
-                    let clamps = session_clamps(self.clamps, self.session_scale, self.profile);
-                    tcode::encode(self.profile, values, &positions, &clamps, &mut self.last, 1, &mut self.line);
+                    let clamps = session_clamps(self.clamps, self.session_scale, self.session_scale, self.profile);
+                    tcode::encode(self.profile, &rest, &positions, &clamps, &mut self.last, 1, &mut self.line);
                     if self.line.is_empty() { Ok(()) } else { conn.send(&self.line) }
                 }
                 _ => Ok(()),
@@ -431,7 +442,7 @@ impl Output {
         let pain_ctx = TickContext { estim_manual: true, manual_axes: std::array::from_fn(|i| ctx.manual_axes[i] || [Axis::EV, Axis::E1, Axis::E2, Axis::E3, Axis::E4].iter().any(|a| a.index() == i)), ..*ctx };
         let ctx = if muted { &muted_ctx } else if pain.is_some_and(|p| p.testing) { &pain_ctx } else { ctx };
         let mut ramped = (*values, *driven);
-        let mut clamps = session_clamps(self.clamps, scale, self.profile);
+        let mut clamps = session_clamps(self.clamps, self.session_scale, scale, self.profile);
         let (values, driven) =
             if self.profile == Profile::Restim && matches!(self.state, State::Connected(_)) {
                 self.ramp.advance(media_ctx.playing, ctx.interval_ms as f64);
@@ -480,6 +491,23 @@ impl Output {
             } else {
                 (values, driven)
             };
+        let eased: [f64; Axis::COUNT];
+        let values = if self.profile == Profile::Stroker && !muted && self.sensation_scale < 1.0 {
+            let s = self.sensation_scale;
+            let spin = !matches!(self.state, State::Connected(Link::Lines(_)));
+            eased = std::array::from_fn(|i| {
+                let rest = if spin && Axis::ALL[i].kind() == Kind::Rotation { Some(0.5) } else { self.rest[i] };
+                rest.map_or(values[i], |rest| rest + (values[i] - rest) * s)
+            });
+            &eased
+        } else {
+            values
+        };
+        if !muted {
+            for i in 0..Axis::COUNT {
+                if driven[i] && is_position(Axis::ALL[i]) { self.at[i] = Some(values[i]); }
+            }
+        }
         let shaken: [f64; Axis::COUNT];
         let mut shaking = false;
         let values = match self.vibration {
@@ -488,7 +516,7 @@ impl Output {
                 let offset = v.offset(values[v.source.index()], &mut self.vibration_phase, ctx.interval_ms as f64);
                 let mut out = *values;
                 let i = Axis::L0.index();
-                out[i] = (out[i] + offset).clamp(0.0, 1.0);
+                out[i] = (out[i] + offset * self.sensation_scale).clamp(0.0, 1.0);
                 shaken = out;
                 &shaken
             }
@@ -873,6 +901,52 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
         (output, receiver)
+    }
+
+    #[test]
+    fn stroke_restarts_from_where_it_rested_instead_of_the_centre() {
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut o = Output::new(1, Transport::Udp { host: "127.0.0.1".into(), port: receiver.local_addr().unwrap().port() }, Profile::Stroker);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !o.connected() {
+            assert!(Instant::now() < deadline);
+            o.poll();
+            thread::sleep(Duration::from_millis(1));
+        }
+        o.glide = None;
+        let mut values = [0.0; Axis::COUNT];
+        let mut driven = [false; Axis::COUNT];
+        driven[Axis::L0.index()] = true;
+        values[Axis::L0.index()] = 0.2;
+        let ctx = context();
+        o.send(&values, &driven, &ctx);
+        o.sensation_scale = 0.0;
+        o.send(&values, &driven, &ctx);
+        values[Axis::L0.index()] = 0.9;
+        o.sensation_scale = 0.1;
+        o.send(&values, &driven, &ctx);
+        let units = o.last[Axis::L0.index()].unwrap() as f64 / 9999.0;
+        assert!((units - 0.27).abs() < 0.01, "eases out from 0.2, not the centre: {units}");
+        receiver.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+        let mut buf = [0u8; 512];
+        receiver.set_nonblocking(true).unwrap();
+        while receiver.recv(&mut buf).is_ok() {}
+        receiver.set_nonblocking(false).unwrap();
+        o.sensation_scale = 0.0;
+        o.send(&values, &driven, &ctx);
+        let n = receiver.recv(&mut buf).unwrap();
+        let line = std::str::from_utf8(&buf[..n]).unwrap();
+        let digits: String = line.split("L0").nth(1).unwrap().chars().take_while(char::is_ascii_digit).collect();
+        let held = digits.parse::<f64>().unwrap() / 10f64.powi(digits.len() as i32);
+        assert!((held - 0.27).abs() < 0.01, "a stop mid restart holds where the device is: {line}");
+        o.sensation_scale = 0.5;
+        o.send(&values, &driven, &ctx);
+        let units = o.last[Axis::L0.index()].unwrap() as f64 / 9999.0;
+        assert!((units - 0.585).abs() < 0.01, "and eases out from there: {units}");
+        o.sensation_scale = 1.0;
+        o.send(&values, &driven, &ctx);
+        let units = o.last[Axis::L0.index()].unwrap() as f64 / 9999.0;
+        assert!((units - 0.9).abs() < 0.01, "{units}");
     }
 
     fn context() -> TickContext {
@@ -1263,6 +1337,28 @@ mod toy_tests {
     use crate::toys::{tests::{fixture, output_value}, FeatureKind};
 
     #[test]
+    fn a_toy_rotation_restarts_from_still_not_at_full_speed() {
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let (mut link, mut rx) = fixture(&[FeatureKind::Rotate]);
+        link.set_axes(&HashMap::from([(0, Some(Axis::R0))]));
+        let mut o = Output::new(1, Transport::Udp { host: "127.0.0.1".into(), port: receiver.local_addr().unwrap().port() }, Profile::Stroker);
+        o.state = State::Connected(Link::Toy(link));
+        let ctx = TickContext { media_ms: 0.0, stroke_next: None, playing: true, manual_axes: [false; Axis::COUNT], estim_manual: false, stop_on_pause: true, estim_volume: VolumeSettings::default(), rate: 1.0, interval_ms: 100 };
+        let mut values = [0.5; Axis::COUNT];
+        values[Axis::R0.index()] = 0.9;
+        let mut driven = [false; Axis::COUNT];
+        driven[Axis::R0.index()] = true;
+        o.send(&values, &driven, &ctx);
+        assert!((output_value(&mut rx).1 - 0.8).abs() < 1e-6);
+        o.sensation_scale = 0.0;
+        o.send(&values, &driven, &ctx);
+        assert!(matches!(rx.try_recv(), Ok(crate::toys::DevCmd::Stop)));
+        o.sensation_scale = 0.1;
+        o.send(&values, &driven, &ctx);
+        assert!((output_value(&mut rx).1 - 0.08).abs() < 1e-6, "speed grows from still");
+    }
+
+    #[test]
     fn session_scaling_attenuates_the_mapped_level_and_off_overrides_manual_hold() {
         let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let (mut link, mut rx) = fixture(&[FeatureKind::Vibrate]);
@@ -1296,12 +1392,12 @@ mod toy_tests {
         let mut original = [AxisClamp::default(); Axis::COUNT];
         original[Axis::L0.index()] = AxisClamp { min: 0.2, max: 0.8, enabled: true };
         original[Axis::V0.index()] = AxisClamp { min: 0.4, max: 0.8, enabled: true };
-        let half = session_clamps(original, 0.5, Profile::Stroker);
+        let half = session_clamps(original, 0.5, 0.5, Profile::Stroker);
         assert!((half[Axis::L0.index()].min - 0.35).abs() < 1e-9);
         assert!((half[Axis::L0.index()].max - 0.65).abs() < 1e-9);
         assert_eq!(half[Axis::V0.index()].min, 0.2);
         assert_eq!(half[Axis::V0.index()].max, 0.4);
-        let estim = session_clamps(original, 0.0, Profile::Restim);
+        let estim = session_clamps(original, 0.0, 0.0, Profile::Restim);
         assert_eq!(estim[Axis::EA.index()], original[Axis::EA.index()]);
         assert_eq!(original[Axis::L0.index()].min, 0.2);
     }

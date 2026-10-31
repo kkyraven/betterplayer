@@ -2,7 +2,7 @@ import { recordMetric } from './servers/diagnostics'
 import { open, readdir, stat } from 'node:fs/promises'
 import { basename, dirname, extname, join, relative, sep } from 'node:path'
 import { isVideoPath } from '@shared/ipc'
-import { detectProjection } from '@shared/projection'
+import { needsLook, readContainerFacts, readPictureFacts, resolveProjection, worthProbing, type ContainerFacts, type ProjectionKind } from '@shared/projection'
 import type { LibraryDb, MediaStamp, ScriptKey, ScriptRow } from './db'
 import { ScriptFolders } from './script-folders'
 import { probe } from './probe'
@@ -49,6 +49,9 @@ interface Work {
   stamp: string
   cover: Cover
   folders: string[]
+  pick: ProjectionKind | undefined
+  facts: boolean
+  look: boolean
 }
 
 interface Cover {
@@ -64,6 +67,7 @@ export interface MediaJob {
   thumb: boolean
   strip: boolean
   tags: boolean
+  look: boolean
 }
 
 export interface JobSink {
@@ -221,6 +225,7 @@ export class Scanner {
 
     const siblingStats = new Map<string, Promise<string>>()
     const work: Work[] = []
+    const picks = this.db.projectionPicks()
     for (const file of walk.files) {
       if (this.closed) return
       try {
@@ -230,13 +235,23 @@ export class Scanner {
         const mtime = Math.round(info.mtimeMs)
         const existing = this.db.stamp(file)
         const unchanged = existing !== null && existing.size === size && existing.mtime === mtime && existing.durationMs > 0
+        const name = basename(file, extname(file))
+        const pick = picks.get(file)
+        let facts = false
+        let look = false
+        if (unchanged) {
+          const input = { name, width: existing.width, height: existing.height, container: readContainerFacts(existing.vrProbe), picture: readPictureFacts(existing.vrLook) }
+          if ((pick ?? resolveProjection(input).projection.kind) !== existing.projection) await batch.add(() => this.refreshKind(file, pick))
+          facts = input.container === undefined && worthProbing(name, existing.width, existing.height)
+          look = !pick && existing.strip === 'ready' && input.picture === undefined && needsLook(input)
+        }
         const folders = inventory?.folders.forMedia(file) ?? []
         const stamps = [await scriptsStamp(file, walk.siblings, siblingStats)]
         if (inventory) for (const dir of folders) stamps.push(`${dir}:${await scriptsStamp(join(dir, basename(file)), inventory.siblings, siblingStats)}`)
         const stamp = stamps.join('|')
         const cover = await coverFor(file, walk.siblings, siblingStats)
         if (this.closed) return
-        if (unchanged && stamp === existing.scriptsStamp && cover.stamp === existing.coverStamp) {
+        if (unchanged && stamp === existing.scriptsStamp && cover.stamp === existing.coverStamp && !facts) {
           this.jobs.enqueue({
             id: existing.id,
             path: file,
@@ -245,9 +260,10 @@ export class Scanner {
             thumb: existing.thumb === 'pending',
             strip: existing.durationMs > 0 && existing.strip === 'pending',
             tags: existing.durationMs > 0 && existing.tags === 'pending',
+            look,
           })
           this.state.done++
-        } else work.push({ file, size, mtime, existing, unchanged, stamp, cover, folders })
+        } else work.push({ file, size, mtime, existing, unchanged, stamp, cover, folders, pick, facts, look })
       } catch (e) {
         warn(`skipped ${file}`, e)
         this.state.done++
@@ -301,23 +317,31 @@ export class Scanner {
   private async scanWork(rootId: number, rootPath: string, item: Work, counts: { probed: number; rescanned: number }, batch: WriteBatch, jobs: MediaJob[]) {
     const { file, existing, unchanged, cover } = item
     let media = { durationMs: existing?.durationMs ?? 0, width: 0, height: 0, codec: '' }
-    if (!unchanged) {
+    let vr: ContainerFacts | null = null
+    if (!unchanged || item.facts) {
       counts.probed++
-      media = await probe(file, this.abort.signal).catch((e) => {
-        if (this.closed) return { durationMs: 0, width: 0, height: 0, codec: '' }
-        warn(`ffprobe failed for ${file}`, e)
-        return { durationMs: 0, width: 0, height: 0, codec: '' }
+      const probed = await probe(file, this.abort.signal).catch((e: unknown) => {
+        if (!this.closed) warn(`ffprobe failed for ${file}`, e)
+        return null
       })
+      vr = probed?.vr ?? null
+      if (!unchanged) media = probed ? { durationMs: probed.durationMs, width: probed.width, height: probed.height, codec: probed.codec } : { durationMs: 0, width: 0, height: 0, codec: '' }
     }
     if (this.closed) return
-    counts.rescanned++
-    const scripts = await this.scripts.scriptsFor(file, item.folders)
+    const current = unchanged && existing !== null && item.stamp === existing.scriptsStamp && cover.stamp === existing.coverStamp
+    if (!current) counts.rescanned++
+    const scripts = current ? null : await this.scripts.scriptsFor(file, item.folders)
     if (this.closed) return
     const title = basename(file, extname(file))
     await batch.add(() => {
       let id: number
-      if (unchanged && existing) id = existing.id
-      else {
+      if (unchanged && existing) {
+        id = existing.id
+        if (vr) {
+          this.db.setVrProbe(id, JSON.stringify(vr))
+          this.refreshKind(file, item.pick)
+        }
+      } else {
         id = this.db.upsertMedia(
           {
             rootId,
@@ -327,13 +351,16 @@ export class Scanner {
             size: item.size,
             mtime: item.mtime,
             ...media,
-            projection: detectProjection(title).kind,
+            projection: item.pick ?? resolveProjection({ name: title, width: media.width, height: media.height, container: vr }).projection.kind,
+            vrProbe: vr ? JSON.stringify(vr) : '',
           },
           Date.now(),
         )
       }
-      if (!unchanged || !sameScripts(this.db.scriptKeys(id), scripts)) this.db.setScripts(id, scripts, summarise(scripts))
-      this.db.setScriptsStamp(id, item.stamp)
+      if (scripts) {
+        if (!unchanged || !sameScripts(this.db.scriptKeys(id), scripts)) this.db.setScripts(id, scripts, summarise(scripts))
+        this.db.setScriptsStamp(id, item.stamp)
+      }
       this.db.setCoverStamp(id, cover.stamp)
       jobs.push({
         id,
@@ -343,8 +370,14 @@ export class Scanner {
         thumb: !unchanged || existing?.thumb === 'pending' || cover.stamp !== existing?.coverStamp,
         strip: media.durationMs > 0 && (!unchanged || existing?.strip === 'pending'),
         tags: media.durationMs > 0 && (!unchanged || existing?.tags === 'pending'),
+        look: item.look,
       })
     })
+  }
+
+  private refreshKind(path: string, pick: ProjectionKind | undefined) {
+    const row = this.db.projectionFacts(path)
+    if (row) this.db.setProjection(row.id, pick ?? resolveProjection(row.input).projection.kind)
   }
 
   private async walk(root: string, excluded: Set<string>): Promise<Walk> {

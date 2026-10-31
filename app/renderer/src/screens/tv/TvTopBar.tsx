@@ -1,4 +1,4 @@
-import { Power, Settings } from 'lucide-react'
+import { Power, Settings, SlidersHorizontal } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import type { MessageKey } from '@shared/i18n'
 import { cx } from '@/lib/cx'
@@ -9,6 +9,7 @@ import * as live from '@/state/live'
 import { usePlayer } from '@/state/player'
 import { sessionRemainingMs, useSession } from '@/state/session'
 import { useUi, type TvTab } from '@/state/ui'
+import { useVr } from '@/state/vr'
 
 const TABS: ReadonlyArray<{ id: TvTab; label: MessageKey }> = [
   { id: 'nowplaying', label: 'screen.player' },
@@ -25,6 +26,7 @@ export function TvTopBar() {
   const pushTvView = useUi((s) => s.pushTvView)
   const setTvOverlay = useUi((s) => s.setTvOverlay)
   const path = usePlayer((s) => s.path)
+  const inHeadset = useVr((s) => s.active)
   const inSettings = tab !== 'nowplaying' && views.some((v) => v.kind === 'settings')
   return (
     <div className="tv-top">
@@ -37,6 +39,11 @@ export function TvTopBar() {
       </nav>
       <TvStatus />
       <div className="tv-cluster">
+        {inHeadset && path && (
+          <button type="button" aria-label={t('tv.quickSettings.title')} data-focus-key="quick" onClick={() => setTvOverlay('quick')}>
+            <SlidersHorizontal />
+          </button>
+        )}
         <button type="button" className={cx(inSettings && 'on')} aria-label={t('screen.settings')} data-focus-key="settings" onClick={() => !inSettings && pushTvView({ kind: 'settings' })}>
           <Settings />
         </button>

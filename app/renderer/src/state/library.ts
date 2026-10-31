@@ -63,7 +63,7 @@ interface LibraryState {
   rows: GridEntry[]
   total: number
   rev: number | null
-  mix: number
+  listId: number
   continueRows: MediaRow[]
   loading: boolean
   selectedId: number | null
@@ -200,7 +200,7 @@ export const useLibrary = create<LibraryState>()((set, get) => {
 
   const showsContinueRow = () => {
     const s = get()
-    return (useSettings.getState().settings?.library.continueRow ?? false) && s.section === 'all' && !s.folder && s.playlistId === null && !s.search
+    return (useSettings.getState().settings?.library.continueRow ?? false) && s.section === 'all' && !s.folder && s.playlistId === null && !s.search.trim()
   }
 
   const buildQuery = (offset: number, limit: number): MediaQuery => {
@@ -209,7 +209,7 @@ export const useLibrary = create<LibraryState>()((set, get) => {
       section: s.section,
       folder: s.folder ?? undefined,
       playlistId: s.playlistId ?? undefined,
-      search: s.search || undefined,
+      search: s.search.trim() || undefined,
       sort: s.sort,
       desc: s.desc,
       filters: s.filters,
@@ -219,7 +219,11 @@ export const useLibrary = create<LibraryState>()((set, get) => {
     }
   }
 
-  const requery = () => void get().query('reset')
+  const requery = () => {
+    libraryGridPosition.current = null
+    set((s) => ({ listId: s.listId + 1 }))
+    void get().query('reset')
+  }
 
   const refreshDetail = () => {
     const { selectedId } = get()
@@ -284,7 +288,7 @@ export const useLibrary = create<LibraryState>()((set, get) => {
     rows: [],
     total: 0,
     rev: null,
-    mix: 0,
+    listId: 0,
     continueRows: [],
     loading: false,
     selectedId: null,
@@ -389,14 +393,15 @@ export const useLibrary = create<LibraryState>()((set, get) => {
           loading: false,
         }))
       } catch {
-        if (id === queryId) set({ loading: false, rows: [], total: 0, continueRows: [], searchInfo: { query: get().search, conditions: [], corrections: [], error: t('library.search.unavailable') } })
+        if (id === queryId) set({ loading: false, rows: [], total: 0, continueRows: [], searchInfo: { query: get().search.trim(), conditions: [], corrections: [], error: t('library.search.unavailable') } })
       }
     },
     reshuffle: async () => {
       await invoke('library:reshuffle')
+      const { sort, playlistId, search } = get()
+      if (sort !== 'recommended' || playlistId !== null || search.trim()) return
       libraryGridPosition.current = null
-      set((s) => ({ mix: s.mix + 1 }))
-      if (get().sort !== 'recommended') return
+      set((s) => ({ listId: s.listId + 1 }))
       if (users.has('library')) void get().query('reset')
       else pageStale = true
     },
@@ -434,6 +439,10 @@ export const useLibrary = create<LibraryState>()((set, get) => {
     },
     setSearch: (search) => {
       const state = get()
+      if (search.trim() === state.search.trim()) {
+        set({ search })
+        return
+      }
       const entering = search.trim() !== '' && state.search.trim() === ''
       const leaving = search.trim() === '' && state.search.trim() !== ''
       if (entering) browsingSort = { sort: state.sort, desc: state.desc }
@@ -545,9 +554,16 @@ export const useLibrary = create<LibraryState>()((set, get) => {
       await get().refresh()
     },
     renameTag: async (from, to) => {
+      const before = get().tags
       const name = await invoke('library:renameTag', from, to)
       const { filters, setFilters } = get()
-      if (filters.tag === from && name !== from) setFilters({ ...filters, tag: name })
+      if (filters.tag === from && name !== from) {
+        if (before.some((tag) => tag.name === name)) setFilters({ ...filters, tag: name })
+        else {
+          set({ filters: { ...filters, tag: name } })
+          void get().query('shown')
+        }
+      }
       await get().refresh()
       return name
     },
@@ -560,7 +576,10 @@ export const useLibrary = create<LibraryState>()((set, get) => {
     excludeFolder: async (folder) => {
       await invoke('library:excludeFolder', folder)
       const shown = get().folder
-      if (shown?.rootId === folder.rootId && (shown.folder === folder.folder || shown.folder.startsWith(`${folder.folder}/`))) set({ folder: null })
+      if (shown?.rootId === folder.rootId && (shown.folder === folder.folder || shown.folder.startsWith(`${folder.folder}/`))) {
+        set({ folder: null })
+        requery()
+      }
     },
     includeFolder: (folder) => invoke('library:includeFolder', folder),
     addRoot: async () => {
@@ -579,9 +598,10 @@ export const useLibrary = create<LibraryState>()((set, get) => {
     },
     removeRoot: async (id) => {
       await invoke('library:removeRoot', id)
-      if (get().folder?.rootId === id) set({ folder: null })
+      const shown = get().folder?.rootId === id
+      if (shown) set({ folder: null })
       await get().refresh()
-      requery()
+      if (shown) requery()
     },
     setRootSessions: async (id, sessions) => {
       await invoke('library:setRootSessions', id, sessions)
@@ -595,9 +615,10 @@ export const useLibrary = create<LibraryState>()((set, get) => {
     },
     deletePlaylist: async (id) => {
       await invoke('library:deletePlaylist', id)
-      if (get().playlistId === id) set({ playlistId: null, view: storedView(), playlistError: null })
+      const shown = get().playlistId === id
+      if (shown) set({ playlistId: null, view: storedView(), playlistError: null })
       await get().refresh()
-      requery()
+      if (shown) requery()
     },
     addToPlaylist: async (id, mediaIds) => {
       await invoke('library:addToPlaylist', id, mediaIds)

@@ -260,6 +260,10 @@ function Tabs() {
             style={{ transform: x ? `translateX(${x}px)` : undefined, flexBasis: heldWidth ?? undefined, flexShrink: heldWidth ? 0 : undefined }}
             onClick={() => void activate(t.id)}
             onPointerDown={(event) => press(event, t.id, index)}
+            onContextMenu={(event) => {
+              event.preventDefault()
+              void invoke('browser:tabMenu', t.id)
+            }}
             onKeyDown={(event) => {
               if (event.target !== event.currentTarget) return
               if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {

@@ -94,7 +94,9 @@ const fields: Partial<Record<SettingsPageId, readonly [readonly MessageKey[], re
   tracking: [
     [
       'settings.tracking.paceStart',
-      'settings.tracking.motionDefault',
+      'settings.tracking.fill',
+      'settings.tracking.musicFill',
+      'settings.tracking.fillScripted',
       'settings.tracking.regionStart',
       'settings.tracking.sensitivity',
       'settings.tracking.flourishes',
@@ -103,6 +105,7 @@ const fields: Partial<Record<SettingsPageId, readonly [readonly MessageKey[], re
       'settings.tracking.bounceDepth',
       'settings.tracking.bounceSpeed',
       'settings.tracking.depthByVolume',
+      'settings.tracking.resetOverrides',
     ],
     [
       'settings.tracking.redetectEvery',
@@ -111,10 +114,7 @@ const fields: Partial<Record<SettingsPageId, readonly [readonly MessageKey[], re
       'settings.tracking.cutSensitivity',
       'settings.tracking.easeAfterCut',
       'settings.tracking.clampJumps',
-      'settings.tracking.generateForScripted',
       'settings.tracking.generatedDefaults',
-      'settings.search.tracking.allFromL0',
-      'tracking.axesTable.source',
       'tracking.axesTable.limits',
       'tracking.intensity',
       'tracking.axesTable.smoothing',
@@ -149,6 +149,8 @@ const aliases: Partial<Record<SettingsPageId, readonly MessageKey[]>> = {
 const fieldAliases: Partial<Record<`${SettingsPageId}:${MessageKey}`, readonly MessageKey[]>> = {
   'video:settings.video.preset': ['settings.search.alias.neuralPreset', 'settings.search.alias.dlssPreset'],
   'video:settings.video.style': ['settings.search.alias.neuralStyle'],
+  'tracking:settings.tracking.fill': ['settings.search.alias.scriptsOnly', 'settings.search.alias.turnOffAi'],
+  'tracking:settings.tracking.musicFill': ['settings.search.alias.pmv', 'settings.search.alias.cockHero'],
   'tracking:settings.tracking.generatedDefaults': ['settings.search.alias.defaultAxes', 'settings.search.alias.trackingAxes'],
   'tracking:settings.tracking.redetectEvery': ['settings.search.alias.detectionInterval', 'settings.search.alias.redetection'],
   'estim:settings.estim.volumeLimits': ['settings.search.alias.volumeFloor', 'settings.search.alias.volumeMaximum'],
@@ -211,7 +213,7 @@ export function locateSetting(root: HTMLElement, target: string): HTMLElement {
   if (control) return control.closest<HTMLElement>('.prow, .rng, .estim-boost') ?? control
   if (['targets', 'period', 'blend'].includes(target)) return root.querySelector<HTMLElement>('[data-setting="provider"]') ?? root
   const axes = root.querySelector<HTMLElement>('[data-setting="generated-motion-defaults"]')
-  if (axes && ['source', 'limits', 'intensity', 'smoothing', 'invert', 'all-from-l0'].includes(target)) return axes
+  if (axes && ['limits', 'intensity', 'smoothing', 'invert'].includes(target)) return axes
   if (['sign-in', 'sign-out', 'display-name', 'friend-code', 'sync-video-settings', 'add-friend', 'requests', 'friends'].includes(target))
     return root.querySelector<HTMLElement>('[data-setting="account-state"], [data-setting="link-profile"]') ?? root.querySelector<HTMLElement>('h1') ?? root
   if (target === 'stop-following') return root.querySelector<HTMLElement>('[data-setting="headset-unavailable"]') ?? root

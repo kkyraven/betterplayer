@@ -5,7 +5,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use libloading::{Library, Symbol};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
-use windows::Win32::Graphics::Direct3D11::{D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION};
+use windows::Win32::Graphics::Direct3D11::{D3D11CreateDevice, ID3D11Device, ID3D11Texture2D, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION};
 use windows::core::Interface;
 
 type EGLDisplay = *mut c_void;
@@ -30,6 +30,7 @@ const EGL_HEIGHT: EGLint = 0x3056;
 const EGL_CONTEXT_CLIENT_VERSION: EGLint = 0x3098;
 const EGL_PLATFORM_DEVICE_EXT: u32 = 0x313F;
 const EGL_D3D11_DEVICE_ANGLE: EGLint = 0x33A1;
+const EGL_D3D11_TEXTURE_ANGLE: u32 = 0x3484;
 
 type GetPlatformDisplayFn = unsafe extern "system" fn(u32, *mut c_void, *const EGLint) -> EGLDisplay;
 type InitializeFn = unsafe extern "system" fn(EGLDisplay, *mut EGLint, *mut EGLint) -> EGLBoolean;
@@ -45,6 +46,9 @@ type DestroySurfaceFn = unsafe extern "system" fn(EGLDisplay, EGLSurface) -> EGL
 type GetErrorFn = unsafe extern "system" fn() -> EGLint;
 type GetProcAddressFn = unsafe extern "system" fn(*const c_char) -> *mut c_void;
 type QueryStringFn = unsafe extern "system" fn(EGLDisplay, EGLint) -> *const c_char;
+type CreateImageFn = unsafe extern "system" fn(EGLDisplay, EGLContext, u32, *mut c_void, *const EGLint) -> *mut c_void;
+type DestroyImageFn = unsafe extern "system" fn(EGLDisplay, *mut c_void) -> EGLBoolean;
+type ImageTargetTexture2DFn = unsafe extern "system" fn(u32, *mut c_void);
 
 const EGL_EXTENSIONS: EGLint = 0x3055;
 const EGL_VENDOR: EGLint = 0x3053;
@@ -111,7 +115,7 @@ pub struct Context {
     context: EGLContext,
     device: *mut c_void,
     release_device: ReleaseDeviceFn,
-    _d3d: ID3D11Device,
+    d3d: ID3D11Device,
 }
 
 static GPU: Mutex<()> = Mutex::new(());
@@ -208,7 +212,7 @@ impl Context {
         let device = unsafe { create_device(EGL_D3D11_DEVICE_ANGLE, d3d.as_raw(), ptr::null()) };
         if device.is_null() { return Err(egl.err("eglCreateDeviceANGLE")); }
         let mut c = Context { egl, display: ptr::null_mut(), surface: ptr::null_mut(),
-            context: ptr::null_mut(), device, release_device, _d3d: d3d };
+            context: ptr::null_mut(), device, release_device, d3d };
         let display = unsafe { get_platform_display(EGL_PLATFORM_DEVICE_EXT, device, ptr::null()) };
         if display.is_null() {
             return Err(egl.err("eglGetPlatformDisplayEXT"));
@@ -271,6 +275,65 @@ impl Context {
 
     pub fn get_proc_address(&self, name: &CStr) -> *mut c_void {
         unsafe { (self.egl.get_proc_address)(name.as_ptr()) }
+    }
+
+    pub fn d3d11(&self) -> &ID3D11Device {
+        &self.d3d
+    }
+
+    pub fn has_extension(&self, name: &str) -> bool {
+        self.egl.query(self.display, EGL_EXTENSIONS).split_whitespace().any(|e| e == name)
+    }
+
+    pub fn wrap_d3d11(&self, texture: &ID3D11Texture2D) -> Result<D3dImage, String> {
+        let get = |name: &CStr| self.get_proc_address(name);
+        let (create, destroy, target) = (get(c"eglCreateImageKHR"), get(c"eglDestroyImageKHR"), get(c"glEGLImageTargetTexture2DOES"));
+        if create.is_null() || destroy.is_null() || target.is_null() {
+            return Err("ANGLE without EGL images".into());
+        }
+        let (create, destroy, target): (CreateImageFn, DestroyImageFn, ImageTargetTexture2DFn) =
+            unsafe { (std::mem::transmute(create), std::mem::transmute(destroy), std::mem::transmute(target)) };
+        let attribs = [EGL_NONE];
+        let image = unsafe { create(self.display, ptr::null_mut(), EGL_D3D11_TEXTURE_ANGLE, texture.as_raw(), attribs.as_ptr()) };
+        if image.is_null() {
+            return Err(self.egl.err("eglCreateImageKHR for a D3D11 texture"));
+        }
+        let mut out = D3dImage { tex: 0, fbo: 0, image, display: self.display, destroy, gpu: self.gpu() };
+        unsafe {
+            gl::GenTextures(1, &mut out.tex);
+            gl::BindTexture(gl::TEXTURE_2D, out.tex);
+            target(gl::TEXTURE_2D, image);
+            gl::GenFramebuffers(1, &mut out.fbo);
+            gl::BindFramebuffer(gl::FRAMEBUFFER, out.fbo);
+            gl::FramebufferTexture2D(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, gl::TEXTURE_2D, out.tex, 0);
+            let status = gl::CheckFramebufferStatus(gl::FRAMEBUFFER);
+            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+            gl::BindTexture(gl::TEXTURE_2D, 0);
+            if status != gl::FRAMEBUFFER_COMPLETE {
+                return Err(format!("D3D11 texture framebuffer incomplete: 0x{status:x}"));
+            }
+        }
+        Ok(out)
+    }
+}
+
+pub struct D3dImage {
+    pub tex: u32,
+    pub fbo: u32,
+    image: *mut c_void,
+    display: EGLDisplay,
+    destroy: DestroyImageFn,
+    gpu: Gpu,
+}
+
+impl Drop for D3dImage {
+    fn drop(&mut self) {
+        let _gpu = self.gpu.section();
+        unsafe {
+            gl::DeleteFramebuffers(1, &self.fbo);
+            gl::DeleteTextures(1, &self.tex);
+            (self.destroy)(self.display, self.image);
+        }
     }
 }
 

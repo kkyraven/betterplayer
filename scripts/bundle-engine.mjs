@@ -109,7 +109,11 @@ switch (process.platform) {
     for (const name of ['libEGL.dll', 'libGLESv2.dll']) {
       if (!dlls.some((f) => f.toLowerCase() === name.toLowerCase())) fail(`${name} is not next to the addon in engine/; run scripts/angle-windows.ps1 -Out engine`)
     }
+    if (!dlls.some((f) => f.toLowerCase() === 'openvr_api.dll')) {
+      fail('openvr_api.dll is not next to the addon in engine/; take bin/win64/openvr_api.dll from ValveSoftware/openvr v2.15.6')
+    }
     for (const f of dlls) copyFileSync(join(engine, f), join(out, f))
+    copyFileSync(join(engine, 'openvr-LICENSE.txt'), join(out, 'openvr-LICENSE.txt'))
     console.log(`bundle-engine: bundled ${dlls.join(', ')}`)
     const dlss5 = join(engine, 'dlss5')
     if (existsSync(dlss5)) {

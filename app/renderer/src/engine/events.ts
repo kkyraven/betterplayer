@@ -14,6 +14,8 @@ import { onDeviceInput } from '@/input/actions'
 import { END_WINDOW_MS, usePlayer, type PlayerSnapshot } from '@/state/player'
 
 const TRACK_POLL_MS = 1000 / 30
+const FRAME_STALL_MS = 150
+const FALLBACK_POLL_MS = 100
 
 const sameSnapshot = (a: EngineState, b: EngineState) =>
   a.durationMs === b.durationMs &&
@@ -52,9 +54,9 @@ function toSnapshot(s: EngineState): PlayerSnapshot {
 export function startEngineEvents(): () => void {
   let previous: EngineState | null = null
   let lastTrackPoll = 0
+  let lastFrame = performance.now()
   let handle = 0
-  const tick = () => {
-    handle = requestAnimationFrame(tick)
+  const poll = () => {
     const state = engine.state()
     live.set(state)
     if (!previous || !sameSnapshot(previous, state)) usePlayer.getState().setSnapshot(toSnapshot(state))
@@ -88,6 +90,17 @@ export function startEngineEvents(): () => void {
     }
     previous = state
   }
-  handle = requestAnimationFrame(tick)
-  return () => cancelAnimationFrame(handle)
+  const frame = () => {
+    handle = requestAnimationFrame(frame)
+    lastFrame = performance.now()
+    poll()
+  }
+  handle = requestAnimationFrame(frame)
+  const fallback = window.setInterval(() => {
+    if (performance.now() - lastFrame >= FRAME_STALL_MS) poll()
+  }, FALLBACK_POLL_MS)
+  return () => {
+    cancelAnimationFrame(handle)
+    window.clearInterval(fallback)
+  }
 }

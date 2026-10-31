@@ -2018,6 +2018,12 @@ impl Engine {
     pub fn halt_sensation(&self) { self.inner.halt_sensation(); }
 
     #[napi]
+    pub fn resume_sensation(&self) { self.inner.resume_sensation(); }
+
+    #[napi]
+    pub fn hold_sensation(&self, held: bool) { self.inner.hold_sensation(held); }
+
+    #[napi]
     pub fn apply_pain(&self, profile: PainProfile, intensity: f64, seconds: f64) -> Result<bool> {
         Ok(self.inner.apply_pain(profile.into_profile()?, intensity, seconds, false))
     }
@@ -2283,6 +2289,61 @@ impl Engine {
         self.inner.set_presenting(on).map_err(err)
     }
 
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn vr_start(&self) -> AsyncTask<VrWait> {
+        AsyncTask::new(VrWait { reply: self.inner.player.vr_start(), stop: false })
+    }
+
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn vr_stop(&self) -> AsyncTask<VrWait> {
+        AsyncTask::new(VrWait { reply: self.inner.player.vr_stop(), stop: true })
+    }
+
+    #[napi]
+    pub fn vr_view(&self, view: VrView) -> Result<()> {
+        let v = bp_player::VrView::parse(&view.kind, &view.layout, view.fov, view.swap_eyes).map_err(vr_err)?;
+        self.inner.player.vr_view(v).map_err(vr_err)
+    }
+
+    #[napi]
+    pub fn vr_recentre(&self, keep_recline: Option<bool>) -> Result<()> {
+        self.inner.player.vr_recentre(keep_recline.unwrap_or(false)).map_err(vr_err)
+    }
+
+    #[napi]
+    pub fn vr_turn(&self, degrees: f64) -> Result<()> {
+        self.inner.player.vr_turn(degrees as f32).map_err(vr_err)
+    }
+
+    #[napi]
+    pub fn vr_screen(&self, degrees: f64) -> Result<()> {
+        self.inner.player.vr_screen(degrees as f32).map_err(vr_err)
+    }
+
+    #[napi]
+    pub fn vr_shortcuts(&self) -> Vec<String> {
+        self.inner.player.vr_shortcuts().into_iter().map(|s| s.name().into()).collect()
+    }
+
+    #[napi]
+    pub fn vr_state(&self) -> Option<VrState> {
+        self.inner.player.vr_status().map(|s| VrState {
+            active: s.active,
+            error: s.error,
+            quit: s.quit,
+            hmd_name: s.hmd_name,
+            mounted: s.mounted,
+            lost_tracking: s.lost_tracking,
+            focused: s.focused,
+            presses: s.presses,
+            refresh_hz: s.refresh_hz as f64,
+            width: s.width,
+            height: s.height,
+            fps: s.fps as f64,
+            frames: s.frames as f64,
+        })
+    }
+
     #[napi]
     pub fn video_fps(&self) -> f64 {
         self.inner.player.video_fps()
@@ -2415,6 +2476,154 @@ impl Engine {
     #[napi]
     pub fn take_log(&self) -> Vec<String> {
         self.inner.player.take_log()
+    }
+
+    #[napi]
+    pub fn close(&mut self) {
+        self.inner.close()
+    }
+}
+
+#[napi(object)]
+pub struct VrAvailability {
+    pub installed: bool,
+    pub hmd: bool,
+}
+
+#[napi]
+pub fn vr_available() -> VrAvailability {
+    let a = bp_vr::availability();
+    VrAvailability { installed: a.installed, hmd: a.hmd }
+}
+
+#[napi(object)]
+pub struct VrView {
+    pub kind: String,
+    pub layout: String,
+    pub fov: f64,
+    pub swap_eyes: bool,
+}
+
+#[napi(object)]
+pub struct VrState {
+    pub active: bool,
+    pub error: Option<String>,
+    pub quit: bool,
+    pub hmd_name: String,
+    pub mounted: bool,
+    pub lost_tracking: bool,
+    pub focused: bool,
+    pub presses: u32,
+    pub refresh_hz: f64,
+    pub width: u32,
+    pub height: u32,
+    pub fps: f64,
+    pub frames: f64,
+}
+
+#[napi(object)]
+pub struct VrOverlayEvent {
+    pub overlay: i32,
+    pub kind: String,
+    pub x: f64,
+    pub y: f64,
+    pub button: u32,
+    pub dx: f64,
+    pub dy: f64,
+}
+
+fn vr_err(e: String) -> Error {
+    err(bp_vr::coded(e))
+}
+
+pub struct VrWait {
+    reply: bp_player::VrReply,
+    stop: bool,
+}
+
+impl Task for VrWait {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        match self.reply.wait() {
+            Err(e) if !self.stop => Err(err(e)),
+            _ => Ok(()),
+        }
+    }
+
+    fn resolve(&mut self, _env: Env, _: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+}
+
+#[napi]
+pub struct VrOverlays {
+    inner: bp_vr::Overlays,
+}
+
+#[napi]
+impl VrOverlays {
+    #[napi(constructor)]
+    pub fn new() -> Result<VrOverlays> {
+        Ok(VrOverlays { inner: bp_vr::Overlays::new().map_err(vr_err)? })
+    }
+
+    #[napi]
+    pub fn create(&mut self, key: String, name: String, width: u32, height: u32, metres: f64, curvature: f64) -> Result<u32> {
+        self.inner.create(&key, &name, width, height, metres as f32, curvature as f32).map_err(vr_err)
+    }
+
+    #[napi]
+    pub fn resize(&mut self, id: u32, width: u32, height: u32) -> Result<()> {
+        self.inner.resize(id, width, height).map_err(vr_err)
+    }
+
+    #[napi]
+    pub fn paint(&mut self, id: u32, pixels: Uint8Array, x: u32, y: u32, w: u32, h: u32) -> Result<()> {
+        self.inner.paint(id, &pixels, x, y, w, h).map_err(vr_err)
+    }
+
+    #[napi]
+    pub fn place(&mut self, id: u32, distance: f64, drop: f64, pitch_deg: f64) -> Result<()> {
+        self.inner.place(id, distance as f32, drop as f32, pitch_deg as f32).map_err(vr_err)
+    }
+
+    #[napi]
+    pub fn recentre(&mut self, keep_recline: Option<bool>) -> Result<()> {
+        self.inner.recentre(keep_recline.unwrap_or(false)).map_err(vr_err)
+    }
+
+    #[napi]
+    pub fn show(&mut self, id: u32, interactive: bool) -> Result<()> {
+        self.inner.show(id, interactive).map_err(vr_err)
+    }
+
+    #[napi]
+    pub fn hide(&mut self, id: u32) -> Result<()> {
+        self.inner.hide(id).map_err(vr_err)
+    }
+
+    #[napi]
+    pub fn follow(&mut self, id: u32, on: bool) -> Result<()> {
+        self.inner.follow(id, on).map_err(vr_err)
+    }
+
+    #[napi]
+    pub fn poll(&mut self) -> Vec<VrOverlayEvent> {
+        self.inner
+            .poll()
+            .into_iter()
+            .map(|e| VrOverlayEvent {
+                overlay: e.overlay,
+                kind: e.kind.into(),
+                x: e.x as f64,
+                y: e.y as f64,
+                button: e.button,
+                dx: e.dx as f64,
+                dy: e.dy as f64,
+            })
+            .collect()
     }
 
     #[napi]

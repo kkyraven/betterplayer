@@ -28,6 +28,7 @@ pub const MPV_RENDER_PARAM_API_TYPE: c_int = 1;
 pub const MPV_RENDER_PARAM_OPENGL_INIT_PARAMS: c_int = 2;
 pub const MPV_RENDER_PARAM_OPENGL_FBO: c_int = 3;
 pub const MPV_RENDER_PARAM_FLIP_Y: c_int = 4;
+pub const MPV_RENDER_PARAM_DEPTH: c_int = 5;
 pub const MPV_RENDER_PARAM_ADVANCED_CONTROL: c_int = 10;
 pub const MPV_RENDER_PARAM_NEXT_FRAME_INFO: c_int = 11;
 pub const MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME: c_int = 12;
@@ -112,6 +113,7 @@ pub struct mpv_opengl_fbo {
 
 unsafe extern "C" {
     pub fn mpv_client_api_version() -> std::ffi::c_ulong;
+    pub fn mpv_get_time_us(h: *mut mpv_handle) -> i64;
     pub fn mpv_create() -> *mut mpv_handle;
     pub fn mpv_initialize(h: *mut mpv_handle) -> c_int;
     pub fn mpv_terminate_destroy(h: *mut mpv_handle);
@@ -153,6 +155,7 @@ pub struct Mpv {
     pub handle: *mut mpv_handle,
     pub observed_time: AtomicU64,
     pub picture_ready: AtomicBool,
+    pub observed_size: AtomicU64,
 }
 unsafe impl Send for Mpv {}
 unsafe impl Sync for Mpv {}
@@ -182,7 +185,7 @@ impl Mpv {
         if handle.is_null() {
             return Err("mpv_create failed (check LC_NUMERIC)".into());
         }
-        Ok(Mpv { handle, observed_time: AtomicU64::new(0.0f64.to_bits()), picture_ready: AtomicBool::new(false) })
+        Ok(Mpv { handle, observed_time: AtomicU64::new(0.0f64.to_bits()), picture_ready: AtomicBool::new(false), observed_size: AtomicU64::new(0) })
     }
 
     pub fn set_option(&self, name: &str, value: &str) -> Result<(), String> {

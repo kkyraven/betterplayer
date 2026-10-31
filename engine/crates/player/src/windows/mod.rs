@@ -3,6 +3,7 @@ pub mod dlss5;
 pub mod egl;
 pub mod fruc;
 pub mod probe;
+pub mod vr;
 
 use std::path::PathBuf;
 

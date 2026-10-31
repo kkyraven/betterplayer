@@ -14,6 +14,7 @@ export function FollowPanel() {
   const t = useT()
   const kind = useFollow((s) => s.kind)
   const host = useFollow((s) => s.host)
+  const name = useFollow((s) => s.quest?.name ?? '')
   const state = useFollow((s) => s.state)
   const matched = useFollow((s) => s.matched)
   const setKind = useFollow((s) => s.setKind)
@@ -40,9 +41,9 @@ export function FollowPanel() {
         <>
           <div className="st">
             <span className={`dot ${state.status === 'connected' ? (state.path && matched ? '' : 'warn') : state.status === 'error' ? 'danger' : 'warn'}`} />
-            <span>{FOLLOW_LABELS[kind]}</span>
+            <span>{kind === 'quest' && name ? `${FOLLOW_LABELS.quest} · ${name}` : FOLLOW_LABELS[kind]}</span>
             <span className="p" title={state.path}>
-              {state.path ? fileTitle(state.path) : status}
+              {state.path ? (matched?.title ?? fileTitle(state.path)) : status}
             </span>
           </div>
           {state.path && <span className="faint">{status}</span>}

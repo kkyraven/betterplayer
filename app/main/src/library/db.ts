@@ -24,7 +24,16 @@ import {
   type Tag,
   type TagUndo,
 } from '@shared/library'
-import { PROJECTION_KINDS, type ProjectionKind } from '@shared/projection'
+import {
+  PROJECTION_KINDS,
+  readContainerFacts,
+  readPictureFacts,
+  readProjection,
+  type ContainerFacts,
+  type DetectInput,
+  type PictureFacts,
+  type ProjectionKind,
+} from '@shared/projection'
 import { ROOT_KINDS, type RootKind } from '@shared/remote'
 import { holdBack, mixRecommended, pickSuggestions, recommendSeed, SUGGESTION_COUNT, type MixEntry } from './recommend'
 import type { Validators } from './servers/images'
@@ -311,6 +320,8 @@ const SCHEMA_V22 = `
 CREATE TABLE IF NOT EXISTS blocked_tags (name TEXT PRIMARY KEY);
 `
 
+const VR_COLUMNS = ['vr_probe', 'vr_look'] as const
+
 export type AssetKind = 'scripts' | 'thumb' | 'strip'
 export interface AssetJob {
   mediaId: number
@@ -324,7 +335,7 @@ export interface AssetJob {
   priority: number
 }
 
-const SCHEMA_VERSION = 22
+const SCHEMA_VERSION = 23
 
 function parseValidators(raw: string): Validators {
   if (!raw) return {}
@@ -390,6 +401,8 @@ function migrate(db: DatabaseSync) {
         db.exec(SCHEMA_V21)
       case 21:
         db.exec(SCHEMA_V22)
+      case 22:
+        for (const column of VR_COLUMNS) if (!hasColumn(db, 'media', column)) db.exec(`ALTER TABLE media ADD COLUMN ${column} TEXT NOT NULL DEFAULT ''`)
       default:
         break
     }
@@ -413,6 +426,7 @@ export interface MediaUpsert {
   height: number
   codec: string
   projection: ProjectionKind
+  vrProbe?: string
   remoteKey?: string
 }
 
@@ -448,6 +462,21 @@ export interface MediaStamp {
   scriptsStamp: string
   coverStamp: string
   remoteStamp: string
+  projection: string
+  width: number
+  height: number
+  vrProbe: string
+  vrLook: string
+}
+
+export interface ProjectionFacts {
+  id: number
+  path: string
+  kind: ProjectionKind
+  remote: boolean
+  strip: ThumbState
+  durationMs: number
+  input: DetectInput & { container?: ContainerFacts; picture?: PictureFacts }
 }
 
 export interface MatchMedia {
@@ -670,7 +699,7 @@ export class LibraryDb {
   }
 
   stamp(path: string): MediaStamp | null {
-    const row = this.stmt('SELECT id, size, mtime, duration_ms, thumb_ready, strip_ready, thumb_quality, strip_quality, remote_key, tags_ready, scripts_stamp, cover_stamp, remote_stamp FROM media WHERE path = ?').get(path)
+    const row = this.stmt('SELECT id, size, mtime, duration_ms, thumb_ready, strip_ready, thumb_quality, strip_quality, remote_key, tags_ready, scripts_stamp, cover_stamp, remote_stamp, projection, width, height, vr_probe, vr_look FROM media WHERE path = ?').get(path)
     if (!row) return null
     return {
       id: num(row, 'id'),
@@ -683,19 +712,24 @@ export class LibraryDb {
       scriptsStamp: text(row, 'scripts_stamp'),
       coverStamp: text(row, 'cover_stamp'),
       remoteStamp: text(row, 'remote_stamp'),
+      projection: text(row, 'projection'),
+      width: num(row, 'width'),
+      height: num(row, 'height'),
+      vrProbe: text(row, 'vr_probe'),
+      vrLook: text(row, 'vr_look'),
     }
   }
 
   upsertMedia(m: MediaUpsert, now: number): number {
     const row = this.stmt(
-      `INSERT INTO media (root_id, path, folder, title, size, mtime, added_at, duration_ms, width, height, codec, projection, remote_key)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO media (root_id, path, folder, title, size, mtime, added_at, duration_ms, width, height, codec, projection, vr_probe, remote_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(path) DO UPDATE SET root_id = excluded.root_id, folder = excluded.folder, title = CASE WHEN title_set THEN title ELSE excluded.title END,
          size = excluded.size, mtime = excluded.mtime, duration_ms = excluded.duration_ms, width = excluded.width,
-         height = excluded.height, codec = excluded.codec, projection = excluded.projection, remote_key = excluded.remote_key,
-         thumb_ready = 0, strip_ready = 0, tags_ready = 0
+         height = excluded.height, codec = excluded.codec, projection = excluded.projection, vr_probe = excluded.vr_probe, vr_look = '',
+         remote_key = excluded.remote_key, thumb_ready = 0, strip_ready = 0, tags_ready = 0
        RETURNING id`,
-    ).get(m.rootId, m.path, m.folder, m.title, m.size, m.mtime, now, m.durationMs, m.width, m.height, m.codec, m.projection, m.remoteKey ?? '')
+    ).get(m.rootId, m.path, m.folder, m.title, m.size, m.mtime, now, m.durationMs, m.width, m.height, m.codec, m.projection, m.vrProbe ?? '', m.remoteKey ?? '')
     return row ? num(row, 'id') : 0
   }
 
@@ -979,6 +1013,28 @@ export class LibraryDb {
 
   setScriptsStamp(mediaId: number, stamp: string) {
     this.stmt('UPDATE media SET scripts_stamp = ? WHERE id = ?').run(stamp, mediaId)
+  }
+
+  setProjection(mediaId: number, projection: ProjectionKind) {
+    this.stmt('UPDATE media SET projection = ? WHERE id = ?').run(projection, mediaId)
+  }
+
+  setVrProbe(mediaId: number, json: string) {
+    this.stmt('UPDATE media SET vr_probe = ? WHERE id = ?').run(json, mediaId)
+  }
+
+  setVrLook(mediaId: number, json: string) {
+    this.stmt('UPDATE media SET vr_look = ? WHERE id = ?').run(json, mediaId)
+  }
+
+  projectionFacts(path: string): ProjectionFacts | null {
+    const row = this.stmt(`${FACTS_SELECT} WHERE m.path = ?`).get(path)
+    return row ? toProjectionFacts(row) : null
+  }
+
+  projectionFactsById(id: number): ProjectionFacts | null {
+    const row = this.stmt(`${FACTS_SELECT} WHERE m.id = ?`).get(id)
+    return row ? toProjectionFacts(row) : null
   }
 
   setCoverStamp(mediaId: number, stamp: string) {
@@ -1520,6 +1576,27 @@ export class LibraryDb {
     this.stmt('DELETE FROM video_settings WHERE key = ?').run(key)
   }
 
+  trackedVideoSettings(): (VideoSettingsRow & { key: string })[] {
+    return this.stmt(`SELECT key, position_ms, settings FROM video_settings WHERE settings LIKE '%"tracking"%'`)
+      .all()
+      .map((row) => ({ key: text(row, 'key'), positionMs: numOrNull(row, 'position_ms'), settings: text(row, 'settings') }))
+  }
+
+  projectionPicks(): Map<string, ProjectionKind> {
+    const picks = new Map<string, ProjectionKind>()
+    for (const row of this.stmt(`SELECT key, settings FROM video_settings WHERE settings LIKE '%"projection"%'`).all()) {
+      let settings: unknown = null
+      try {
+        settings = JSON.parse(text(row, 'settings'))
+      } catch {
+        continue
+      }
+      const pick = typeof settings === 'object' && settings !== null && 'projection' in settings ? readProjection(settings.projection) : undefined
+      if (pick) picks.set(text(row, 'key'), pick.kind)
+    }
+    return picks
+  }
+
   generated(key: string): GeneratedRows | null {
     const rows = this.stmt('SELECT axis, settings_hash, stamp, json FROM generated WHERE key = ? ORDER BY axis').all(key)
     const first = rows[0]
@@ -1850,6 +1927,31 @@ function toScript(row: Row): ScriptRow {
 }
 
 const coverKey = (stamp: string) => (stamp ? `&c=${encodeURIComponent(stamp)}` : '')
+
+const FACTS_SELECT = `SELECT m.id, m.path, m.title, m.title_set, m.width, m.height, m.duration_ms, m.projection, m.remote_key, m.strip_ready, m.vr_probe, m.vr_look, d.filename
+  FROM media m LEFT JOIN media_details d ON d.media_id = m.id`
+
+function toProjectionFacts(row: Row): ProjectionFacts {
+  const path = text(row, 'path')
+  const remote = text(row, 'remote_key') !== ''
+  const kind = text(row, 'projection')
+  const serverName = text(row, 'filename').replace(/\.[^.]*$/, '') || (num(row, 'title_set') === 1 ? '' : text(row, 'title'))
+  return {
+    id: num(row, 'id'),
+    path,
+    kind: PROJECTION_KINDS.find((k) => k === kind) ?? 'flat',
+    remote,
+    strip: thumbState(num(row, 'strip_ready')),
+    durationMs: num(row, 'duration_ms'),
+    input: {
+      name: remote ? serverName : basename(path, extname(path)),
+      width: num(row, 'width'),
+      height: num(row, 'height'),
+      container: readContainerFacts(text(row, 'vr_probe')),
+      picture: readPictureFacts(text(row, 'vr_look')),
+    },
+  }
+}
 
 function toMediaRow(row: Row): MediaRow {
   const id = num(row, 'id')

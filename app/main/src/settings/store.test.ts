@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { defaultDlss, defaultEstim, defaultParamSource, defaultSettings } from '@shared/settings'
-import { migrate, readPerVideo } from './store'
+import { isEmptyPerVideo, migrate, readPerVideo } from './store'
 
 const buttplug = { kind: 'buttplug', profile: 'stroker', url: 'ws://127.0.0.1:12345' }
 
@@ -192,5 +192,59 @@ describe('theme', () => {
     const theme = { mode: 'light', accent: 'rose', tint: 'sky' }
     expect(migrate({ version: 1, appearance: { theme } }).appearance.theme).toEqual(theme)
     expect(migrate({ version: 1, appearance: { theme: { mode: 'sepia', accent: 7, tint: 'none' } } }).appearance.theme).toEqual({ mode: 'dark', accent: 'violet', tint: 'none' })
+  })
+})
+
+describe('tracking rules', () => {
+  const rows = (source: string, patch: Record<string, string> = {}) => Object.fromEntries(['L0', 'L2', 'L1', 'R1', 'R2', 'R0'].map((id) => [id, { source: patch[id] ?? source }]))
+  const rules = (tracking: Record<string, unknown>) => {
+    const { fill, musicFill, fillScripted } = migrate({ version: 1, tracking }).tracking
+    return { fill, musicFill, fillScripted }
+  }
+
+  it('starts a fresh install on AI Motion with nothing beside scripts', () => {
+    expect(rules({})).toEqual({ fill: 'ai-motion', musicFill: 'auto', fillScripted: false })
+    expect(migrate(null).tracking).toMatchObject({ fill: 'ai-motion', musicFill: 'auto', fillScripted: false })
+  })
+
+  it('derives the rules from the old axis table and AI Motion switch', () => {
+    const cases: [string, Record<string, unknown>, string, string][] = [
+      ['every row Off', { axes: rows('off') }, 'off', 'auto'],
+      ['L0 on Beat', { axes: rows('ai-motion', { L0: 'beat' }) }, 'beat', 'auto'],
+      ['first row that is not Off on Beat', { axes: rows('off', { L1: 'beat', R1: 'video' }) }, 'beat', 'auto'],
+      ['Video rows, AI Motion switch on', { axes: rows('video'), motionDefault: true }, 'ai-motion', 'auto'],
+      ['Video rows, AI Motion switch off', { axes: rows('video'), motionDefault: false }, 'off', 'auto'],
+      ['Hero on the stroke', { axes: rows('video', { L0: 'hero' }) }, 'ai-motion', 'auto'],
+      ['AI CH/PMV rows', { axes: rows('ai-music') }, 'ai-motion', 'ai-music'],
+    ]
+    for (const [name, tracking, fill, musicFill] of cases) expect(rules(tracking), name).toEqual({ fill, musicFill, fillScripted: false })
+  })
+
+  it('keeps saved rules and the fields older builds read', () => {
+    const tracking = { axes: rows('off'), fill: 'beat', musicFill: 'same', fillScripted: true, motionDefault: false, generateForScripted: false }
+    expect(migrate(migrate({ version: 1, tracking })).tracking).toMatchObject({ fill: 'beat', musicFill: 'same', fillScripted: true, motionDefault: false, generateForScripted: false })
+    expect(rules({ axes: rows('off'), fill: 'video', musicFill: 'loud' })).toEqual({ fill: 'off', musicFill: 'auto', fillScripted: false })
+  })
+})
+
+describe('per-video tracking', () => {
+  const roundTrip = (tracking: unknown) => readPerVideo(JSON.parse(JSON.stringify(readPerVideo({ tracking })))).tracking
+  const zones = { enabled: true, zones: [{ id: 'z1', region: { x: 0.1, y: 0.1, w: 0.2, h: 0.2 }, trigger: { kind: 'colour', buckets: [0] }, cover: 0.2, holdMs: 500, effect: { tempo: 2, intensity: 1, playbackSpeed: 1, estimMax: null } }] }
+
+  it('keeps picks, tuning, the crosshair, the music mark, zones, the file stamp and sensitivity', () => {
+    const tracking = { own: { L0: { source: 'beat' }, L2: { max: 0.5, invert: true } }, on: false, notMusic: true, sensitivity: 1.3, region: null, zones, heroFileStamp: '1024:1700000000000' }
+    expect(roundTrip(tracking)).toEqual(tracking)
+    expect(roundTrip({ own: {} })).toEqual({ own: {}, region: null })
+  })
+
+  it('leaves out an absent sensitivity and table, and drops junk', () => {
+    expect(roundTrip({})).toEqual({ region: null })
+    expect(roundTrip({ own: { L0: { source: 'sideways', max: 3 }, X9: { source: 'beat' }, L2: {} }, on: 'yes', notMusic: false, heroFileStamp: '' })).toEqual({ own: { L0: { max: 1 } }, region: null })
+    expect(roundTrip({ axes: { L0: { source: 'beat' } }, sensitivity: 1 })).toMatchObject({ axes: { L0: { source: 'beat' }, R0: { source: 'off' } }, sensitivity: 1 })
+  })
+
+  it('stores a row for the current format and drops an entry with no tracking', () => {
+    expect(isEmptyPerVideo(readPerVideo({ tracking: { own: {} } }))).toBe(false)
+    expect(isEmptyPerVideo(readPerVideo({ tracking: 'junk' }))).toBe(true)
   })
 })

@@ -27,7 +27,7 @@ export const toAl = (kind: DomMemoryKind, content: string) => {
 export function fromAl(m: AlMemoryJson): DomMemory {
   const text = m.content ?? ''
   const createdAt = m.created_at ? Date.parse(m.created_at) : 0
-  const base = { id: String(m.id), createdAt: Number.isFinite(createdAt) ? createdAt : 0 }
+  const base = { id: String(m.id), createdAt: Number.isFinite(createdAt) ? createdAt : 0, synced: true }
   if (m.memory_kind === 'preference' && text.startsWith(DISLIKES)) return { ...base, kind: 'dislike', content: text.slice(DISLIKES.length) }
   if (m.memory_kind === 'preference') return { ...base, kind: 'like', content: text.startsWith(LIKES) ? text.slice(LIKES.length) : text }
   if (m.memory_kind === 'boundary') return { ...base, kind: 'limit', content: text }

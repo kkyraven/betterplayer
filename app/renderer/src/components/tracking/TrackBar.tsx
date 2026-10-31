@@ -17,13 +17,13 @@ import { useDevices } from '@/state/devices'
 import { useGenerate } from '@/state/generate'
 import { useT } from '@/state/i18n'
 import { intifaceStatusLine, useIntifaceEnabled, useIntifaceStatus } from '@/state/intiface'
-import * as live from '@/state/live'
 import { isUrl, usePlayer } from '@/state/player'
 import { useSettings } from '@/state/settings'
 import { targetLabel, useTracking, type TrackSource } from '@/state/tracking'
 import { AxesTable } from './AxesTable'
 import { GenerateDialog } from './GenerateDialog'
 import { HeroControls } from './HeroControls'
+import { MusicChip } from './MusicChip'
 import { Advanced } from './Advanced'
 import './TrackBar.css'
 
@@ -44,7 +44,7 @@ function useSlowLocating(locating: boolean): boolean {
   return slow
 }
 
-export function TrackBar({ variant }: { variant: TrackSource }) {
+export function TrackBar({ variant, overlay = null }: { variant: TrackSource; overlay?: HTMLDivElement | null }) {
   const t = useT()
   const source = useTracking((s) => s.source)
   const st = useTracking((s) => s.state?.state ?? 'idle')
@@ -60,8 +60,8 @@ export function TrackBar({ variant }: { variant: TrackSource }) {
   const pagePlaying = useBrowser((s) => s.tabs.find((t) => t.active)?.video?.playing ?? false)
   const local = usePlayer((s) => s.path !== null && !isUrl(s.path))
   const plan = useGenerate((s) => s.plan)
-  const flagsVersion = usePlayer((s) => s.snapshot.flagsVersion)
-  const scripted = useMemo(() => new Set(variant === 'player' ? live.axisIdsWith(live.FLAG_SCRIPT) : []), [variant, flagsVersion])
+  const scripts = usePlayer((s) => s.scripts)
+  const scripted = useMemo(() => new Set(variant === 'player' ? scripts.filter((s) => s.selected).map((s) => s.axis) : []), [variant, scripts])
   const [axesOpen, setAxesOpen] = useState(false)
   const handoffRequest = useRef({ pending: false, disposed: false })
   useEffect(() => {
@@ -162,6 +162,7 @@ export function TrackBar({ variant }: { variant: TrackSource }) {
           </Button>
         ) : (
           <>
+            <MusicChip overlay={overlay} />
             <ZoneChip />
             <AxesPopover scripted={scripted} beat />
           </>
@@ -384,11 +385,12 @@ function RegionSelect() {
 function AxesBody({ scripted, beat, browser = false }: { scripted: ReadonlySet<string>; beat: boolean; browser?: boolean }) {
   const t = useT()
   const axes = useTracking((s) => s.axes)
+  const rules = useTracking((s) => s.resolved)
   const setAxis = useTracking((s) => s.setAxis)
   const key = useTracking((s) => s.key)
+  const saved = useTracking((s) => s.saved)
   const fps = useTracking((s) => s.state?.fps ?? 0)
   const aheadMs = useTracking((s) => s.state?.aheadMs ?? null)
-  const setAsDefault = useTracking((s) => s.setAsDefault)
   const reset = useTracking((s) => s.reset)
   const restim = useDevices((s) => s.outputs.some((o) => o.config.profile === 'restim'))
   const present = useTracking((s) => s.present)
@@ -396,7 +398,7 @@ function AxesBody({ scripted, beat, browser = false }: { scripted: ReadonlySet<s
   return (
     <>
       <div className="ttl">{t('tracking.bar.axes')}</div>
-      <AxesTable axes={axes} onChange={setAxis} scripted={scripted} beat={beat} present={present} faptap={browser ? (intiface ? 'ready' : 'off') : undefined} />
+      <AxesTable mode="video" rules={rules} axes={axes} onChange={setAxis} scripted={scripted} beat={beat} present={present} faptap={browser ? (intiface ? 'ready' : 'off') : undefined} />
       {!browser && <Advanced />}
       {restim && (
         <div className="axnote">
@@ -406,18 +408,17 @@ function AxesBody({ scripted, beat, browser = false }: { scripted: ReadonlySet<s
       )}
       <div className="tfoot">
         <span className="note">
-          {key ? t('tracking.savedForVideo') : t('tracking.bar.notSavedNoAddress')}
+          {!key ? t('tracking.bar.notSavedNoAddress') : saved ? t('tracking.savedForVideo') : t('player.sideSheet.usingDefaults')}
           {fps > 0 && ` · ${t('tracking.bar.fps', { fps: Math.round(fps) })}`}
           {aheadMs !== null && ` · ${t('tracking.bar.ahead', { seconds: Math.round(aheadMs / 1000) })}`}
         </span>
-        <span className="acts">
-          <Button variant="ghost" onClick={() => void setAsDefault()}>
-            {t('tracking.bar.setAsDefault')}
-          </Button>
-          <Button variant="ghost" onClick={reset}>
-            {t('common.reset')}
-          </Button>
-        </span>
+        {saved && (
+          <span className="acts">
+            <Button variant="ghost" onClick={reset}>
+              {t('common.reset')}
+            </Button>
+          </span>
+        )}
       </div>
     </>
   )

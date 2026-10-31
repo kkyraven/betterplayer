@@ -1,6 +1,6 @@
 import { t } from '../../i18n'
 import { basename } from 'node:path'
-import { detectProjection } from '@shared/projection'
+import { resolveProjection } from '@shared/projection'
 import type { ServerRoot } from '../db'
 import type { Adapter, RemoteEntry, RemoteGroup, RemoteScene, RemoteWrite } from './adapter'
 import { baseUrl, request } from './http'
@@ -164,7 +164,7 @@ export class StashAdapter implements Adapter {
       width: file.width ?? 0,
       height: file.height ?? 0,
       codec: file.video_codec ?? '',
-      projection: detectProjection(fileName),
+      projection: resolveProjection({ name: fileName, width: file.width ?? 0, height: file.height ?? 0 }).projection,
       rating: s.rating100 === null ? 0 : Math.max(0, Math.min(5, Math.round(s.rating100 / 20))),
       tags: s.tags.map((t) => t.name),
       description: s.details ?? '',
