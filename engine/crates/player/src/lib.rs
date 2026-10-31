@@ -228,6 +228,9 @@ impl Player {
                     };
                     let mut size = (0u32, 0u32);
                     let mut in_vr = false;
+                    let mut behind = Behind::default();
+                    let framedrop = mpv.get_string("framedrop").unwrap_or_default();
+                    let (mut idle, mut speed) = (true, 1.0);
                     while !stop.load(Ordering::Relaxed) {
                         let now_in_vr = vr.lock().unwrap().as_ref().is_some_and(|s| s.active);
                         if now_in_vr != in_vr {
@@ -244,19 +247,42 @@ impl Player {
                                 }
                                 emit(PlayerEvent::EndFile { error });
                             }
-                            Event::FileLoaded => emit(PlayerEvent::FileLoaded),
-                            Event::Seek => emit(PlayerEvent::Seek),
-                            Event::PlaybackRestart => emit(PlayerEvent::PlaybackRestart),
+                            Event::FileLoaded => {
+                                if std::mem::take(&mut behind).tripped {
+                                    let _ = mpv.set_property("framedrop", &framedrop);
+                                }
+                                emit(PlayerEvent::FileLoaded)
+                            }
+                            Event::Seek => {
+                                behind.reset();
+                                emit(PlayerEvent::Seek)
+                            }
+                            Event::PlaybackRestart => {
+                                behind.reset();
+                                emit(PlayerEvent::PlaybackRestart)
+                            }
                             Event::Property { name, value } => match (name.as_str(), value) {
                                 ("time-pos", Some(Property::Double(t))) => {
                                     mpv.observed_time.store(t.to_bits(), Ordering::Relaxed);
+                                    if !idle && framedrop != "no" && behind.tick(std::time::Instant::now(), t, speed) {
+                                        push_log(&log, "decoding is slower than real time: frame dropping off for this file".into());
+                                        let _ = mpv.set_property("framedrop", "no");
+                                    }
                                     emit(PlayerEvent::TimePos(t));
                                 }
                                 ("duration", Some(Property::Double(d))) => emit(PlayerEvent::Duration(d)),
                                 ("pause", Some(Property::Flag(p))) => emit(PlayerEvent::Pause(p)),
                                 ("eof-reached", Some(Property::Flag(p))) => emit(PlayerEvent::PlaybackEnded(p)),
-                                ("core-idle", Some(Property::Flag(i))) => emit(PlayerEvent::Idle(i)),
-                                ("speed", Some(Property::Double(s))) => emit(PlayerEvent::Speed(s)),
+                                ("core-idle", Some(Property::Flag(i))) => {
+                                    idle = i;
+                                    behind.reset();
+                                    emit(PlayerEvent::Idle(i))
+                                }
+                                ("speed", Some(Property::Double(s))) => {
+                                    speed = s;
+                                    behind.reset();
+                                    emit(PlayerEvent::Speed(s))
+                                }
                                 ("container-fps", value) => emit(PlayerEvent::VideoFps(match value {
                                     Some(Property::Double(fps)) => fps,
                                     _ => 0.0,
@@ -598,6 +624,35 @@ fn enhance_capabilities() -> EnhanceCapabilities {
     EnhanceCapabilities::none("Windows with an NVIDIA RTX card")
 }
 
+#[derive(Default)]
+struct Behind {
+    start: Option<(std::time::Instant, f64)>,
+    tripped: bool,
+}
+
+impl Behind {
+    const WINDOW: Duration = Duration::from_secs(2);
+    const RATIO: f64 = 0.85;
+
+    fn reset(&mut self) {
+        self.start = None;
+    }
+
+    fn tick(&mut self, now: std::time::Instant, pos: f64, speed: f64) -> bool {
+        if self.tripped {
+            return false;
+        }
+        let (t0, p0) = *self.start.get_or_insert((now, pos));
+        let wall = now.duration_since(t0);
+        if wall < Self::WINDOW {
+            return false;
+        }
+        self.start = Some((now, pos));
+        self.tripped = pos - p0 < Self::RATIO * speed * wall.as_secs_f64();
+        self.tripped
+    }
+}
+
 fn dimension(v: Option<Property>) -> u32 {
     match v {
         Some(Property::Double(d)) if d > 0.0 => d as u32,
@@ -615,6 +670,26 @@ fn push_log(log: &Mutex<Vec<String>>, line: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_dropping_stops_only_after_a_window_behind_real_time() {
+        let t = std::time::Instant::now();
+        let at = |s: f64| t + Duration::from_secs_f64(s);
+        let mut b = Behind::default();
+        assert!(!b.tick(at(0.0), 10.0, 1.0));
+        assert!(!b.tick(at(1.0), 10.9, 1.0));
+        assert!(!b.tick(at(2.0), 11.9, 1.0));
+        assert!(!b.tick(at(4.0), 15.9, 2.0));
+        let mut b = Behind::default();
+        assert!(!b.tick(at(0.0), 10.0, 1.0));
+        assert!(b.tick(at(2.0), 11.4, 1.0));
+        assert!(!b.tick(at(4.0), 12.8, 1.0));
+        let mut b = Behind::default();
+        b.tick(at(0.0), 10.0, 1.0);
+        b.reset();
+        assert!(!b.tick(at(1.5), 50.0, 1.0));
+        assert!(!b.tick(at(3.5), 52.0, 1.0));
+    }
 
     #[test]
     fn page_load_restores_extractor_after_direct_stream() {
