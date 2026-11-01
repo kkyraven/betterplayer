@@ -17,6 +17,7 @@ const LEAD_RESUME_MS: f64 = 30_000.0;
 const BEHIND_MS: f64 = 1500.0;
 const HOLDOFF_MS: f64 = 5000.0;
 const SEEK_MS: f64 = 10_000.0;
+const BEHIND_RUNS: u32 = 2;
 const RUNS_KEPT: usize = 24;
 const FRAME_WAIT: Duration = Duration::from_millis(100);
 
@@ -189,6 +190,7 @@ fn run(
     let mut last_time: Option<f64> = None;
     let mut paused = true;
     let mut restart: Option<Restart> = None;
+    let mut behind_runs = 0;
     let mut cuts_seen = 0;
     let mut last_detect_ms = f64::NEG_INFINITY;
     let mut gray = Vec::new();
@@ -216,12 +218,24 @@ fn run(
             .or(restart.as_ref().map(|r| (r.target_ms, r.target_ms)))
             .unwrap_or((f64::INFINITY, f64::NEG_INFINITY));
         let serves = covers_ahead || (start <= pos + 1000.0 && end >= pos - BEHIND_MS);
+        if covers_ahead {
+            behind_runs = 0;
+        }
         let held = restart.as_ref().is_some_and(|r| {
             r.at.elapsed().as_secs_f64() * 1000.0 < HOLDOFF_MS
                 && (pos - end).abs() < SEEK_MS
                 && pos >= r.target_ms - 1000.0
         });
         if !serves && !held {
+            if restart.is_some() && (pos - end).abs() < SEEK_MS {
+                behind_runs += 1;
+                if behind_runs >= BEHIND_RUNS {
+                    eprintln!("bp-core: lookahead: decoding slower than playback, stopped");
+                    return Ok(());
+                }
+            } else {
+                behind_runs = 0;
+            }
             let from = (pos - WARMUP_MS).max(0.0);
             player.seek(from / 1000.0)?;
             player.play()?;

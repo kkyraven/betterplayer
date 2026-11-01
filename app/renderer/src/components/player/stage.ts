@@ -149,6 +149,8 @@ class Stage {
   private split = false
   private texW = 0
   private texH = 0
+  private texHalf: client.Half | null = null
+  private whole = false
   private look: Look = { ...DEFAULT_LOOK }
   private drag: { x: number; y: number } | null = null
   private dirty = true
@@ -277,10 +279,13 @@ class Stage {
 
   private setProjection(p: Projection) {
     const shape = p.kind !== this.projection.kind || p.layout !== this.projection.layout
+    const eye = p.swapEyes !== this.projection.swapEyes
     this.projection = p
     if (shape) {
       this.look = { ...DEFAULT_LOOK }
       this.applyProjection(p)
+      this.layout()
+    } else if (eye) {
       this.layout()
     }
     this.dirty = true
@@ -331,10 +336,12 @@ class Stage {
     if (!this.slot || performance.now() < this.resizeRetryAt) return
     const vw = client.engine.videoWidth() || this.fitted.w
     const vh = client.engine.videoHeight() || this.fitted.h
+    const whole = tracksFrames()
     try {
-      client.resize(this.canvas.clientWidth, this.canvas.clientHeight, this.projection, vw, vh)
+      client.resize(this.canvas.clientWidth, this.canvas.clientHeight, this.projection, vw, vh, whole)
+      this.whole = whole
       this.ensureTexture()
-      side?.resize(client.width, client.height)
+      side?.resize(client.width, client.height, client.half)
       this.fitted = { w: vw, h: vh }
       this.resizeRetryAt = 0
     } catch (error) {
@@ -345,18 +352,19 @@ class Stage {
 
   private ensureTexture() {
     const { gl, canvas } = this
-    if (this.tex && this.texW === client.width && this.texH === client.height) return
+    if (this.tex && this.texW === client.width && this.texH === client.height && this.texHalf === client.half) return
     const old = this.hasFrame ? this.tex : null
     if (this.tex && !old) gl.deleteTexture(this.tex)
     this.texW = client.width
     this.texH = client.height
-    canvas.width = this.texW
-    canvas.height = this.texH
-    gl.viewport(0, 0, this.texW, this.texH)
+    canvas.width = client.drawnWidth
+    canvas.height = client.drawnHeight
+    gl.viewport(0, 0, canvas.width, canvas.height)
     if (old) {
       gl.bindTexture(gl.TEXTURE_2D, old)
       this.draw()
     }
+    this.texHalf = client.half
     this.tex = gl.createTexture()
     gl.bindTexture(gl.TEXTURE_2D, this.tex)
     gl.texStorage2D(gl.TEXTURE_2D, Math.floor(Math.log2(Math.max(this.texW, this.texH))) + 1, gl.RGBA8, this.texW, this.texH)
@@ -419,9 +427,9 @@ class Stage {
     const { gl, uniforms: u, projection: p, look: l } = this
     gl.uniform1i(u.mode, p.kind === 'flat' ? 0 : p.kind === 'fisheye' ? 2 : 1)
     gl.uniform1f(u.hfov, p.kind === 'equirect360' ? Math.PI * 2 : p.kind === 'fisheye' ? (p.fov * Math.PI) / 180 : Math.PI)
-    gl.uniform1i(u.eyes, p.layout === 'sbs' ? 1 : p.layout === 'ou' ? 2 : 0)
+    gl.uniform1i(u.eyes, this.texHalf ? 0 : p.layout === 'sbs' ? 1 : p.layout === 'ou' ? 2 : 0)
     gl.uniform1i(u.eye, p.swapEyes ? 1 : 0)
-    gl.uniform2f(u.outSize, this.texW, this.texH)
+    gl.uniform2f(u.outSize, this.canvas.width, this.canvas.height)
     const shown = flatEye(p, client.engine.videoWidth() || 16, client.engine.videoHeight() || 9)
     gl.uniform2f(u.eyeSize, shown.width, shown.height)
     gl.uniform3f(u.look, l.yaw, l.pitch, l.fov)
@@ -434,7 +442,7 @@ class Stage {
     if ((this.slot || this.headset) && this.presenting && !this.lost) {
       const vw = client.engine.videoWidth()
       const vh = client.engine.videoHeight()
-      if (this.resizeRetryAt || (vw > 0 && vh > 0 && (vw !== this.fitted.w || vh !== this.fitted.h))) this.layout()
+      if (this.resizeRetryAt || (vw > 0 && vh > 0 && (vw !== this.fitted.w || vh !== this.fitted.h)) || tracksFrames() !== this.whole) this.layout()
       const buffer = client.acquireFrame()
       const now = performance.now()
       const bytes = this.texW * this.texH * 4

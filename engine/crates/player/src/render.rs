@@ -24,7 +24,7 @@ pub enum Msg {
     Update,
     #[cfg(any(target_os = "macos", windows))]
     Redraw,
-    Resize(u32, u32, Option<External>, Arc<ResizeReply>),
+    Resize(u32, u32, Option<External>, Option<Half>, Arc<ResizeReply>),
     Presenting(bool),
     PictureBack,
     VrStart(Sender<Result<(), String>>),
@@ -32,6 +32,26 @@ pub enum Msg {
     VrView(VrView),
     VrRecentre { keep_recline: bool },
     Stop,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Half {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl Half {
+    pub fn layout(half: Option<Half>, w: u32, h: u32) -> ((u32, u32), (u32, u32)) {
+        match half {
+            None => ((w, h), (0, 0)),
+            Some(Half::Left) => ((w * 2, h), (0, 0)),
+            Some(Half::Right) => ((w * 2, h), (w, 0)),
+            Some(Half::Top) => ((w, h * 2), (0, 0)),
+            Some(Half::Bottom) => ((w, h * 2), (0, h)),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -128,6 +148,7 @@ struct Target {
     tex: u32,
     w: u32,
     h: u32,
+    read: (u32, u32, u32, u32),
     len: usize,
     cfg: RenderConfig,
     pbos: [u32; 2],
@@ -143,9 +164,10 @@ struct Done {
 }
 
 impl Target {
-    fn new(w: u32, h: u32, cfg: RenderConfig, gpu: Gpu) -> Result<Target, String> {
+    fn new(fw: u32, fh: u32, half: Option<Half>, cfg: RenderConfig, gpu: Gpu) -> Result<Target, String> {
         let _gpu = gpu.section();
-        let len = frame_len(w, h)?;
+        let len = frame_len(fw, fh)?;
+        let ((w, h), (rx, ry)) = Half::layout(half, fw, fh);
         let mut limit = 0;
         unsafe { gl::GetIntegerv(gl::MAX_TEXTURE_SIZE, &mut limit) };
         if w > limit as u32 || h > limit as u32 || limit <= 0 {
@@ -183,7 +205,7 @@ impl Target {
                 gl::BindBuffer(gl::PIXEL_PACK_BUFFER, 0);
             }
         }
-        let target = Target { fbo, tex, w, h, len, cfg, pbos, cur: 0, inflight: VecDeque::with_capacity(2), gpu };
+        let target = Target { fbo, tex, w, h, read: (rx, ry, fw, fh), len, cfg, pbos, cur: 0, inflight: VecDeque::with_capacity(2), gpu };
         if let Some(e) = take_gl_error() {
             return Err(format!("framebuffer allocation: GL error 0x{e:x}"));
         }
@@ -207,6 +229,7 @@ impl Target {
     fn readback(&mut self, ctx: *mut mpv_render_context, frames: &Frames, stats: &RenderStats, render_ms: f32, pts: Option<f64>) -> Option<Done> {
         let _gpu = self.gpu.section();
         let (fmt, ty) = self.format();
+        let (rx, ry, rw, rh) = self.read;
         unsafe {
             gl::BindFramebuffer(gl::READ_FRAMEBUFFER, self.fbo);
             gl::PixelStorei(gl::PACK_ALIGNMENT, 4);
@@ -219,7 +242,7 @@ impl Target {
             let slot = frames.writing();
             unsafe {
                 gl::BindBuffer(gl::PIXEL_PACK_BUFFER, 0);
-                gl::ReadPixels(0, 0, self.w as i32, self.h as i32, fmt, ty, slot.as_ptr() as *mut c_void);
+                gl::ReadPixels(rx as i32, ry as i32, rw as i32, rh as i32, fmt, ty, slot.as_ptr() as *mut c_void);
                 gl::BindFramebuffer(gl::READ_FRAMEBUFFER, 0);
             }
             if let Some(e) = take_gl_error() {
@@ -233,7 +256,7 @@ impl Target {
         }
         unsafe {
             gl::BindBuffer(gl::PIXEL_PACK_BUFFER, self.pbos[self.cur]);
-            gl::ReadPixels(0, 0, self.w as i32, self.h as i32, fmt, ty, ptr::null_mut());
+            gl::ReadPixels(rx as i32, ry as i32, rw as i32, rh as i32, fmt, ty, ptr::null_mut());
             gl::BindFramebuffer(gl::READ_FRAMEBUFFER, 0);
             gl::BindBuffer(gl::PIXEL_PACK_BUFFER, 0);
             if let Some(e) = take_gl_error() {
@@ -416,7 +439,7 @@ fn run(
     }
 
     let (w, h) = frames.size();
-    let mut target = match Target::new(w, h, cfg, gpu) {
+    let mut target = match Target::new(w, h, None, cfg, gpu) {
         Ok(t) => t,
         Err(e) => {
             let _gpu = gpu.section();
@@ -603,8 +626,8 @@ fn run(
                     );
                 }
             }
-            Some(Msg::Resize(w, h, external, done)) => {
-                let next = Target::new(w, h, cfg, gpu);
+            Some(Msg::Resize(w, h, external, half, done)) => {
+                let next = Target::new(w, h, half, cfg, gpu);
                 let mut old = None;
                 let applied = done.finish(|| {
                     let next = next?;
@@ -994,7 +1017,7 @@ mod tests {
                 let frames = Frames::new(2, 2, false);
                 let stats = RenderStats::new();
                 let mut target = Target {
-                    fbo: 1, tex: 2, w: 2, h: 2, len: 16,
+                    fbo: 1, tex: 2, w: 2, h: 2, read: (0, 0, 2, 2), len: 16,
                     cfg: RenderConfig { bgra: false, async_readback, stamp: false },
                     pbos: [3, 4], cur: 0, inflight: VecDeque::new(), gpu: Gpu::none(),
                 };

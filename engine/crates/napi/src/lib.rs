@@ -969,6 +969,18 @@ pub struct Engine {
     buffers: Vec<Uint8Array>,
 }
 
+fn parse_half(half: Option<String>) -> Result<Option<bp_player::Half>> {
+    use bp_player::Half;
+    Ok(match half.as_deref() {
+        None => None,
+        Some("left") => Some(Half::Left),
+        Some("right") => Some(Half::Right),
+        Some("top") => Some(Half::Top),
+        Some("bottom") => Some(Half::Bottom),
+        Some(other) => return Err(err(format!("unknown half {other:?}"))),
+    })
+}
+
 fn external(width: u32, height: u32, buffers: &[Uint8Array]) -> Result<bp_core::External> {
     let len = width as usize * height as usize * 4;
     if buffers.len() != 3 {
@@ -2441,11 +2453,11 @@ impl Engine {
     }
 
     #[napi]
-    pub fn resize(&mut self, width: u32, height: u32, buffers: Vec<Uint8Array>) -> Result<()> {
+    pub fn resize(&mut self, width: u32, height: u32, buffers: Vec<Uint8Array>, half: Option<String>) -> Result<()> {
         let ext = external(width, height, &buffers)?;
         self.inner
             .player
-            .resize(width, height, Some(ext))
+            .resize_half(width, height, Some(ext), parse_half(half)?)
             .map_err(err)?;
         self.buffers = buffers;
         Ok(())
@@ -3812,9 +3824,9 @@ impl VideoPlayer {
     }
 
     #[napi]
-    pub fn resize(&mut self, width: u32, height: u32, buffers: Vec<Uint8Array>) -> Result<()> {
+    pub fn resize(&mut self, width: u32, height: u32, buffers: Vec<Uint8Array>, half: Option<String>) -> Result<()> {
         let ext = external(width, height, &buffers)?;
-        self.inner.resize(width, height, Some(ext)).map_err(err)?;
+        self.inner.resize_half(width, height, Some(ext), parse_half(half)?).map_err(err)?;
         self.buffers = buffers;
         Ok(())
     }

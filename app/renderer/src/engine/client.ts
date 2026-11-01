@@ -53,6 +53,17 @@ const MAX_OUTPUT_DIMENSION = 8192
 export let width = 0
 export let height = 0
 export let frames: Uint8Array[] = []
+export let drawnWidth = 0
+export let drawnHeight = 0
+export let half: Half | null = null
+
+export type Half = 'left' | 'right' | 'top' | 'bottom'
+
+export function shownHalf(p: Projection): Half | null {
+  if (p.layout === 'sbs') return p.swapEyes ? 'right' : 'left'
+  if (p.layout === 'ou') return p.swapEyes ? 'bottom' : 'top'
+  return null
+}
 
 let upscalerOn = false
 
@@ -86,7 +97,7 @@ const BUFFER_CACHE_BYTES = 128 * 1024 * 1024
 const bufferSets = new Map<string, Uint8Array[]>()
 
 let slot = { cssWidth: 0, cssHeight: 0 }
-let fit: { projection: Projection; videoWidth: number; videoHeight: number } | null = null
+let fit: { projection: Projection; videoWidth: number; videoHeight: number; whole: boolean } | null = null
 
 function buffersFor(w: number, h: number): Uint8Array[] {
   const key = `${w}x${h}`
@@ -104,6 +115,7 @@ function buffersFor(w: number, h: number): Uint8Array[] {
 }
 
 ;[width, height] = [2, 2]
+;[drawnWidth, drawnHeight] = [width, height]
 frames = buffersFor(width, height)
 
 type Engine = InstanceType<EngineModule['Engine']>
@@ -167,25 +179,37 @@ export function applyEnhance(upscaling: UpscalingSettings, override?: FrameGenOv
   const on = upscaling.upscaler !== 'off'
   if (on !== upscalerOn) {
     upscalerOn = on
-    if (fit) resize(slot.cssWidth, slot.cssHeight, fit.projection, fit.videoWidth, fit.videoHeight)
+    if (fit) resize(slot.cssWidth, slot.cssHeight, fit.projection, fit.videoWidth, fit.videoHeight, fit.whole)
   }
 }
 
-export function resize(cssWidth: number, cssHeight: number, projection: Projection, videoWidth: number, videoHeight: number) {
+export function frameFit(drawn: [number, number], projection: Projection, whole: boolean): { size: [number, number]; half: Half | null; drawn: [number, number] } {
+  const half = whole ? null : shownHalf(projection)
+  if (!half) return { size: drawn, half, drawn }
+  const across = half === 'left' || half === 'right'
+  const w = across ? Math.max(2, (drawn[0] / 2) & ~1) : drawn[0]
+  const h = across ? drawn[1] : Math.max(2, (drawn[1] / 2) & ~1)
+  return { size: [w, h], half, drawn: across ? [w * 2, h] : [w, h * 2] }
+}
+
+export function resize(cssWidth: number, cssHeight: number, projection: Projection, videoWidth: number, videoHeight: number, whole: boolean) {
   slot = { cssWidth, cssHeight }
-  fit = { projection, videoWidth, videoHeight }
-  const [w, h] = outputSize(cssWidth, cssHeight, projection, videoWidth, videoHeight)
-  if (w === width && h === height) return
-  const next = buffersFor(w, h)
-  engine.resize(w, h, next)
+  fit = { projection, videoWidth, videoHeight, whole }
+  const next = frameFit(outputSize(cssWidth, cssHeight, projection, videoWidth, videoHeight), projection, whole)
+  const [w, h] = next.size
+  if (w === width && h === height && next.half === half) return
+  const buffers = buffersFor(w, h)
+  engine.resize(w, h, buffers, next.half)
   width = w
   height = h
-  frames = next
+  frames = buffers
+  half = next.half
+  ;[drawnWidth, drawnHeight] = next.drawn
 }
 
 export function warm(projection: Projection, videoWidth: number, videoHeight: number) {
   if (slot.cssWidth === 0 || videoWidth === 0 || videoHeight === 0) return
-  const [w, h] = outputSize(slot.cssWidth, slot.cssHeight, projection, videoWidth, videoHeight)
+  const [w, h] = frameFit(outputSize(slot.cssWidth, slot.cssHeight, projection, videoWidth, videoHeight), projection, fit?.whole ?? true).size
   buffersFor(w, h)
 }
 

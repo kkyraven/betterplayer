@@ -42,6 +42,17 @@ it('fits the picture and stereo eye to the viewport without forcing a minimum pr
   expect(client.outputSize(1920, 1080, { ...FLAT, layout: 'ou' }, 1920, 2160)).toEqual([3840, 2160])
 })
 
+it('reads back only the shown eye of a stereo picture unless frames are wanted whole', async () => {
+  const { client } = await sizedClient('off')
+  const vr = { ...FLAT, kind: 'equirect180' as const, layout: 'sbs' as const }
+  expect(client.frameFit([2560, 1440], vr, false)).toEqual({ size: [1280, 1440], half: 'left', drawn: [2560, 1440] })
+  expect(client.frameFit([2560, 1440], { ...vr, swapEyes: true }, false).half).toBe('right')
+  expect(client.frameFit([2558, 1440], vr, false)).toEqual({ size: [1278, 1440], half: 'left', drawn: [2556, 1440] })
+  expect(client.frameFit([1920, 1080], { ...vr, layout: 'ou', swapEyes: true }, false)).toEqual({ size: [1920, 540], half: 'bottom', drawn: [1920, 1080] })
+  expect(client.frameFit([2560, 1440], vr, true)).toEqual({ size: [2560, 1440], half: null, drawn: [2560, 1440] })
+  expect(client.frameFit([2560, 1440], FLAT, false).half).toBeNull()
+})
+
 it('bounds enhanced readback by pixel count while preserving wide and tall display shapes', async () => {
   const { client } = await sizedClient('dlss')
   expect(client.outputSize(7680, 4320, FLAT, 1920, 1080)).toEqual([3840, 2160])
@@ -60,7 +71,7 @@ it('retains source and readback limits with enhancement off and refits on toggle
   const { client, native } = await sizedClient('off', 2)
   expect(client.outputSize(1920, 1080, FLAT, 1280, 720)).toEqual([1280, 720])
   expect(client.outputSize(1920, 1080, FLAT, 7680, 4320)).toEqual([2560, 1440])
-  client.resize(1920, 1080, FLAT, 1280, 720)
+  client.resize(1920, 1080, FLAT, 1280, 720, false)
   client.applyEnhance({ ...defaultUpscaling(), upscaler: 'rtx' })
   expect(native.resize.mock.lastCall?.slice(0, 2)).toEqual([3840, 2160])
   client.applyEnhance(defaultUpscaling())
@@ -81,10 +92,10 @@ it('keeps the attached buffers and dimensions after a failed resize, then retrie
   client.createEngine()
   const old = client.frames
   resize.mockImplementationOnce(() => { throw new Error('allocation failed') })
-  expect(() => client.resize(640, 360, FLAT, 1280, 720)).toThrow('allocation failed')
+  expect(() => client.resize(640, 360, FLAT, 1280, 720, false)).toThrow('allocation failed')
   expect([client.width, client.height]).toEqual([2, 2])
   expect(client.acquireFrame()).toBe(old[0])
-  client.resize(640, 360, FLAT, 1280, 720)
+  client.resize(640, 360, FLAT, 1280, 720, false)
   expect(resize).toHaveBeenCalledTimes(2)
   expect([client.width, client.height]).toEqual([640, 360])
   expect(client.acquireFrame()).toBe(client.frames[0])

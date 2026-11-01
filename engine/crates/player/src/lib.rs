@@ -18,6 +18,7 @@ use std::time::Duration;
 
 pub use enhance::{DlssOptions, DlssRate, EnhanceCapabilities, EnhanceOptions, EnhanceState, GuideQuality, ModelPreset, NrPreset, NrStyle, Upscaler};
 pub use frames::{Acquired, External, FrameSlot};
+pub use render::Half;
 pub use stats::{Percentiles, RenderSnapshot};
 pub use vr::{VrKind, VrLayout, VrStatus, VrView};
 
@@ -465,12 +466,17 @@ impl Player {
     }
 
     pub fn resize(&self, width: u32, height: u32, external: Option<External>) -> Result<(), String> {
+        self.resize_half(width, height, external, None)
+    }
+
+    pub fn resize_half(&self, width: u32, height: u32, external: Option<External>, half: Option<Half>) -> Result<(), String> {
         frames::validate_size(width, height, external)?;
         let tx = self.tx.as_ref().ok_or("player closed")?;
         let done = Arc::new(render::ResizeReply::default());
-        tx.send(Msg::Resize(width, height, external, done.clone())).map_err(|_| "render thread gone".to_string())?;
+        tx.send(Msg::Resize(width, height, external, half, done.clone())).map_err(|_| "render thread gone".to_string())?;
         done.wait(Duration::from_secs(2))?;
-        if let Err(e) = self.enhance.lock().unwrap().set_output(&self.mpv, (width, height)) {
+        let (drawn, _) = Half::layout(half, width, height);
+        if let Err(e) = self.enhance.lock().unwrap().set_output(&self.mpv, drawn) {
             push_log(&self.log, format!("enhance after resize: {e}"));
         }
         #[cfg(any(target_os = "macos", windows))]

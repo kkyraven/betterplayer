@@ -8,21 +8,24 @@ export class Side {
   private buffers: Uint8Array[]
   private width: number
   private height: number
+  private half: client.Half | null = null
 
   constructor(path: string, startSeconds: number) {
     this.width = client.width
     this.height = client.height
     this.buffers = client.makeBuffers(this.width, this.height)
     this.player = client.createVideoPlayer(this.width, this.height, this.buffers)
+    this.resize(client.width, client.height, client.half)
     this.player.load(path, startSeconds)
   }
 
-  resize(w: number, h: number) {
-    if (w === this.width && h === this.height) return
+  resize(w: number, h: number, half: client.Half | null) {
+    if (w === this.width && h === this.height && half === this.half) return
     const buffers = client.makeBuffers(w, h)
-    this.player.resize(w, h, buffers)
+    this.player.resize(w, h, buffers, half)
     this.width = w
     this.height = h
+    this.half = half
     this.buffers = buffers
   }
 
