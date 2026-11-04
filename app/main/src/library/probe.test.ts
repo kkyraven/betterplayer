@@ -48,11 +48,22 @@ describe('probe', () => {
     const cover = { codec_type: 'video', codec_name: 'mjpeg', width: 600, height: 600, disposition: { attached_pic: 1 } }
     const video = { ...FIXTURES[0]![1], codec_name: 'hevc' }
     vi.mocked(runTool).mockResolvedValue(JSON.stringify({ streams: [cover, { codec_type: 'audio' }, video], format: { duration: '61.5' } }))
-    expect(await probe('clip.mp4')).toEqual({ durationMs: 61_500, width: 512, height: 256, codec: 'hevc', vr: { stereo: 'sbs', sphere: 'equirect', cover: 0.5 } })
+    expect(await probe('clip.mp4')).toEqual({ durationMs: 61_500, width: 512, height: 256, codec: 'hevc', vr: { stereo: 'sbs', sphere: 'equirect', cover: 0.5 }, chapters: [] })
   })
 
   it('gives empty facts for a file with no video', async () => {
     vi.mocked(runTool).mockResolvedValue(JSON.stringify({ streams: [{ codec_type: 'audio' }], format: { duration: '3' } }))
-    expect(await probe('song.mp4')).toEqual({ durationMs: 3000, width: 0, height: 0, codec: '', vr: {} })
+    expect(await probe('song.mp4')).toEqual({ durationMs: 3000, width: 0, height: 0, codec: '', vr: {}, chapters: [] })
+  })
+
+  it('reads chapters as marks, without empty ones or one spanning the video', async () => {
+    const chapter = (start: string, end: string, title?: string) => ({ id: 0, time_base: '1/1000', start_time: start, end_time: end, ...(title ? { tags: { title } } : {}) })
+    vi.mocked(runTool).mockResolvedValue(JSON.stringify({
+      streams: [], format: { duration: '120' },
+      chapters: [chapter('0.000000', '30.500000', 'Intro'), chapter('30.500000', '30.500000', 'Empty'), chapter('30.500000', '120.000000')],
+    }))
+    expect((await probe('film.mkv')).chapters).toEqual([{ name: 'Intro', startMs: 0, endMs: 30_500 }, { name: '', startMs: 30_500, endMs: 120_000 }])
+    vi.mocked(runTool).mockResolvedValue(JSON.stringify({ streams: [], format: { duration: '120' }, chapters: [chapter('0', '119.6', 'All')] }))
+    expect((await probe('film.mkv')).chapters).toEqual([])
   })
 })

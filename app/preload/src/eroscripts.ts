@@ -109,15 +109,9 @@ export function observeEroScripts() {
       }
       archivePasswordsForPost(cooked, sourceElements)
     }
-    const categories: NonNullable<EroTopicReport['categories']> = []
-    for (const link of Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href^="/c/"], a[href^="https://discuss.eroscripts.com/c/"]')).slice(0, 150)) {
-      const slug = new URL(link.href).pathname.split('/')[2] ?? ''
-      const name = (link.innerText || link.textContent || '').trim().slice(0, 100)
-      if (/^[\w-]+$/.test(slug) && name && !categories.some((category) => category.slug === slug)) categories.push({ slug, name })
-    }
     const report: EroTopicReport = {
       generation, url: pageUrl, title: (document.querySelector('#topic-title h1')?.textContent?.trim() || document.title).slice(0, 240),
-      sources, scope: 'loaded-posts', categories,
+      sources, scope: 'loaded-posts',
     }
     const serialized = JSON.stringify(report)
     if (serialized === lastReport) return

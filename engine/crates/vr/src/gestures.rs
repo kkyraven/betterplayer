@@ -2,13 +2,13 @@ use std::ffi::CStr;
 use std::time::{Duration, Instant};
 
 pub const TAP: Duration = Duration::from_millis(450);
-pub const HOLD: Duration = Duration::from_millis(600);
 pub const SEEK_PRESS: f32 = 0.4;
 pub const SEEK_SLOW: Duration = Duration::from_millis(1200);
 pub const SEEK_FAST: Duration = Duration::from_millis(500);
 const SEEK_RELEASE: f32 = 0.3;
 
 pub const SEEK_AXIS: &CStr = c"/actions/watch/in/seek";
+pub const WHEEL_AXIS: &CStr = c"/actions/watch/in/wheel";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shortcut {
@@ -19,14 +19,15 @@ pub enum Shortcut {
     VolumeDown,
     Controls,
     Back,
-    TurnLeft,
-    TurnRight,
-    Recentre,
     Stop,
+    PointLeft,
+    PointRight,
+    ReleaseLeft,
+    ReleaseRight,
 }
 
 impl Shortcut {
-    pub const ALL: [Shortcut; 11] = [
+    pub const ALL: [Shortcut; 12] = [
         Shortcut::PlayPause,
         Shortcut::SeekBack,
         Shortcut::SeekForward,
@@ -34,10 +35,11 @@ impl Shortcut {
         Shortcut::VolumeDown,
         Shortcut::Controls,
         Shortcut::Back,
-        Shortcut::TurnLeft,
-        Shortcut::TurnRight,
-        Shortcut::Recentre,
         Shortcut::Stop,
+        Shortcut::PointLeft,
+        Shortcut::PointRight,
+        Shortcut::ReleaseLeft,
+        Shortcut::ReleaseRight,
     ];
 
     pub fn name(self) -> &'static str {
@@ -49,10 +51,11 @@ impl Shortcut {
             Shortcut::VolumeDown => "volumeDown",
             Shortcut::Controls => "controls",
             Shortcut::Back => "back",
-            Shortcut::TurnLeft => "turnLeft",
-            Shortcut::TurnRight => "turnRight",
-            Shortcut::Recentre => "recentre",
             Shortcut::Stop => "stop",
+            Shortcut::PointLeft => "pointLeft",
+            Shortcut::PointRight => "pointRight",
+            Shortcut::ReleaseLeft => "releaseLeft",
+            Shortcut::ReleaseRight => "releaseRight",
         }
     }
 }
@@ -62,30 +65,26 @@ pub enum Action {
     PlayPause,
     Back,
     Controls,
-    Point,
-    Recentre,
+    PointLeft,
+    PointRight,
     SeekBack,
     SeekForward,
     VolumeUp,
     VolumeDown,
-    TurnLeft,
-    TurnRight,
     Stop,
 }
 
 impl Action {
-    pub const ALL: [Action; 12] = [
+    pub const ALL: [Action; 10] = [
         Action::PlayPause,
         Action::Back,
         Action::Controls,
-        Action::Point,
-        Action::Recentre,
+        Action::PointLeft,
+        Action::PointRight,
         Action::SeekBack,
         Action::SeekForward,
         Action::VolumeUp,
         Action::VolumeDown,
-        Action::TurnLeft,
-        Action::TurnRight,
         Action::Stop,
     ];
 
@@ -94,14 +93,12 @@ impl Action {
             Action::PlayPause => c"/actions/watch/in/play_pause",
             Action::Back => c"/actions/watch/in/back",
             Action::Controls => c"/actions/watch/in/controls",
-            Action::Point => c"/actions/watch/in/point",
-            Action::Recentre => c"/actions/watch/in/recentre",
+            Action::PointLeft => c"/actions/watch/in/point_left",
+            Action::PointRight => c"/actions/watch/in/point_right",
             Action::SeekBack => c"/actions/watch/in/seek_back",
             Action::SeekForward => c"/actions/watch/in/seek_forward",
             Action::VolumeUp => c"/actions/watch/in/volume_up",
             Action::VolumeDown => c"/actions/watch/in/volume_down",
-            Action::TurnLeft => c"/actions/watch/in/turn_left",
-            Action::TurnRight => c"/actions/watch/in/turn_right",
             Action::Stop => c"/actions/watch/in/stop",
         }
     }
@@ -113,8 +110,14 @@ impl Action {
             Action::SeekForward => Some((Shortcut::SeekForward, SEEK_FAST, SEEK_FAST)),
             Action::VolumeUp => Some((Shortcut::VolumeUp, ms(400), ms(250))),
             Action::VolumeDown => Some((Shortcut::VolumeDown, ms(400), ms(250))),
-            Action::TurnLeft => Some((Shortcut::TurnLeft, ms(300), ms(300))),
-            Action::TurnRight => Some((Shortcut::TurnRight, ms(300), ms(300))),
+            _ => None,
+        }
+    }
+
+    fn trigger(self) -> Option<(Shortcut, Shortcut)> {
+        match self {
+            Action::PointLeft => Some((Shortcut::PointLeft, Shortcut::ReleaseLeft)),
+            Action::PointRight => Some((Shortcut::PointRight, Shortcut::ReleaseRight)),
             _ => None,
         }
     }
@@ -122,14 +125,32 @@ impl Action {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Buzz {
-    Tick,
     Double,
+    Open,
+    Hover,
+    Pick,
+    Detent,
+    Notch,
+}
+
+impl Buzz {
+    pub fn from_name(name: &str) -> Option<Buzz> {
+        Some(match name {
+            "open" => Buzz::Open,
+            "hover" => Buzz::Hover,
+            "pick" => Buzz::Pick,
+            "detent" => Buzz::Detent,
+            "notch" => Buzz::Notch,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Step {
     pub shortcuts: Vec<Shortcut>,
     pub buzz: Option<(Action, Buzz)>,
+    pub drag: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -149,6 +170,7 @@ struct Stick {
 pub struct Gestures {
     tracks: [Track; Action::ALL.len()],
     stick: Stick,
+    dragging: bool,
 }
 
 impl Gestures {
@@ -157,7 +179,14 @@ impl Gestures {
         let mut stopped = false;
         for (t, (action, state)) in self.tracks.iter_mut().zip(Action::ALL.into_iter().zip(pressed)) {
             match state {
-                None => *t = Track::default(),
+                None => {
+                    if t.since.is_some()
+                        && let Some((_, up)) = action.trigger()
+                    {
+                        out.shortcuts.push(up);
+                    }
+                    *t = Track::default()
+                }
                 Some(true) if t.armed => {
                     t.armed = false;
                     t.since = Some(now);
@@ -165,8 +194,8 @@ impl Gestures {
                     if let Some((s, after, _)) = action.repeats() {
                         out.shortcuts.push(s);
                         t.due = Some(now + after);
-                    } else if action == Action::Recentre {
-                        t.due = Some(now + HOLD);
+                    } else if let Some((down, _)) = action.trigger() {
+                        out.shortcuts.push(down);
                     } else if action == Action::Stop {
                         out.shortcuts.push(Shortcut::Stop);
                         out.buzz = Some((action, Buzz::Double));
@@ -175,16 +204,9 @@ impl Gestures {
                     }
                 }
                 Some(true) => {
-                    let Some(due) = t.due.filter(|&d| now >= d) else { continue };
-                    if let Some((s, _, every)) = action.repeats() {
-                        out.shortcuts.push(s);
-                        t.due = Some(next_after(due, every, now));
-                    } else {
-                        out.shortcuts.push(Shortcut::Recentre);
-                        out.buzz = out.buzz.or(Some((action, Buzz::Tick)));
-                        t.since = None;
-                        t.due = None;
-                    }
+                    let (Some(due), Some((s, _, every))) = (t.due.filter(|&d| now >= d), action.repeats()) else { continue };
+                    out.shortcuts.push(s);
+                    t.due = Some(next_after(due, every, now));
                 }
                 Some(false) => {
                     if let Some(since) = t.since.take() {
@@ -193,8 +215,7 @@ impl Gestures {
                             Action::PlayPause if tap => Some(Shortcut::PlayPause),
                             Action::Back if tap => Some(Shortcut::Back),
                             Action::Controls if tap => Some(Shortcut::Controls),
-                            Action::Point => Some(Shortcut::Controls),
-                            _ => None,
+                            _ => action.trigger().map(|(_, up)| up),
                         };
                         out.shortcuts.extend(fires);
                     }
@@ -211,6 +232,15 @@ impl Gestures {
             self.stick = Stick::default();
         } else {
             self.seek(now, seek, &mut out.shortcuts);
+        }
+        let play = &self.tracks[Action::ALL.iter().position(|a| *a == Action::PlayPause).unwrap_or(0)];
+        let held = play.since.is_some_and(|since| now.duration_since(since) >= TAP);
+        if held != self.dragging {
+            self.dragging = held;
+            out.drag = Some(held);
+            if held {
+                out.buzz.get_or_insert((Action::PlayPause, Buzz::Open));
+            }
         }
         out
     }
@@ -292,6 +322,10 @@ mod tests {
     fn names_match_the_apps_list() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../app/shared/vr.ts");
         let ts = std::fs::read_to_string(path).expect("app/shared/vr.ts");
+        let buzzes = ts.split_once("VR_BUZZES = [").and_then(|(_, rest)| rest.split_once(']')).expect("VR_BUZZES in vr.ts").0;
+        for name in buzzes.split(',').map(|s| s.trim().trim_matches('\'')) {
+            assert!(Buzz::from_name(name).is_some(), "VR_BUZZES has {name}, which the engine does not play");
+        }
         let list = ts.split_once("VR_SHORTCUTS = [").and_then(|(_, rest)| rest.split_once(']')).expect("VR_SHORTCUTS in vr.ts").0;
         let names: Vec<&str> = list.split(',').map(|s| s.trim().trim_matches('\'')).filter(|s| !s.is_empty()).collect();
         assert_eq!(names, Shortcut::ALL.map(Shortcut::name));
@@ -316,35 +350,40 @@ mod tests {
     }
 
     #[test]
-    fn holding_the_left_stick_up_or_down_recentres_and_a_flick_does_nothing() {
+    fn holding_play_drags_until_it_comes_up_or_stop() {
         let t = Instant::now();
         let mut g = ready(t);
-        assert_eq!(fired(&mut g, t, 0, &[Action::Recentre]), NONE);
-        assert_eq!(fired(&mut g, t, 200, &[]), NONE, "a flick");
-        assert_eq!(fired(&mut g, t, 1000, &[Action::Recentre]), NONE);
-        assert_eq!(fired(&mut g, t, 1599, &[Action::Recentre]), NONE);
-        let s = g.step(at(t, 1600), down(&[Action::Recentre]), Some([0.0, 1.0]));
-        assert_eq!(s, Step { shortcuts: vec![Shortcut::Recentre], buzz: Some((Action::Recentre, Buzz::Tick)) }, "fires while still held");
-        assert_eq!(fired(&mut g, t, 3000, &[Action::Recentre]), NONE, "once");
-        assert_eq!(fired(&mut g, t, 3100, &[]), NONE, "and nothing on release");
+        let drag = |g: &mut Gestures, ms, actions: &[Action]| g.step(at(t, ms), down(actions), Some([0.0, 0.0]));
+        assert_eq!(drag(&mut g, 0, &[Action::PlayPause]).drag, None);
+        assert_eq!(drag(&mut g, 440, &[Action::PlayPause]).drag, None, "still a tap");
+        assert_eq!(drag(&mut g, 460, &[Action::PlayPause]), Step { drag: Some(true), buzz: Some((Action::PlayPause, Buzz::Open)), ..Step::default() });
+        assert_eq!(drag(&mut g, 900, &[Action::PlayPause]).drag, None);
+        assert_eq!(drag(&mut g, 950, &[]), Step { drag: Some(false), ..Step::default() }, "no play on release");
+        assert_eq!(drag(&mut g, 1000, &[Action::PlayPause]).drag, None);
+        assert_eq!(drag(&mut g, 1500, &[Action::PlayPause]).drag, Some(true));
+        assert_eq!(drag(&mut g, 1600, &[Action::PlayPause, Action::Back, Action::Stop]).drag, Some(false));
+        assert_eq!(drag(&mut g, 2500, &[Action::PlayPause]).drag, None, "not again until it comes up");
     }
 
     #[test]
-    fn the_trigger_shows_the_controls_on_release() {
+    fn each_trigger_fires_on_press_and_on_release() {
         let t = Instant::now();
         let mut g = ready(t);
-        assert_eq!(fired(&mut g, t, 0, &[Action::Point]), NONE);
-        assert_eq!(fired(&mut g, t, 2000, &[]), [Shortcut::Controls]);
+        assert_eq!(fired(&mut g, t, 0, &[Action::PointRight]), [Shortcut::PointRight]);
+        assert_eq!(fired(&mut g, t, 2000, &[Action::PointRight]), NONE, "held: nothing more");
+        assert_eq!(fired(&mut g, t, 2100, &[]), [Shortcut::ReleaseRight], "a long hold still releases");
+        assert_eq!(fired(&mut g, t, 2200, &[Action::PointLeft]), [Shortcut::PointLeft]);
+        assert_eq!(fired(&mut g, t, 2250, &[]), [Shortcut::ReleaseLeft]);
+        assert_eq!(fired(&mut g, t, 2300, &[Action::PointLeft]), [Shortcut::PointLeft]);
+        assert_eq!(g.step(at(t, 2400), [None; N], None).shortcuts, [Shortcut::ReleaseLeft]);
+        assert_eq!(g.step(at(t, 2500), [None; N], None).shortcuts, NONE);
     }
 
     #[test]
-    fn volume_turn_and_trackpad_seek_repeat_while_held() {
+    fn volume_and_trackpad_seek_repeat_while_held() {
         let t = Instant::now();
         let mut g = ready(t);
         assert_eq!(times(|ms| fired(&mut g, t, ms, &[Action::VolumeUp]), 1200), [0, 400, 650, 900, 1150]);
-        let t = at(t, 2000);
-        assert_eq!(fired(&mut g, t, 0, &[]), NONE);
-        assert_eq!(times(|ms| fired(&mut g, t, 10 + ms, &[Action::TurnLeft]), 1000), [0, 300, 600, 900]);
         let t = at(t, 2000);
         assert_eq!(fired(&mut g, t, 0, &[]), NONE);
         assert_eq!(times(|ms| fired(&mut g, t, 10 + ms, &[Action::SeekForward]), 1600), [0, 500, 1000, 1500]);
@@ -395,7 +434,7 @@ mod tests {
         let mut g = ready(t);
         assert_eq!(fired(&mut g, t, 0, &[Action::PlayPause]), NONE);
         let s = g.step(at(t, 80), down(&[Action::PlayPause, Action::Back, Action::Stop]), Some([0.0, 0.0]));
-        assert_eq!(s, Step { shortcuts: vec![Shortcut::Stop], buzz: Some((Action::Stop, Buzz::Double)) });
+        assert_eq!(s, Step { shortcuts: vec![Shortcut::Stop], buzz: Some((Action::Stop, Buzz::Double)), drag: None });
         assert_eq!(fired(&mut g, t, 150, &[Action::Back]), NONE, "A came up: no play");
         assert_eq!(fired(&mut g, t, 200, &[]), NONE, "B came up: no back");
         assert_eq!(fired(&mut g, t, 300, &[Action::PlayPause]), NONE);
@@ -406,9 +445,9 @@ mod tests {
     fn input_going_away_drops_the_press_and_a_button_held_back_never_fires() {
         let t = Instant::now();
         let mut g = ready(t);
-        assert_eq!(fired(&mut g, t, 0, &[Action::Recentre, Action::VolumeUp]), [Shortcut::VolumeUp]);
+        assert_eq!(fired(&mut g, t, 0, &[Action::Back, Action::VolumeUp]), [Shortcut::VolumeUp]);
         assert_eq!(g.step(at(t, 100), [None; N], None), Step::default());
-        assert_eq!(g.step(at(t, 2000), down(&[Action::Recentre, Action::VolumeUp, Action::PlayPause]), Some([1.0, 0.0])).shortcuts, NONE, "held when it came back");
+        assert_eq!(g.step(at(t, 2000), down(&[Action::Back, Action::VolumeUp, Action::PlayPause]), Some([1.0, 0.0])).shortcuts, NONE, "held when it came back");
         assert_eq!(fired(&mut g, t, 2100, &[]), NONE, "and let go");
         let mut g = Gestures::default();
         assert_eq!(g.step(t, down(&[Action::PlayPause]), Some([-1.0, 0.0])).shortcuts, NONE);
@@ -422,7 +461,7 @@ mod tests {
     fn the_manifest_and_bindings_agree() {
         let manifest = include_str!("../input/actions.json");
         let declared: Vec<&str> = quoted_after(manifest, "\"name\":");
-        for path in Action::ALL.map(Action::path).into_iter().chain([SEEK_AXIS]) {
+        for path in Action::ALL.map(Action::path).into_iter().chain([SEEK_AXIS, WHEEL_AXIS]) {
             assert!(declared.contains(&path.to_str().unwrap()), "{path:?} is not in actions.json");
         }
         for (file, bindings) in [

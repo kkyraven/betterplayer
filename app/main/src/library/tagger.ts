@@ -242,7 +242,7 @@ async function still(job: TagJob, at: number): Promise<Buffer> {
   const headers = Object.entries(job.headers ?? {}).map(([name, value]) => `${name}: ${value}\r\n`).join('')
   const args = [
     ...['-v', 'error', '-max_error_rate', '1'],
-    ...(headers ? ['-headers', headers] : []),
+    ...(headers ? ['-headers', headers, '-user_agent', 'BetterPlayer'] : []),
     ...['-ss', seconds, '-i', job.path, '-frames:v', '1', '-an', '-sn'],
     ...['-vf', `scale=${size}:${size}:force_original_aspect_ratio=decrease:flags=bicubic,pad=${size}:${size}:-1:-1:color=white`],
     ...['-f', 'rawvideo', '-pix_fmt', 'bgr24', '-'],

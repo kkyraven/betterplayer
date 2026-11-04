@@ -1,8 +1,10 @@
-import { Captions, CaptionsOff, Crosshair, Glasses, List, ListVideo, Maximize2, Minimize2, Pause, Play, RectangleGoggles, Repeat, Repeat1, Rewind, RotateCcw, FastForward, Shuffle, SkipBack, SkipForward, SlidersHorizontal, Volume2, VolumeX } from 'lucide-react'
+import { Captions, CaptionsOff, Crosshair, Glasses, List, ListVideo, Maximize2, Minimize2, Pause, Play, Repeat, Repeat1, Rewind, RotateCcw, FastForward, Shuffle, SkipBack, SkipForward, SlidersHorizontal, Volume2, VolumeX } from 'lucide-react'
 import { useMemo, useRef } from 'react'
 import { TooltipGroup } from '@/components/ui/TooltipGroup'
 import { IconButton } from '@/components/ui/IconButton'
+import { VrGogglesIcon } from '@/components/ui/VrGogglesIcon'
 import { fmtDuration } from '@/lib/format'
+import { scrubberMarks } from '@/lib/marks'
 import { useT } from '@/state/i18n'
 import * as live from '@/state/live'
 import { RATES, usePlayer } from '@/state/player'
@@ -28,11 +30,12 @@ export function ControlBar({ overlay, onHoverChange }: { overlay: HTMLDivElement
   const durationMs = usePlayer((s) => s.snapshot.durationMs)
   const scripts = usePlayer((s) => s.scripts)
   const strip = usePlayer((s) => s.media?.strip ?? null)
+  const marks = usePlayer((s) => s.media?.marks)
   const togglePlay = usePlayer((s) => s.togglePlay)
   const seek = usePlayer((s) => s.seek)
   const seekBy = usePlayer((s) => s.seekBy)
   const step = usePlayer((s) => s.step)
-  const setRate = usePlayer((s) => s.setRate)
+  const chooseRate = usePlayer((s) => s.chooseRate)
   const volume = usePlayer((s) => s.volume)
   const muted = usePlayer((s) => s.muted)
   const setVolume = usePlayer((s) => s.setVolume)
@@ -64,12 +67,11 @@ export function ControlBar({ overlay, onHoverChange }: { overlay: HTMLDivElement
   const toggleSubtitles = () => void updateSettings((s) => ({ ...s, subtitles: { ...s.subtitles, enabled: !s.subtitles.enabled } }))
 
   const stroke = scripts.find((s) => s.axis === 'L0' && s.selected) ?? scripts.find((s) => s.selected) ?? scripts[0]
-  const chapters = useMemo(() => scripts.filter((s) => s.selected).flatMap((s) => s.chapters), [scripts])
-  const bookmarks = useMemo(() => scripts.filter((s) => s.selected).flatMap((s) => s.bookmarks), [scripts])
+  const { chapters, bookmarks } = useMemo(() => scrubberMarks(scripts, marks), [scripts, marks])
   const variants = useMemo(() => variantGroups(scripts), [scripts])
   const nextRate = () => {
     const i = RATES.findIndex((r) => r >= rate - 0.001)
-    setRate(RATES[(i + 1) % RATES.length] ?? 1)
+    chooseRate(RATES[(i + 1) % RATES.length] ?? 1)
   }
 
   return (
@@ -146,7 +148,7 @@ export function ControlBar({ overlay, onHoverChange }: { overlay: HTMLDivElement
               aria-busy={vrStarting}
               onClick={vrStarting ? undefined : () => (inHeadset ? stopVr() : void startVr())}
             >
-              <RectangleGoggles />
+              <VrGogglesIcon />
             </IconButton>
           )}
           <IconButton label={fullscreen ? t('player.controls.exitFullscreen') : t('player.controls.fullscreen')} onClick={() => void toggleFullscreen()}>

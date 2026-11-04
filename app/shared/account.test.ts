@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mergeSynced, parsePeerMsg, reconcile, syncPayload } from './account'
+import { mergeSynced, parsePeerMsg, reconcile, syncPayload, vrAllowed, type Me } from './account'
 import type { PerVideoSettings } from './settings'
 import { defaultTrackAxes } from './tracking'
 
@@ -57,5 +57,17 @@ describe('watch together reconcile', () => {
     expect(reconcile({ hash: h, positionMs: 5000, paused: false }, { t: 'tick', hash: null, positionMs: 0, paused: true })).toEqual({ do: 'pause', positionMs: 5000 })
     expect(reconcile({ hash: h, positionMs: 5000, paused: true }, { t: 'tick', hash: null, positionMs: 0, paused: true })).toBeNull()
     expect(reconcile({ hash: null, positionMs: 0, paused: true }, { t: 'tick', hash: null, positionMs: 0, paused: true })).toBeNull()
+  })
+})
+
+describe('headset videos', () => {
+  const me = (patch: Partial<Me>): Me => ({ id: 'u', email: 'e', name: '', friendCode: 'C', premium: false, admin: false, ...patch })
+  it('plays 5:00 and shorter for everyone, longer with premium or itch.io', () => {
+    expect(vrAllowed(null, 0)).toBe(true)
+    expect(vrAllowed(null, 300_999)).toBe(true)
+    expect(vrAllowed(null, 301_000)).toBe(false)
+    expect(vrAllowed(me({}), 600_000)).toBe(false)
+    expect(vrAllowed(me({ premium: true }), 600_000)).toBe(true)
+    expect(vrAllowed(me({ vr: true }), 600_000)).toBe(true)
   })
 })

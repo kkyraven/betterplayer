@@ -3,7 +3,7 @@ import { Cable, CircleUser, Info, Library, MonitorPlay, Palette, Plug, Wrench, t
 
 export const SETTINGS_CATEGORIES = [
   { id: 'general', label: 'settings.category.general', icon: Palette, pages: ['appearance', 'media-centre', 'shortcuts'] },
-  { id: 'playback', label: 'settings.category.playback', icon: MonitorPlay, pages: ['playback', 'video', 'subtitles', 'gooner'] },
+  { id: 'playback', label: 'settings.category.playback', icon: MonitorPlay, pages: ['playback', 'video', 'subtitles', 'censor'] },
   { id: 'library', label: 'settings.category.library', icon: Library, pages: ['sources', 'tagging'] },
   { id: 'motion', label: 'settings.category.motion', icon: Cable, pages: ['devices', 'axes', 'estim', 'tracking', 'models'] },
   { id: 'connections', label: 'settings.category.connections', icon: Plug, pages: ['sharing', 'source', 'headsets', 'intiface', 'chaster'] },
@@ -21,7 +21,7 @@ export const PAGE_LABELS: Record<SettingsPageId, MessageKey> = {
   playback: 'settings.page.playback',
   video: 'settings.page.video',
   subtitles: 'settings.page.subtitles',
-  gooner: 'settings.page.gooner',
+  censor: 'settings.page.censor',
   sources: 'settings.page.sources',
   tagging: 'settings.page.tagging',
   devices: 'settings.page.devices',

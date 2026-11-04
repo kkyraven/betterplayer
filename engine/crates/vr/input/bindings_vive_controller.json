@@ -8,11 +8,6 @@
         {
           "path": "/user/hand/left/input/trackpad",
           "mode": "dpad_click",
-          "parameters": {
-            "deadzone_pct": "50",
-            "overlap_pct": "0",
-            "sticky": "true"
-          },
           "inputs": {
             "center": {
               "output": "/actions/watch/in/play_pause"
@@ -24,36 +19,49 @@
               "output": "/actions/watch/in/seek_forward"
             },
             "north": {
-              "output": "/actions/watch/in/recentre"
+              "output": "/actions/watch/in/volume_up"
             },
             "south": {
-              "output": "/actions/watch/in/recentre"
+              "output": "/actions/watch/in/volume_down"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/trackpad",
+          "mode": "trackpad",
+          "inputs": {
+            "position": {
+              "output": "/actions/watch/in/wheel"
             }
           }
         },
         {
           "path": "/user/hand/right/input/trackpad",
           "mode": "dpad_click",
-          "parameters": {
-            "deadzone_pct": "50",
-            "overlap_pct": "0",
-            "sticky": "true"
-          },
           "inputs": {
             "center": {
               "output": "/actions/watch/in/play_pause"
+            },
+            "west": {
+              "output": "/actions/watch/in/seek_back"
+            },
+            "east": {
+              "output": "/actions/watch/in/seek_forward"
             },
             "north": {
               "output": "/actions/watch/in/volume_up"
             },
             "south": {
               "output": "/actions/watch/in/volume_down"
-            },
-            "west": {
-              "output": "/actions/watch/in/turn_left"
-            },
-            "east": {
-              "output": "/actions/watch/in/turn_right"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/trackpad",
+          "mode": "trackpad",
+          "inputs": {
+            "position": {
+              "output": "/actions/watch/in/wheel"
             }
           }
         },
@@ -80,7 +88,7 @@
           "mode": "button",
           "inputs": {
             "click": {
-              "output": "/actions/watch/in/point"
+              "output": "/actions/watch/in/point_left"
             }
           }
         },
@@ -89,7 +97,7 @@
           "mode": "button",
           "inputs": {
             "click": {
-              "output": "/actions/watch/in/point"
+              "output": "/actions/watch/in/point_right"
             }
           }
         }
@@ -130,6 +138,16 @@
         {
           "output": "/actions/watch/out/haptic",
           "path": "/user/hand/right/output/haptic"
+        }
+      ],
+      "poses": [
+        {
+          "output": "/actions/watch/in/aim_left",
+          "path": "/user/hand/left/pose/tip"
+        },
+        {
+          "output": "/actions/watch/in/aim_right",
+          "path": "/user/hand/right/pose/tip"
         }
       ]
     }

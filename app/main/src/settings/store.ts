@@ -3,8 +3,10 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { mkdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { AXIS_IDS, axisRecord, isAxisId, type AxisId } from '@shared/axes'
+import { DEFAULT_MODEL_SIZE, detectorId, sizeOf } from '@shared/censor'
 import { CORE_SECTIONS, SECTIONS, type Section } from '@shared/library'
 import { readProjection } from '@shared/projection'
+import { PASSTHROUGH_MODELS, readPassthrough } from '@shared/passthrough'
 import { normaliseSource } from '@shared/peer'
 import type { Region } from '@shared/browser'
 import { LANGUAGE_PREFERENCES } from '@shared/i18n'
@@ -49,9 +51,9 @@ import {
   DENIAL_HOLD_MAX_MS,
   DENIAL_WHENS,
   DETECT_KINDS,
-  GOONER_STYLES,
+  CENSOR_STYLES,
   defaultDenial,
-  defaultGooner,
+  defaultCensor,
   PARAM_AXES,
   PARAM_SOURCES,
   PROVIDERS,
@@ -74,13 +76,14 @@ import {
   defaultRamp,
   defaultSettings,
   defaultShortcuts,
+  readPanelOffsets,
   type AxisSettings,
   type EstimSettings,
   type DlssSettings,
   type DenialSettings,
   type DetectKindId,
-  type GoonerLock,
-  type GoonerSettings,
+  type CensorLock,
+  type CensorSettings,
   type OutputConfig,
   type ParamAxisId,
   type ParamSourceSettings,
@@ -184,6 +187,7 @@ function readModels(raw: unknown, legacyDetector: string | undefined): ModelChoi
   for (const kind of MODEL_KINDS) {
     if (kind in r) out[kind] = str(r[kind]) ?? null
   }
+  if (out.detector !== null && !sizeOf(out.detector)) out.detector = detectorId(DEFAULT_MODEL_SIZE)
   return out
 }
 
@@ -437,25 +441,26 @@ export function readPerVideo(raw: unknown): PerVideoSettings {
     tracking: readTracking(r.tracking),
     frameGen: FRAME_GEN_OVERRIDES.find((o) => o === r.frameGen),
     params: readParams(r.params),
+    passthrough: readPassthrough(r.passthrough),
   }
 }
 
-function readGoonerLock(raw: unknown): GoonerLock | null {
+function readCensorLock(raw: unknown): CensorLock | null {
   if (!isObject(raw)) return null
   if (raw.kind === 'chaster') return { kind: 'chaster' }
   if (raw.kind === 'until' && typeof raw.endsAt === 'number' && Number.isFinite(raw.endsAt)) return { kind: 'until', endsAt: raw.endsAt }
   return null
 }
 
-function readGooner(raw: unknown): GoonerSettings {
-  const d = defaultGooner()
+function readCensor(raw: unknown): CensorSettings {
+  const d = defaultCensor()
   const g = isObject(raw) ? raw : {}
   return {
     enabled: bool(g.enabled, d.enabled),
-    style: oneOf(g.style, GOONER_STYLES, d.style),
+    style: oneOf(g.style, CENSOR_STYLES, d.style),
     strength: Math.max(0, Math.min(1, num(g.strength, d.strength))),
     kinds: readDetectKinds(g.kinds, d.kinds),
-    lock: readGoonerLock(g.lock),
+    lock: readCensorLock(g.lock),
   }
 }
 
@@ -524,6 +529,7 @@ function readCurrent(data: Json): Settings {
   const game = isObject(data.game) ? data.game : {}
   const chaster = isObject(data.chaster) ? data.chaster : {}
   const account = isObject(data.account) ? data.account : {}
+  const vr = isObject(data.vr) ? data.vr : {}
   const port = Math.round(num(remote.port, REMOTE_PORT_DEFAULT))
   const intifacePort = Math.round(num(intiface.port, INTIFACE_PORT_DEFAULT))
   const recent = Array.isArray(general.recent) ? general.recent.filter((p): p is string => typeof p === 'string') : []
@@ -595,9 +601,10 @@ function readCurrent(data: Json): Settings {
     },
     game: { kind: oneOf(game.kind, GAME_KINDS, 'rhythm'), ai: bool(game.ai, true) },
     chaster: { token: str(chaster.token) ?? '' },
-    gooner: readGooner(data.gooner),
+    censor: readCensor(data.censor ?? data.gooner),
     denial: readDenial(data.denial),
     account: { sync: bool(account.sync, true), usageStats: bool(account.usageStats, true) },
+    vr: { passthroughMenus: bool(vr.passthroughMenus, false), panelOffsets: readPanelOffsets(vr.panelOffsets), passthroughModel: oneOf(vr.passthroughModel, PASSTHROUGH_MODELS, 'people') },
   }
 }
 
@@ -626,7 +633,7 @@ function readJson(file: string): unknown {
 }
 
 export function isEmptyPerVideo(v: PerVideoSettings): boolean {
-  return v.globalOffsetMs === 0 && Object.keys(v.axes).length === 0 && v.variants === undefined && v.position === undefined && v.projection === undefined && v.tracking === undefined && v.frameGen === undefined && v.params === undefined
+  return v.globalOffsetMs === 0 && Object.keys(v.axes).length === 0 && v.variants === undefined && v.position === undefined && v.projection === undefined && v.tracking === undefined && v.frameGen === undefined && v.params === undefined && v.passthrough === undefined
 }
 
 function writeAtomicSync(file: string, text: string) {

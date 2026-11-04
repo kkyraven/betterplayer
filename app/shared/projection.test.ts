@@ -3,10 +3,13 @@ import {
   detectProjection,
   FLAT,
   flatEye,
+  lensDegrees,
   needsLook,
   readContainerFacts,
   readPictureFacts,
+  readProjection,
   resolveProjection,
+  withLens,
   worthProbing,
   type ContainerFacts,
   type PictureFacts,
@@ -67,7 +70,7 @@ const TABLE: Row[] = [
   ['M12', 'yt', '3840x2560', { sphere: 'other' }, null, 'flat / none'],
   ['M13', 'Title_180_LR', '5760x2880', { stereo: 'mono' }, null, 'equirect180 sbs / name'],
   ['M14', 'Title_180_LR', '5760x2880', { sphere: 'equirect' }, null, 'equirect180 sbs / metadata'],
-  ['M15', 'Title_LR', '3840x1920', { stereo: 'sbs' }, pic(0.9, 0.1, 4, 0.05), 'equirect180 sbs / metadata'],
+  ['M15', 'Title_LR', '3840x1920', { stereo: 'sbs' }, pic(0.9, 0.1, 4, 0.05), 'fisheye sbs 190 / picture'],
   ['M16', 'clip', '4096x4096', { stereo: 'ou', swap: true }, null, 'flat ou swap / metadata'],
   ['N1', 'SLR_Studio_Title_8K_MKX200', '7680x3840', null, null, 'fisheye sbs 200 / name'],
   ['N2', 'Title_MKX220', '8000x4000', null, null, 'fisheye sbs 220 / name'],
@@ -116,7 +119,11 @@ const TABLE: Row[] = [
   ['S9', 'pano', '7680x1920', null, null, 'flat / none'],
   ['P1', 'Stranger.Things.S01E01.2160p', '3840x1920', null, pic(0.27, 0.3, 101), 'flat / none'],
   ['P2', 'video', '1920x960', null, pic(0.98, 0.04, 3.2), 'equirect180 sbs / picture'],
-  ['P3', 'download', '7680x3840', null, pic(0.86, 0.02, 1.0, 0.03), 'equirect180 sbs / picture'],
+  ['P3', 'download', '7680x3840', null, pic(0.86, 0.02, 1.0, 0.03), 'fisheye sbs 190 / picture'],
+  ['P13', 'C0001', '8192x4320', null, pic(0.88, 0.04, 0.9, 0.02), 'fisheye sbs 190 / picture'],
+  ['P14', 'download', '5760x2880', null, pic(0.9, 0.1, 4, 0.3), 'equirect180 sbs / picture'],
+  ['P15', 'download', '3840x3840', null, pic(0.1, 0.1, 50, 0.02), 'flat / none'],
+  ['P16', 'Title_180_LR', '5760x2880', null, pic(0.86, 0.02, 1.0, 0.03), 'equirect180 sbs / name'],
   ['P4', 'download', '3840x1920', null, pic(0.02, 0.16, 0.73), 'equirect360 mono / picture'],
   ['P5', 'download', '4096x4096', null, pic(0.06, 0.96, 4.8), 'flat ou / picture'],
   ['P6', 'download', '4096x4096', null, pic(-0.11, 0.98, 0.48), 'equirect360 ou / picture'],
@@ -160,6 +167,10 @@ describe('needsLook and worthProbing', () => {
     expect(needsLook({ name: 'Title_180_LR', width: 5760, height: 2880 })).toBe(false)
     expect(needsLook({ name: 'IMG_0001', width: 5760, height: 2880, container: { sphere: 'equirect', cover: 0.5 } })).toBe(false)
     expect(needsLook({ name: 'cam', width: 3840, height: 2160 })).toBe(false)
+    expect(needsLook({ name: 'C0001', width: 8192, height: 4320 })).toBe(true)
+    expect(needsLook({ name: 'C0001', width: 4096, height: 2160 })).toBe(true)
+    expect(needsLook({ name: 'Some.Movie.1080p', width: 1920, height: 1040 })).toBe(false)
+    expect(needsLook({ name: 'Some.Movie.1080p', width: 3996, height: 2160 })).toBe(false)
     expect(needsLook({ name: 'video', width: 1280, height: 640 })).toBe(false)
   })
 
@@ -185,6 +196,24 @@ describe('stored facts', () => {
 
   it('reads a name that is an Object property as a plain word', () => {
     expect(detectProjection('constructor toString __proto__')).toEqual(FLAT)
+  })
+})
+
+describe('lens', () => {
+  it('reads a 180 saved before arc as 180, not the 190 fov every row holds', () => {
+    const old = readProjection({ kind: 'equirect180', layout: 'sbs', fov: 190, swapEyes: false })
+    expect(old).toEqual(vr('equirect180', 'sbs'))
+    expect(old && lensDegrees(old)).toBe(180)
+    expect(readProjection({ ...old, arc: 200 })?.arc).toBe(200)
+    expect(readProjection({ ...old, arc: 'wide' })).toEqual(old)
+  })
+
+  it('sets a fisheye fov and a 180 arc, and has none for flat and 360', () => {
+    expect(withLens(vr('fisheye', 'sbs'), 200)).toEqual(vr('fisheye', 'sbs', 200))
+    expect(lensDegrees(withLens(vr('equirect180', 'sbs'), 200))).toBe(200)
+    expect(withLens(vr('equirect180', 'sbs'), 200).fov).toBe(190)
+    expect(lensDegrees(vr('equirect360', 'mono'))).toBeNull()
+    expect(lensDegrees(FLAT)).toBeNull()
   })
 })
 

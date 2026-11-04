@@ -10,7 +10,8 @@ import { handoffHeaders, handoffState, mediaUrl } from './handoff'
 import { isBlockedHost } from './blocklist'
 import { showContextMenu } from './context-menu'
 import { mostVisited, readSession, writeSession, webUrl, type SavedTab } from './storage'
-import { ERO_CHANNELS, EROSCRIPTS_HOME, isEroScriptsUrl, isEroTopicUrl, sourceUrl, type EroTopic } from '@shared/eroscripts'
+import { ERO_CHANNELS, EROSCRIPTS_HOME, isEroScriptsUrl, isEroTopicUrl, sourceUrl, type EroFacets, type EroTopic } from '@shared/eroscripts'
+import { eroFacets } from './facets'
 import { topicReport } from './topic'
 import { BrowserDownloads, type OrdinaryBrowserDownload } from './downloads'
 import { downloadContextForNavigation, relatedNavigation, reusableDownload, type DownloadOwner, type RelatedDownloadContext } from './download-context'
@@ -539,6 +540,18 @@ export class BrowserTabs {
     const existing = this.tabList.find((tab) => isEroScriptsUrl(tab.view.webContents.getURL() || tab.initial.url))
     if (existing) { this.activate(existing.id); return this.toTab(existing) }
     return this.open(EROSCRIPTS_HOME)
+  }
+
+  async eroFacets(): Promise<EroFacets> {
+    await this.cookiesReady
+    const browser = session.fromPartition(PARTITION)
+    const json = async (path: string): Promise<unknown> => {
+      const response = await browser.fetch(`${EROSCRIPTS_HOME}${path}`, { credentials: 'include', headers: { Accept: 'application/json' } })
+      if (!response.ok) throw new Error(`EroScripts ${path}: HTTP ${response.status}`)
+      return response.json()
+    }
+    const [site, tags] = await Promise.all([json('site.json'), json('tags.json')])
+    return eroFacets(site, tags)
   }
 
   openSource(url: string): BrowserTab {

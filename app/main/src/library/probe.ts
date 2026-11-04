@@ -1,5 +1,7 @@
+import type { MediaMark } from '@shared/library'
 import type { ContainerFacts, Layout } from '@shared/projection'
 import { runTool } from './tools'
+import { isTimed } from './servers/heresphere'
 
 export interface ProbeResult {
   durationMs: number
@@ -7,6 +9,7 @@ export interface ProbeResult {
   height: number
   codec: string
   vr: ContainerFacts
+  chapters?: MediaMark[]
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null
@@ -16,7 +19,7 @@ const seconds = (v: unknown) => {
 }
 
 export async function probe(path: string, signal?: AbortSignal): Promise<ProbeResult> {
-  const out = await runTool('ffprobe', ['-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', path], 20_000, signal)
+  const out = await runTool('ffprobe', ['-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', '-show_chapters', path], 20_000, signal)
   const json: unknown = JSON.parse(out)
   const streams = isObject(json) && Array.isArray(json.streams) ? json.streams : []
   const format = isObject(json) && isObject(json.format) ? json.format : {}
@@ -28,7 +31,21 @@ export async function probe(path: string, signal?: AbortSignal): Promise<ProbeRe
     height: typeof video?.height === 'number' ? video.height : 0,
     codec: typeof video?.codec_name === 'string' ? video.codec_name : '',
     vr: video ? containerFacts(video) : {},
+    chapters: chapterMarks(isObject(json) ? json.chapters : undefined, duration * 1000),
   }
+}
+
+export function chapterMarks(chapters: unknown, durationMs: number): MediaMark[] {
+  if (!Array.isArray(chapters)) return []
+  return chapters.flatMap((c): MediaMark[] => {
+    if (!isObject(c)) return []
+    const startMs = Math.round(Math.max(0, Number(c.start_time)) * 1000)
+    const endMs = Math.round(Number(c.end_time) * 1000)
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return []
+    if (startMs === 0 && durationMs > 0 && !isTimed({ start: startMs, end: endMs }, durationMs)) return []
+    const name = isObject(c.tags) && typeof c.tags.title === 'string' ? c.tags.title.trim() : ''
+    return [{ name, startMs, endMs }]
+  })
 }
 
 type Sphere = NonNullable<ContainerFacts['sphere']>

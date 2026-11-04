@@ -1,16 +1,18 @@
 import { hostname } from 'node:os'
+import { clampToyCommand } from '@shared/headsetToys'
 import type { MediaRow } from '@shared/library'
+import type { ResolvedPassthrough } from '@shared/passthrough'
 import type { ResolvedProjection } from '@shared/projection'
-import type { QuestBeacon, QuestHello, QuestScene, QuestToyCommand } from '@shared/quest'
+import { QUEST_PROTOCOL, type QuestBeacon, type QuestHello, type QuestSample, type QuestScene, type QuestToyCommand } from '@shared/quest'
 
 const TEXT_LIMIT = 64
 
-export function questBeacon(port: number, videos: number, auth: boolean, name = hostname()): QuestBeacon {
-  return { app: 'betterplayer', v: 1, name, port, videos, auth }
+export function questBeacon(id: string, port: number, paired: boolean, name = hostname()): QuestBeacon {
+  return { app: 'betterplayer', v: QUEST_PROTOCOL, id, name, port, paired }
 }
 
-export function questScene(row: MediaRow, { projection, source }: ResolvedProjection, resumeMs: number, base: string): QuestScene {
-  return { id: row.id, title: row.title, url: `${base}/media/${row.id}`, durationMs: row.durationMs, resumeMs, projection, projectionSource: source, width: row.width, height: row.height, axes: row.axes, heat: row.heat }
+export function questScene(row: MediaRow, { projection, source }: ResolvedProjection, resumeMs: number, base: string, passthrough: ResolvedPassthrough): QuestScene {
+  return { id: row.id, title: row.title, url: `${base}/media/${row.id}`, durationMs: row.durationMs, resumeMs, projection, projectionSource: source, width: row.width, height: row.height, axes: row.axes, heat: row.heat, passthrough }
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -28,19 +30,29 @@ export function readPosition(body: unknown): number | null {
   return Math.round(body.ms)
 }
 
-const INTENSITY_MAX = 2
-const OFFSET_MAX_MS = 5000
-
-const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v))
 const isMediaId = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v > 0
+const isNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
+const isId = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= TEXT_LIMIT
+
+export function readSample(body: unknown): QuestSample | null {
+  if (!isRecord(body)) return null
+  const { timeSec, u, v } = body
+  if (!isNumber(timeSec) || timeSec < 0 || !isNumber(u) || !isNumber(v)) return null
+  const unit = (n: number) => Math.max(0, Math.min(1, n))
+  return { timeSec, u: unit(u), v: unit(v) }
+}
 
 export function readToyCommand(body: unknown): QuestToyCommand | null {
   if (!isRecord(body)) return null
-  const { kind, mediaId, value, ms, id } = body
-  if (kind === 'reconnect') return typeof id === 'string' && id && id.length <= TEXT_LIMIT ? { kind, id } : null
+  const { kind, mediaId, value, ms, id, min, max, channel, change } = body
+  const estim = change === 'up' ? change : isNumber(change) ? change : null
+  if (kind === 'reconnect') return isId(id) ? { kind, id } : null
+  if (kind === 'restimVolume') return estim !== null ? clampToyCommand({ kind, change: estim }) : null
+  if (kind === 'coyote') return isId(id) && (channel === 'a' || channel === 'b') && estim !== null ? clampToyCommand({ kind, id, channel, change: estim }) : null
   if (!isMediaId(mediaId)) return null
-  if (kind === 'intensity' && typeof value === 'number' && Number.isFinite(value)) return { kind, mediaId, value: Math.round(clamp(value, 0, INTENSITY_MAX) * 100) / 100 }
-  if (kind === 'offset' && typeof ms === 'number' && Number.isFinite(ms)) return { kind, mediaId, ms: Math.round(clamp(ms, -OFFSET_MAX_MS, OFFSET_MAX_MS)) }
+  if (kind === 'intensity' && isNumber(value)) return clampToyCommand({ kind, mediaId, value })
+  if (kind === 'offset' && isNumber(ms)) return clampToyCommand({ kind, mediaId, ms })
+  if (kind === 'range' && isNumber(min) && isNumber(max)) return clampToyCommand({ kind, mediaId, min, max })
   return null
 }
 

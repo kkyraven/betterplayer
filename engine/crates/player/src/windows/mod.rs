@@ -1,7 +1,9 @@
+pub mod controllers;
 pub mod dlss;
 pub mod dlss5;
 pub mod egl;
 pub mod fruc;
+pub mod portals;
 pub mod probe;
 pub mod vr;
 

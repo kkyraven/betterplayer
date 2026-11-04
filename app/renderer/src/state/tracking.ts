@@ -54,11 +54,12 @@ import {
   type Resolved,
   type VideoResolveInput,
 } from '@shared/trackingRules'
-import { engine, models } from '@/engine/client'
+import { detectorFiles, engine, models } from '@/engine/client'
 import { invoke } from '@/ipc'
 import { t } from '@/state/i18n'
 import { ensureAudio, ensureFullAudio, releaseAudio } from './audio'
 import { isPremium, useAccount } from './account'
+import { kinkyravenCatalog } from './models'
 import { siteName } from '@/screens/browser/StartPage'
 import { feedColour, subscribeFrames, useBrowser } from './browser'
 import { usePlayer } from './player'
@@ -325,7 +326,7 @@ export const useTracking = create<TrackingStore>()((set, get) => {
     playbackMultiplier = multiplier
   }
   const loaded: Record<ModelKind, string | null> = { detector: null, motion: null, music: null }
-  const available: Record<ModelKind, { id: string; paths: (string | null)[] } | null> = { detector: null, motion: null, music: null }
+  const available: Record<ModelKind, { model: ModelInfo; paths: string[] } | null> = { detector: null, motion: null, music: null }
   const wanted = new Set<ModelKind>()
   let modelsDir: string | null = null
   let lastBox = ''
@@ -451,10 +452,10 @@ export const useTracking = create<TrackingStore>()((set, get) => {
         loaded[kind] = null
         continue
       }
-      if (loaded[kind] === want.id || (kind !== 'detector' && loaded[kind] === null && !inUse(kind))) continue
-      loaded[kind] = want.id
-      if (kind === 'detector') engine.setDetector(want.id, want.paths[0] ?? '', `${modelsDir}/coreml-cache`)
-      else engine.setModel(kind, want.id, want.paths[0] ?? '', want.paths[1] ?? '', modelsDir)
+      if (loaded[kind] === want.model.id || (kind !== 'detector' && loaded[kind] === null && !inUse(kind))) continue
+      loaded[kind] = want.model.id
+      if (kind === 'detector') engine.setDetector(detectorFiles(want.model, want.paths), `${modelsDir}/coreml-cache`)
+      else engine.setModel(kind, want.model.id, want.paths[0] ?? '', want.paths[1] ?? '', modelsDir)
     }
     pullModels()
   }
@@ -984,15 +985,17 @@ export const useTracking = create<TrackingStore>()((set, get) => {
       const d = defaults()
       engine.setDetectOptions(d.detectEveryMs, d.regionPadding)
       modelsDir ??= await invoke('models:dir')
-      const all = models()
+      const all = [...models(), ...(await kinkyravenCatalog())]
       const status = await invoke('models:status', all.flatMap((m) => m.files.map((f) => f.file)))
       const present = { detector: false, motion: false, music: false }
+      const premium = isPremium(useAccount.getState())
       for (const kind of MODEL_KINDS) {
-        const chosen = kind === 'music' ? entitledMusicModel(d.models.music, isPremium(useAccount.getState())) : d.models[kind]
+        const chosen = kind === 'music' ? entitledMusicModel(d.models.music, premium) : kind === 'detector' && !premium ? null : d.models[kind]
         const spec: ModelInfo | undefined = chosen ? all.find((m) => m.kind === kind && m.id === chosen) : undefined
         const paths = spec?.files.map((f) => status[f.file]?.path ?? null) ?? []
-        present[kind] = spec !== undefined && paths.every((p) => p !== null)
-        available[kind] = spec && present[kind] ? { id: spec.id, paths } : null
+        const ready = spec !== undefined && paths.every((p) => p !== null)
+        present[kind] = ready
+        available[kind] = spec && ready ? { model: spec, paths: paths.filter((p) => p !== null) } : null
       }
       set({ present })
       syncModels()

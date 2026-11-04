@@ -1,4 +1,5 @@
 import { t } from '../../i18n'
+import type { MediaMark } from '@shared/library'
 import type { Projection } from '@shared/projection'
 import type { ServerKind } from '@shared/remote'
 import type { ImportedPerformer } from '@shared/search'
@@ -21,6 +22,7 @@ export interface RemoteScene {
   rating: number
   favourite?: boolean
   tags: string[]
+  marks?: MediaMark[]
   description: string
   performers: ImportedPerformer[]
   filename: string

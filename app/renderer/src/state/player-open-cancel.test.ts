@@ -16,7 +16,7 @@ vi.mock('./i18n', () => ({ t: (key: string) => key }))
 vi.mock('./library', () => ({ useLibrary: {} }))
 vi.mock('./settings', () => ({ useSettings: { getState: () => ({ settings: mocks.settings, load: mocks.settingsLoad, addRecent: vi.fn() }) } }))
 vi.mock('./subtitles', () => ({ useSubtitles: { getState: () => ({ load: vi.fn() }) } }))
-vi.mock('./tracking', () => ({ useTracking: { getState: () => ({ stop: vi.fn(), autoStart: vi.fn() }) } }))
+vi.mock('./tracking', () => ({ useTracking: { getState: () => ({ stop: vi.fn(), autoStart: vi.fn(), setBasePlaybackRate: vi.fn() }) } }))
 vi.mock('./ui', () => ({ useUi: { getState: () => ({ setScreen: vi.fn() }) } }))
 
 let player: typeof import('./player').usePlayer

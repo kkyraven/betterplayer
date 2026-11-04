@@ -35,7 +35,7 @@ export function TvQuickSettings() {
   const offsetMs = usePlayer((s) => s.video.globalOffsetMs)
   const setGlobalOffset = usePlayer((s) => s.setGlobalOffset)
   const rate = usePlayer((s) => s.snapshot.rate)
-  const setRate = usePlayer((s) => s.setRate)
+  const chooseRate = usePlayer((s) => s.chooseRate)
   const subtitles = useSettings((s) => s.settings?.subtitles.enabled ?? true)
   const update = useSettings((s) => s.update)
   const upscaler = useSettings((s) => s.settings?.upscaling.upscaler ?? 'off')
@@ -55,7 +55,7 @@ export function TvQuickSettings() {
       <TvRow kind="number" label={t('tv.quickSettings.volume')} navFirst value={Math.round(volume * 100)} min={0} max={100} step={5} format={(v) => `${v}%`} onChange={(v) => setVolume(v / 100)} />
       <TvRow kind="number" label={t('tv.quickSettings.intensity')} value={Math.round(intensity * 100)} min={0} max={200} step={5} format={(v) => `${v}%`} onChange={(v) => adjustAmplitude(v / 100 - intensity)} />
       <TvRow kind="number" label={t('tv.quickSettings.scriptOffset')} value={offsetMs} min={-5000} max={5000} step={10} holdStep={10} format={(v) => `${v} ms`} onChange={setGlobalOffset} />
-      <TvRow kind="options" label={t('tv.quickSettings.speed')} options={RATE_OPTIONS} value={rate} onChange={setRate} />
+      <TvRow kind="options" label={t('tv.quickSettings.speed')} options={RATE_OPTIONS} value={rate} onChange={chooseRate} />
       <TvRow kind="switch" label={t('tv.quickSettings.subtitles')} value={subtitles} onChange={(enabled) => void update((s) => ({ ...s, subtitles: { ...s.subtitles, enabled } }))} />
       <TvRow kind="options" label={t('tv.quickSettings.upscaling')} options={upscalers} value={upscaler} onChange={(u) => setUpscaling({ upscaler: u })} />
       {enhanceCapabilities.frameGen && <TvRow kind="options" label={t('tv.quickSettings.frameGeneration')} options={FRAME_GEN_OPTIONS.map((o) => ({ value: o.value, label: t(o.label) }))} value={frameGen} onChange={(v) => setFrameGen(v === 'default' ? null : v)} />}

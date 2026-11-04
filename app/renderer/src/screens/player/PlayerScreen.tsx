@@ -19,6 +19,7 @@ import { useSession } from '@/state/session'
 import { DomColumn } from '@/screens/dom/DomColumn'
 import { useTracking } from '@/state/tracking'
 import { SCREEN_LABEL, useUi } from '@/state/ui'
+import { CensorToast } from './CensorToast'
 import { ControlBar } from './ControlBar'
 import { EndGrid } from './EndGrid'
 import { InHeadset } from './InHeadset'
@@ -115,6 +116,7 @@ export function PlayerScreen() {
       <HeroTip />
       <InHeadset />
       <CrosshairToast />
+      <CensorToast />
       {!path && (
         <div className="pempty">
           <span className="faint">{t('player.empty.nothingPlaying')}</span>

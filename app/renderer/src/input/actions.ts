@@ -3,9 +3,10 @@ import { enhanceCapabilities } from '@/engine/client'
 import { skipGap } from '@/state/gapSkip'
 import { useDevices } from '@/state/devices'
 import { useEditor } from '@/state/editor'
-import { usePlayer } from '@/state/player'
+import { RATES, usePlayer } from '@/state/player'
 import { useSession } from '@/state/session'
 import { useSettings } from '@/state/settings'
+import { useTracking } from '@/state/tracking'
 import { t } from '@/state/i18n'
 import { useUi } from '@/state/ui'
 
@@ -25,6 +26,16 @@ function toggleUpscaling() {
 function toggleFrameGen() {
   const current = useSettings.getState().settings?.upscaling.frameGen
   usePlayer.getState().setUpscaling({ frameGen: current !== 'off' ? 'off' : 'display' })
+}
+
+export function playbackRate(): number {
+  return useTracking.getState().playbackBaseRate ?? usePlayer.getState().snapshot.rate
+}
+
+function stepRate(dir: -1 | 1) {
+  const rate = playbackRate()
+  const next = dir > 0 ? RATES.find((r) => r > rate + 0.001) ?? RATES[RATES.length - 1] : [...RATES].reverse().find((r) => r < rate - 0.001) ?? RATES[0]
+  usePlayer.getState().chooseRate(next ?? 1)
 }
 
 const player = (label: MessageKey, run: () => void): Action => ({ label, where: 'player', run })
@@ -49,6 +60,9 @@ export const ACTIONS = {
   'Media.Volume.Up': player('input.action.mediaVolumeUp', () => usePlayer.getState().setVolume(usePlayer.getState().volume + 0.05)),
   'Media.Volume.Down': player('input.action.mediaVolumeDown', () => usePlayer.getState().setVolume(usePlayer.getState().volume - 0.05)),
   'Media.Mute.Toggle': player('input.action.mediaMuteToggle', () => usePlayer.getState().toggleMute()),
+  'Media.Speed.Down': player('input.action.editorSpeedDown', () => stepRate(-1)),
+  'Media.Speed.Up': player('input.action.editorSpeedUp', () => stepRate(1)),
+  'Media.Speed.Reset': player('input.action.mediaSpeedReset', () => usePlayer.getState().chooseRate(1)),
   'Media.Offset.Earlier': player('input.action.mediaOffsetEarlier', () => usePlayer.getState().setGlobalOffset(usePlayer.getState().video.globalOffsetMs - 10)),
   'Media.Offset.Later': player('input.action.mediaOffsetLater', () => usePlayer.getState().setGlobalOffset(usePlayer.getState().video.globalOffsetMs + 10)),
   'Media.Offset.EarlierLong': player('input.action.mediaOffsetEarlierLong', () => usePlayer.getState().setGlobalOffset(usePlayer.getState().video.globalOffsetMs - 100)),

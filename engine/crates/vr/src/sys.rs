@@ -30,6 +30,8 @@ pub const IVRChaperone_Version: &str = "IVRChaperone_004";
 pub const IVRChaperone_FnTable: &[u8] = b"FnTable:IVRChaperone_004\0";
 pub const IVRInput_Version: &str = "IVRInput_011";
 pub const IVRInput_FnTable: &[u8] = b"FnTable:IVRInput_011\0";
+pub const IVRApplications_Version: &str = "IVRApplications_008";
+pub const IVRApplications_FnTable: &[u8] = b"FnTable:IVRApplications_008\0";
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
@@ -94,6 +96,71 @@ pub struct TrackedDevicePose_t {
     pub bPoseIsValid: bool,
     pub bDeviceIsConnected: bool,
 }
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct Compositor_FrameTiming {
+    pub m_nSize: u32,
+    pub m_nFrameIndex: u32,
+    pub m_nNumFramePresents: u32,
+    pub m_nNumMisPresented: u32,
+    pub m_nNumDroppedFrames: u32,
+    pub m_nReprojectionFlags: u32,
+    pub m_flSystemTimeInSeconds: f64,
+    pub m_flPreSubmitGpuMs: f32,
+    pub m_flPostSubmitGpuMs: f32,
+    pub m_flTotalRenderGpuMs: f32,
+    pub m_flCompositorRenderGpuMs: f32,
+    pub m_flCompositorRenderCpuMs: f32,
+    pub m_flCompositorIdleCpuMs: f32,
+    pub m_flClientFrameIntervalMs: f32,
+    pub m_flPresentCallCpuMs: f32,
+    pub m_flWaitForPresentCpuMs: f32,
+    pub m_flSubmitFrameMs: f32,
+    pub m_flWaitGetPosesCalledMs: f32,
+    pub m_flNewPosesReadyMs: f32,
+    pub m_flNewFrameReadyMs: f32,
+    pub m_flCompositorUpdateStartMs: f32,
+    pub m_flCompositorUpdateEndMs: f32,
+    pub m_flCompositorRenderStartMs: f32,
+    pub m_HmdPose: TrackedDevicePose_t,
+    pub m_nNumVSyncsReadyForUse: u32,
+    pub m_nNumVSyncsToFirstView: u32,
+    pub m_flTransferLatencyMs: f32,
+}
+
+pub const VRCompositor_ReprojectionReason_Cpu: u32 = 0x01;
+pub const VRCompositor_ReprojectionReason_Gpu: u32 = 0x02;
+pub const VRCompositor_ReprojectionMotion: u32 = 0x08;
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct Compositor_CumulativeStats {
+    pub m_nPid: u32,
+    pub m_nNumFramePresents: u32,
+    pub m_nNumDroppedFrames: u32,
+    pub m_nNumReprojectedFrames: u32,
+    pub m_nNumFramePresentsOnStartup: u32,
+    pub m_nNumDroppedFramesOnStartup: u32,
+    pub m_nNumReprojectedFramesOnStartup: u32,
+    pub m_nNumLoading: u32,
+    pub m_nNumFramePresentsLoading: u32,
+    pub m_nNumDroppedFramesLoading: u32,
+    pub m_nNumReprojectedFramesLoading: u32,
+    pub m_nNumTimedOut: u32,
+    pub m_nNumFramePresentsTimedOut: u32,
+    pub m_nNumDroppedFramesTimedOut: u32,
+    pub m_nNumReprojectedFramesTimedOut: u32,
+    pub m_nNumFrameSubmits: u32,
+    pub m_flSumCompositorCPUTimeMS: f64,
+    pub m_flSumCompositorGPUTimeMS: f64,
+    pub m_flSumTargetFrameTimes: f64,
+    pub m_flSumApplicationCPUTimeMS: f64,
+    pub m_flSumApplicationGPUTimeMS: f64,
+    pub m_nNumFramesWithDepth: u32,
+}
+
+const _: () = assert!(size_of::<Compositor_FrameTiming>() == 192 && size_of::<Compositor_CumulativeStats>() == 112);
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -362,10 +429,13 @@ pub struct ETrackedDeviceProperty(pub i32);
 impl ETrackedDeviceProperty {
     pub const Prop_TrackingSystemName_String: Self = Self(1000);
     pub const Prop_ModelNumber_String: Self = Self(1001);
+    pub const Prop_RenderModelName_String: Self = Self(1003);
     pub const Prop_ManufacturerName_String: Self = Self(1005);
+    pub const Prop_ActualTrackingSystemName_String: Self = Self(1054);
     pub const Prop_SecondsFromVsyncToPhotons_Float: Self = Self(2001);
     pub const Prop_DisplayFrequency_Float: Self = Self(2002);
     pub const Prop_UserIpdMeters_Float: Self = Self(2003);
+    pub const Prop_ControllerType_String: Self = Self(7000);
 }
 
 #[repr(transparent)]
@@ -392,6 +462,39 @@ impl ETrackingUniverseOrigin {
     pub const TrackingUniverseStanding: Self = Self(1);
     pub const TrackingUniverseRawAndUncalibrated: Self = Self(2);
 }
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct EVRApplicationError(pub i32);
+impl EVRApplicationError {
+    pub const VRApplicationError_None: Self = Self(0);
+    pub const VRApplicationError_AppKeyAlreadyExists: Self = Self(100);
+    pub const VRApplicationError_NoManifest: Self = Self(101);
+    pub const VRApplicationError_NoApplication: Self = Self(102);
+    pub const VRApplicationError_InvalidIndex: Self = Self(103);
+    pub const VRApplicationError_UnknownApplication: Self = Self(104);
+    pub const VRApplicationError_IPCFailed: Self = Self(105);
+    pub const VRApplicationError_ApplicationAlreadyRunning: Self = Self(106);
+    pub const VRApplicationError_InvalidManifest: Self = Self(107);
+    pub const VRApplicationError_InvalidApplication: Self = Self(108);
+    pub const VRApplicationError_LaunchFailed: Self = Self(109);
+    pub const VRApplicationError_ApplicationAlreadyStarting: Self = Self(110);
+    pub const VRApplicationError_LaunchInProgress: Self = Self(111);
+    pub const VRApplicationError_OldApplicationQuitting: Self = Self(112);
+    pub const VRApplicationError_TransitionAborted: Self = Self(113);
+    pub const VRApplicationError_IsTemplate: Self = Self(114);
+    pub const VRApplicationError_SteamVRIsExiting: Self = Self(115);
+    pub const VRApplicationError_WaitingForChaperone: Self = Self(116);
+    pub const VRApplicationError_BufferTooSmall: Self = Self(200);
+    pub const VRApplicationError_PropertyNotSet: Self = Self(201);
+    pub const VRApplicationError_UnknownProperty: Self = Self(202);
+    pub const VRApplicationError_InvalidParameter: Self = Self(203);
+    pub const VRApplicationError_NotImplemented: Self = Self(300);
+}
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct EVRApplicationProperty(pub i32);
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
@@ -485,11 +588,13 @@ impl EVREventType {
     pub const VREvent_None: Self = Self(0);
     pub const VREvent_TrackedDeviceActivated: Self = Self(100);
     pub const VREvent_TrackedDeviceDeactivated: Self = Self(101);
+    pub const VREvent_TrackedDeviceUpdated: Self = Self(102);
     pub const VREvent_TrackedDeviceUserInteractionStarted: Self = Self(103);
     pub const VREvent_TrackedDeviceUserInteractionEnded: Self = Self(104);
     pub const VREvent_IpdChanged: Self = Self(105);
     pub const VREvent_EnterStandbyMode: Self = Self(106);
     pub const VREvent_LeaveStandbyMode: Self = Self(107);
+    pub const VREvent_TrackedDeviceRoleChanged: Self = Self(108);
     pub const VREvent_ButtonPress: Self = Self(200);
     pub const VREvent_ButtonUnpress: Self = Self(201);
     pub const VREvent_ButtonTouch: Self = Self(202);
@@ -826,6 +931,10 @@ impl EVROverlayError {
     pub const VROverlayError_TextureNotLocked: Self = Self(33);
     pub const VROverlayError_TimedOut: Self = Self(34);
 }
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct EVRSceneApplicationState(pub i32);
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
@@ -1200,6 +1309,140 @@ pub struct VR_IVRInput_FnTable {
     pub GetBindingVariant: Option<unsafe extern "system" fn(ulDevicePath: VRInputValueHandle_t, pchVariantArray: *mut c_char, unVariantArraySize: u32) -> EVRInputError>,
 }
 const _: () = assert!(std::mem::size_of::<VR_IVRInput_FnTable>() == 34 * 8);
+
+#[repr(C)]
+pub struct VR_IVRApplications_FnTable {
+    pub AddApplicationManifest: Option<unsafe extern "system" fn(pchApplicationManifestFullPath: *const c_char, bTemporary: bool) -> EVRApplicationError>,
+    pub RemoveApplicationManifest: Option<unsafe extern "system" fn(pchApplicationManifestFullPath: *const c_char) -> EVRApplicationError>,
+    pub IsApplicationInstalled: Option<unsafe extern "system" fn(pchAppKey: *const c_char) -> bool>,
+    pub GetApplicationCount: Option<unsafe extern "system" fn() -> u32>,
+    pub GetApplicationKeyByIndex: Option<unsafe extern "system" fn(unApplicationIndex: u32, pchAppKeyBuffer: *mut c_char, unAppKeyBufferLen: u32) -> EVRApplicationError>,
+    pub GetApplicationKeyByProcessId: Option<unsafe extern "system" fn(unProcessId: u32, pchAppKeyBuffer: *mut c_char, unAppKeyBufferLen: u32) -> EVRApplicationError>,
+    pub LaunchApplication: Option<unsafe extern "system" fn(pchAppKey: *const c_char) -> EVRApplicationError>,
+    pub LaunchTemplateApplication: Option<unsafe extern "system" fn(pchTemplateAppKey: *const c_char, pchNewAppKey: *const c_char, pKeys: *const c_void, unKeys: u32) -> EVRApplicationError>,
+    pub LaunchApplicationFromMimeType: Option<unsafe extern "system" fn(pchMimeType: *const c_char, pchArgs: *const c_char) -> EVRApplicationError>,
+    pub LaunchDashboardOverlay: Option<unsafe extern "system" fn(pchAppKey: *const c_char) -> EVRApplicationError>,
+    pub CancelApplicationLaunch: Option<unsafe extern "system" fn(pchAppKey: *const c_char) -> bool>,
+    pub IdentifyApplication: Option<unsafe extern "system" fn(unProcessId: u32, pchAppKey: *const c_char) -> EVRApplicationError>,
+    pub GetApplicationProcessId: Option<unsafe extern "system" fn(pchAppKey: *const c_char) -> u32>,
+    pub GetApplicationsErrorNameFromEnum: Option<unsafe extern "system" fn(error: EVRApplicationError) -> *mut c_char>,
+    pub GetApplicationPropertyString: Option<unsafe extern "system" fn(pchAppKey: *const c_char, eProperty: EVRApplicationProperty, pchPropertyValueBuffer: *mut c_char, unPropertyValueBufferLen: u32, peError: *mut EVRApplicationError) -> u32>,
+    pub GetApplicationPropertyBool: Option<unsafe extern "system" fn(pchAppKey: *const c_char, eProperty: EVRApplicationProperty, peError: *mut EVRApplicationError) -> bool>,
+    pub GetApplicationPropertyUint64: Option<unsafe extern "system" fn(pchAppKey: *const c_char, eProperty: EVRApplicationProperty, peError: *mut EVRApplicationError) -> u64>,
+    pub SetApplicationAutoLaunch: Option<unsafe extern "system" fn(pchAppKey: *const c_char, bAutoLaunch: bool) -> EVRApplicationError>,
+    pub GetApplicationAutoLaunch: Option<unsafe extern "system" fn(pchAppKey: *const c_char) -> bool>,
+    pub SetDefaultApplicationForMimeType: Option<unsafe extern "system" fn(pchAppKey: *const c_char, pchMimeType: *const c_char) -> EVRApplicationError>,
+    pub GetDefaultApplicationForMimeType: Option<unsafe extern "system" fn(pchMimeType: *const c_char, pchAppKeyBuffer: *mut c_char, unAppKeyBufferLen: u32) -> bool>,
+    pub GetApplicationSupportedMimeTypes: Option<unsafe extern "system" fn(pchAppKey: *const c_char, pchMimeTypesBuffer: *mut c_char, unMimeTypesBuffer: u32) -> bool>,
+    pub GetApplicationsThatSupportMimeType: Option<unsafe extern "system" fn(pchMimeType: *const c_char, pchAppKeysThatSupportBuffer: *mut c_char, unAppKeysThatSupportBuffer: u32) -> u32>,
+    pub GetApplicationLaunchArguments: Option<unsafe extern "system" fn(unHandle: u32, pchArgs: *mut c_char, unArgs: u32) -> u32>,
+    pub GetStartingApplication: Option<unsafe extern "system" fn(pchAppKeyBuffer: *mut c_char, unAppKeyBufferLen: u32) -> EVRApplicationError>,
+    pub GetSceneApplicationState: Option<unsafe extern "system" fn() -> EVRSceneApplicationState>,
+    pub PerformApplicationPrelaunchCheck: Option<unsafe extern "system" fn(pchAppKey: *const c_char) -> EVRApplicationError>,
+    pub GetSceneApplicationStateNameFromEnum: Option<unsafe extern "system" fn(state: EVRSceneApplicationState) -> *mut c_char>,
+    pub LaunchInternalProcess: Option<unsafe extern "system" fn(pchBinaryPath: *const c_char, pchArguments: *const c_char, pchWorkingDirectory: *const c_char) -> EVRApplicationError>,
+    pub RegisterSubprocess: Option<unsafe extern "system" fn(nPid: u32) -> EVRApplicationError>,
+    pub GetCurrentSceneProcessId: Option<unsafe extern "system" fn() -> u32>,
+}
+const _: () = assert!(std::mem::size_of::<VR_IVRApplications_FnTable>() == 31 * 8);
+
+pub const IVRRenderModels_Version: &str = "IVRRenderModels_006";
+pub const IVRRenderModels_FnTable: &[u8] = b"FnTable:IVRRenderModels_006\0";
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct EVRRenderModelError(pub i32);
+impl EVRRenderModelError {
+    pub const VRRenderModelError_None: Self = Self(0);
+    pub const VRRenderModelError_Loading: Self = Self(100);
+}
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct EVRRenderModelTextureFormat(pub i32);
+impl EVRRenderModelTextureFormat {
+    pub const VRRenderModelTextureFormat_RGBA8_SRGB: Self = Self(0);
+}
+
+pub type VRComponentProperties = u32;
+pub const VRComponentProperty_IsStatic: u32 = 1 << 0;
+pub const VRComponentProperty_IsVisible: u32 = 1 << 1;
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct RenderModel_ComponentState_t {
+    pub mTrackingToComponentRenderModel: HmdMatrix34_t,
+    pub mTrackingToComponentLocal: HmdMatrix34_t,
+    pub uProperties: VRComponentProperties,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct RenderModel_Vertex_t {
+    pub vPosition: HmdVector3_t,
+    pub vNormal: HmdVector3_t,
+    pub rfTextureCoord: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct RenderModel_TextureMap_t {
+    pub unWidth: u16,
+    pub unHeight: u16,
+    pub rubTextureMapData: *const u8,
+    pub format: EVRRenderModelTextureFormat,
+    pub unMipLevels: u16,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct RenderModel_t {
+    pub rVertexData: *const RenderModel_Vertex_t,
+    pub unVertexCount: u32,
+    pub rIndexData: *const u16,
+    pub unTriangleCount: u32,
+    pub diffuseTextureId: TextureID_t,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct RenderModel_ControllerMode_State_t {
+    pub bScrollWheelVisible: bool,
+}
+
+const _: () = assert!(std::mem::size_of::<RenderModel_ComponentState_t>() == 100);
+const _: () = assert!(std::mem::size_of::<RenderModel_Vertex_t>() == 32);
+const _: () = assert!(std::mem::size_of::<RenderModel_TextureMap_t>() == 24);
+const _: () = assert!(std::mem::offset_of!(RenderModel_TextureMap_t, rubTextureMapData) == 8);
+const _: () = assert!(std::mem::offset_of!(RenderModel_TextureMap_t, format) == 16);
+const _: () = assert!(std::mem::size_of::<RenderModel_t>() == 32);
+const _: () = assert!(std::mem::offset_of!(RenderModel_t, rIndexData) == 16);
+const _: () = assert!(std::mem::offset_of!(RenderModel_t, diffuseTextureId) == 28);
+const _: () = assert!(std::mem::size_of::<RenderModel_ControllerMode_State_t>() == 1);
+
+#[repr(C)]
+pub struct VR_IVRRenderModels_FnTable {
+    pub LoadRenderModel_Async: Option<unsafe extern "system" fn(pchRenderModelName: *const c_char, ppRenderModel: *mut *mut RenderModel_t) -> EVRRenderModelError>,
+    pub FreeRenderModel: Option<unsafe extern "system" fn(pRenderModel: *mut RenderModel_t)>,
+    pub LoadTexture_Async: Option<unsafe extern "system" fn(textureId: TextureID_t, ppTexture: *mut *mut RenderModel_TextureMap_t) -> EVRRenderModelError>,
+    pub FreeTexture: Option<unsafe extern "system" fn(pTexture: *mut RenderModel_TextureMap_t)>,
+    pub LoadTextureD3D11_Async: Option<unsafe extern "system" fn(textureId: TextureID_t, pD3D11Device: *mut c_void, ppD3D11Texture2D: *mut *mut c_void) -> EVRRenderModelError>,
+    pub LoadIntoTextureD3D11_Async: Option<unsafe extern "system" fn(textureId: TextureID_t, pDstTexture: *mut c_void) -> EVRRenderModelError>,
+    pub FreeTextureD3D11: Option<unsafe extern "system" fn(pD3D11Texture2D: *mut c_void)>,
+    pub GetRenderModelName: Option<unsafe extern "system" fn(unRenderModelIndex: u32, pchRenderModelName: *mut c_char, unRenderModelNameLen: u32) -> u32>,
+    pub GetRenderModelCount: Option<unsafe extern "system" fn() -> u32>,
+    pub GetComponentCount: Option<unsafe extern "system" fn(pchRenderModelName: *const c_char) -> u32>,
+    pub GetComponentName: Option<unsafe extern "system" fn(pchRenderModelName: *const c_char, unComponentIndex: u32, pchComponentName: *mut c_char, unComponentNameLen: u32) -> u32>,
+    pub GetComponentButtonMask: Option<unsafe extern "system" fn(pchRenderModelName: *const c_char, pchComponentName: *const c_char) -> u64>,
+    pub GetComponentRenderModelName: Option<unsafe extern "system" fn(pchRenderModelName: *const c_char, pchComponentName: *const c_char, pchComponentRenderModelName: *mut c_char, unComponentRenderModelNameLen: u32) -> u32>,
+    pub GetComponentStateForDevicePath: Option<unsafe extern "system" fn(pchRenderModelName: *const c_char, pchComponentName: *const c_char, devicePath: VRInputValueHandle_t, pState: *const RenderModel_ControllerMode_State_t, pComponentState: *mut RenderModel_ComponentState_t) -> bool>,
+    pub GetComponentState: Option<unsafe extern "system" fn(pchRenderModelName: *const c_char, pchComponentName: *const c_char, pControllerState: *const c_void, pState: *const RenderModel_ControllerMode_State_t, pComponentState: *mut RenderModel_ComponentState_t) -> bool>,
+    pub RenderModelHasComponent: Option<unsafe extern "system" fn(pchRenderModelName: *const c_char, pchComponentName: *const c_char) -> bool>,
+    pub GetRenderModelThumbnailURL: Option<unsafe extern "system" fn(pchRenderModelName: *const c_char, pchThumbnailURL: *mut c_char, unThumbnailURLLen: u32, peError: *mut EVRRenderModelError) -> u32>,
+    pub GetRenderModelOriginalPath: Option<unsafe extern "system" fn(pchRenderModelName: *const c_char, pchOriginalPath: *mut c_char, unOriginalPathLen: u32, peError: *mut EVRRenderModelError) -> u32>,
+    pub GetRenderModelErrorNameFromEnum: Option<unsafe extern "system" fn(error: EVRRenderModelError) -> *mut c_char>,
+}
+const _: () = assert!(std::mem::size_of::<VR_IVRRenderModels_FnTable>() == 19 * 8);
 
 pub type PFN_VR_InitInternal2 = unsafe extern "C" fn(peError: *mut EVRInitError, eApplicationType: EVRApplicationType, pStartupInfo: *const c_char) -> u32;
 pub type PFN_VR_ShutdownInternal = unsafe extern "C" fn();

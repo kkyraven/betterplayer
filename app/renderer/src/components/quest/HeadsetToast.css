@@ -1,0 +1,26 @@
+.headset-toast {
+  position: absolute; top: 12px; left: 50%; z-index: 30; transform: translateX(-50%);
+  width: max-content; max-width: min(460px, calc(100% - 40px));
+  border-radius: 12px; background: var(--popover); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
+  box-shadow: var(--shadow); font-size: 13px;
+  transition: opacity var(--t-ui) var(--ease), transform var(--t-ui) var(--ease);
+}
+@starting-style { .headset-toast { opacity: 0; transform: translate(-50%, -8px); } }
+@media (prefers-reduced-motion: reduce) { @starting-style { .headset-toast { transform: translateX(-50%); } } }
+
+.ht-bar { display: flex; align-items: center; gap: 10px; padding: 6px 6px 6px 14px; white-space: nowrap; }
+.ht-bar > svg { width: 15px; height: 15px; flex: none; color: var(--text-2); }
+.ht-bar > span { overflow: hidden; text-overflow: ellipsis; }
+.ht-bar .ht-close { margin-left: auto; color: var(--text-3); }
+
+.ht-why { display: grid; gap: 8px; padding: 10px 14px 12px; border-top: 1px solid var(--line); font-size: 12.5px; }
+.ht-check { display: grid; grid-template-columns: 16px 1fr auto; align-items: center; gap: 10px; min-height: 28px; }
+.ht-check > svg { width: 15px; height: 15px; }
+.ht-check > svg.ok { color: var(--ok); }
+.ht-check > svg.bad { color: var(--danger); }
+.ht-check > svg.warn { color: var(--warn); }
+.ht-hint { display: block; color: var(--text-3); font-size: 12px; }
+.ht-foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding-top: 2px; }
+.ht-link { display: inline-flex; align-items: center; gap: 5px; margin-right: auto; padding: 0; border: 0; background: none; color: var(--accent); font: inherit; cursor: pointer; }
+.ht-link:hover { text-decoration: underline; }
+.ht-link svg { width: 13px; height: 13px; }

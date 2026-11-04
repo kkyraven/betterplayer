@@ -12,12 +12,14 @@ import { basicAuth, isRemoteMedia, mediaIdFromUrl, type PlayerCommand } from '@s
 import { AXIS_IDS, type AxisId } from '@shared/axes'
 import { plainParam, pushParams } from './params'
 import { FLAT, resolveProjection, type Projection, type ProjectionSource, type ResolvedProjection } from '@shared/projection'
+import type { PassthroughSettings } from '@shared/passthrough'
 import { isUrl } from '@shared/remote'
 import { defaultAxisSettings, type AxisSettings, type DlssSettings, type FrameGenOverride, type PerVideoSettings, type UpscalingSettings, type ParamAxisId, type ParamSourceSettings } from '@shared/settings'
 import { applyEnhance, engine, warm } from '@/engine/client'
 import * as live from './live'
 import { invoke } from '@/ipc'
 import { nextBookmarkTime } from '@/lib/bookmarks'
+import { scrubberMarks } from '@/lib/marks'
 import { fileTitle } from '@/lib/format'
 import { isFree, useAccount } from './account'
 import { t } from './i18n'
@@ -57,10 +59,10 @@ function adjacent(ids: number[], current: number | undefined, dir: 1 | -1): numb
   return i >= 0 ? ids[i + dir] : ids[0]
 }
 
-type Playback = { autoplay: AutoplayMode; repeat: RepeatMode; volume: number; muted: boolean }
+type Playback = { autoplay: AutoplayMode; repeat: RepeatMode; volume: number; muted: boolean; rate: number }
 
 function loadPlayback(): Playback {
-  const fallback: Playback = { autoplay: 'off', repeat: 'off', volume: 1, muted: false }
+  const fallback: Playback = { autoplay: 'off', repeat: 'off', volume: 1, muted: false, rate: 1 }
   try {
     const p = JSON.parse(localStorage.getItem(PLAYBACK_KEY) ?? '{}') as Partial<Record<keyof Playback, unknown>>
     return {
@@ -68,6 +70,7 @@ function loadPlayback(): Playback {
       repeat: REPEAT_ORDER.find((m) => m === p.repeat) ?? fallback.repeat,
       volume: typeof p.volume === 'number' && Number.isFinite(p.volume) ? Math.max(0, Math.min(1, p.volume)) : fallback.volume,
       muted: typeof p.muted === 'boolean' ? p.muted : fallback.muted,
+      rate: RATES.find((r) => r === p.rate) ?? fallback.rate,
     }
   } catch {
     return fallback
@@ -125,10 +128,12 @@ interface PlayerState {
   adjustAmplitude: (delta: number) => void
   resetAmplitude: () => void
   setRate: (rate: number) => void
+  chooseRate: (rate: number) => void
   setVolume: (volume: number) => void
   toggleMute: () => void
   setSheet: (sheet: SheetTab | null) => void
   setProjection: (projection: Projection | null) => void
+  setPassthrough: (passthrough: PassthroughSettings) => void
   setFrameGen: (override: FrameGenOverride | null) => void
   setUpscaling: (patch: Partial<UpscalingSettings>) => void
   setDlss: (patch: Partial<DlssSettings>) => void
@@ -179,9 +184,10 @@ export const usePlayer = create<PlayerState>()((set, get) => {
   const axisDefaults = () => useSettings.getState().settings?.axesDefault
   const effectiveAxis = (id: AxisId, video: PerVideoSettings): AxisSettings => video.axes[id] ?? axisDefaults()?.[id] ?? defaultAxisSettings()
   const playback = loadPlayback()
+  let chosenRate = playback.rate
   const savePlayback = () => {
     const { autoplay, repeat, volume, muted } = get()
-    localStorage.setItem(PLAYBACK_KEY, JSON.stringify({ autoplay, repeat, volume, muted }))
+    localStorage.setItem(PLAYBACK_KEY, JSON.stringify({ autoplay, repeat, volume, muted, rate: chosenRate }))
   }
 
   let persistTimer = 0
@@ -295,6 +301,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
         if (get().path) get().savePosition()
         flushVideoSave()
         useTracking.getState().stop()
+        useTracking.getState().setBasePlaybackRate(handoff?.rate ?? chosenRate)
       }
       for (const id of AXIS_IDS) engine.setAxis(id, { ...settings.axesDefault[id], ...video.axes[id] })
       engine.setGlobalOffsetMs(video.globalOffsetMs)
@@ -489,9 +496,9 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     },
     seekBy: (seconds) => get().seek(live.get().timeMs / 1000 + seconds),
     stepBookmark: (direction) => {
-      const { scripts, snapshot } = get()
+      const { scripts, snapshot, media } = get()
       if (!snapshot.loaded) return
-      const bookmarks = scripts.filter((script) => script.selected).flatMap((script) => script.bookmarks)
+      const { bookmarks } = scrubberMarks(scripts, media?.marks)
       const target = nextBookmarkTime(bookmarks, live.get().timeMs, direction, snapshot.durationMs)
       if (target !== undefined) get().seek(target / 1000)
     },
@@ -526,6 +533,11 @@ export const usePlayer = create<PlayerState>()((set, get) => {
     setRate: (rate) => {
       useTracking.getState().setBasePlaybackRate(rate)
       told({ kind: 'rate', rate })
+    },
+    chooseRate: (rate) => {
+      chosenRate = rate
+      savePlayback()
+      get().setRate(rate)
     },
     setVolume: (volume) => {
       const v = Math.max(0, Math.min(1, volume))
@@ -619,6 +631,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       flushVideoSave()
       resolveAuto(path)
     },
+    setPassthrough: (passthrough) => persist({ ...get().video, passthrough }),
     setFrameGen: (override) => {
       const { frameGen: _dropped, ...rest } = get().video
       persist(override ? { ...rest, frameGen: override } : rest)

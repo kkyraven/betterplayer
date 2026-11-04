@@ -109,7 +109,8 @@ describe('picture check on synthetic strips', () => {
   it.each([
     ['VR180 side by side', 5760, 2880, 64, SHOTS.vr180, 'equirect180 sbs / picture'],
     ['360 mono', 3840, 1920, 64, SHOTS.mono360, 'equirect360 mono / picture'],
-    ['fisheye 190 side by side', 7680, 3840, 64, SHOTS.fisheye, 'equirect180 sbs / picture'],
+    ['fisheye 190 side by side', 7680, 3840, 64, SHOTS.fisheye, 'fisheye sbs 190 / picture'],
+    ['Canon RF5.2 raw, 1.9:1', 8192, 4320, 68, SHOTS.fisheye, 'fisheye sbs 190 / picture'],
     ['2:1 film', 3840, 1920, 64, SHOTS.film, 'flat / none'],
     ['360 over under', 4096, 4096, 128, SHOTS.ou360, 'equirect360 ou / picture'],
     ['VR180 over under', 4096, 4096, 128, SHOTS.ou180, 'flat ou / picture'],
@@ -123,15 +124,16 @@ describe('picture check on synthetic strips', () => {
   it.each([
     ['VR180 side by side', SHOTS.vr180, 'equirect180 sbs / picture'],
     ['360 mono', SHOTS.mono360, 'equirect360 mono / picture'],
-    ['fisheye 190 side by side', SHOTS.fisheye, 'equirect180 sbs / picture'],
+    ['fisheye 190 side by side', SHOTS.fisheye, 'fisheye sbs 190 / picture'],
     ['2:1 film', SHOTS.film, 'flat / none'],
   ] as const)('%s in hard conditions', (_name, shot, expected) => {
     expect(summary(3840, 1920, look(64, shot, HARD))).toBe(expected)
   })
 
-  it('scores a 360 seam and fisheye corners', () => {
+  it('scores a 360 seam, fisheye corners and a 180 with picture in its corners', () => {
     expect(look(64, SHOTS.mono360).wrap).toBeLessThanOrEqual(2)
-    expect(look(64, SHOTS.fisheye).corner).toBeLessThanOrEqual(0.15)
+    expect(look(64, SHOTS.fisheye).corner).toBeLessThanOrEqual(0.05)
+    expect(look(64, SHOTS.vr180, HARD).corner).toBeGreaterThanOrEqual(0.5)
     expect(look(64, SHOTS.film).wrap).toBeGreaterThanOrEqual(3)
   })
 
@@ -156,7 +158,7 @@ describe('picture check on synthetic strips', () => {
 
 describe('LookQueue.atOpen', () => {
   const row = (over: Partial<ProjectionFacts> = {}): ProjectionFacts => ({
-    id: 4, path: 'D:/v/download.mp4', kind: 'flat', remote: false, strip: 'pending', durationMs: 100_000,
+    id: 4, path: 'D:/v/download.mp4', kind: 'flat', remote: false, strip: 'pending', thumb: 'pending', cover: false, views: { thumb: '', strip: '' }, durationMs: 100_000,
     input: { name: 'download', width: 5760, height: 2880 }, ...over,
   })
   const setup = () => {
@@ -175,6 +177,14 @@ describe('LookQueue.atOpen', () => {
     expect(args.slice(args.indexOf('-ss'), args.indexOf('-ss') + 4)).toEqual(['-ss', '40.000', '-i', 'D:/v/download.mp4'])
     expect(JSON.parse(String(setVrLook.mock.calls[0]?.[1]))).toMatchObject({ frames: 1 })
     expect(looked).toHaveBeenCalledOnce()
+  })
+
+  it('reads the file, not a strip made in one eye', async () => {
+    ffmpeg.mockResolvedValueOnce(frame((i) => (i * 37) % 251))
+    const { queue } = setup()
+    expect(await queue.atOpen(row({ strip: 'ready', views: { thumb: '', strip: '1:equirect180:sbs:' } }))).toBe(true)
+    const [, args] = ffmpeg.mock.calls.at(-1)!
+    expect(args).toContain('D:/v/download.mp4')
   })
 
   it('stores nothing for a black frame, and skips rows the picture cannot change', async () => {

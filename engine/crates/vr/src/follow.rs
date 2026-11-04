@@ -14,17 +14,24 @@ const LEVEL: f32 = 0.5;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Follow {
+    frame: Recentre,
     anchor: Recentre,
+    yaw: f32,
     turn: f32,
     drift: [f32; 3],
     gliding: bool,
     away_since: Option<Instant>,
     aim: f32,
+    aside: f32,
 }
 
 impl Follow {
     pub fn new(anchor: Recentre) -> Follow {
-        Follow { anchor, turn: 0.0, drift: [0.0; 3], gliding: false, away_since: None, aim: anchor.heading }
+        Follow { frame: anchor, anchor, yaw: 0.0, turn: 0.0, drift: [0.0; 3], gliding: false, away_since: None, aim: 0.0, aside: 0.0 }
+    }
+
+    pub fn set_aside(&mut self, radians: f32) {
+        self.aside = radians;
     }
 
     pub fn anchor(&self) -> &Recentre {
@@ -36,11 +43,11 @@ impl Follow {
     }
 
     pub fn snap(&mut self, head: &Pose) {
-        if let Some(h) = level_heading(head) {
-            self.anchor.heading = h;
+        if let Some(h) = self.heading_of(head) {
+            self.yaw = h;
         }
-        self.anchor.origin = head.position();
-        *self = Follow::new(self.anchor);
+        self.frame.origin = head.position();
+        self.rest();
     }
 
     pub fn step(&mut self, head: &Pose, now: Instant, dt: f32, hold: bool) -> bool {
@@ -55,33 +62,42 @@ impl Follow {
             }
             self.gliding = true;
             self.away_since = None;
-            self.aim = self.anchor.heading;
+            self.aim = self.yaw;
         }
-        if let Some(h) = level_heading(head) {
+        if let Some(h) = self.heading_of(head) {
             self.aim = h;
         }
-        let off = wrap(self.aim - self.anchor.heading);
-        let (h, turn) = damp(self.anchor.heading, self.turn, self.anchor.heading + off, OMEGA, dt);
-        (self.anchor.heading, self.turn) = (wrap(h), turn);
+        let off = wrap(self.aim - self.yaw);
+        let (h, turn) = damp(self.yaw, self.turn, self.yaw + off, OMEGA, dt);
+        (self.yaw, self.turn) = (wrap(h), turn);
         let target = head.position();
-        for ((x, v), to) in self.anchor.origin.iter_mut().zip(&mut self.drift).zip(target) {
+        for ((x, v), to) in self.frame.origin.iter_mut().zip(&mut self.drift).zip(target) {
             (*x, *v) = damp(*x, *v, to, OMEGA, dt);
         }
-        if wrap(self.aim - self.anchor.heading).abs() < SETTLE && distance(self.anchor.origin, target) < SETTLE_M {
-            *self = Follow::new(self.anchor);
+        if wrap(self.aim - self.yaw).abs() < SETTLE && distance(self.frame.origin, target) < SETTLE_M {
+            self.rest();
+        } else {
+            self.anchor = self.frame.turned(self.yaw);
         }
         true
     }
 
-    fn away(&self, head: &Pose, angle: f32) -> bool {
-        let turned = level_heading(head).is_some_and(|h| wrap(h - self.anchor.heading).abs() > angle);
-        turned || distance(head.position(), self.anchor.origin) > WALK
+    fn rest(&mut self) {
+        let (frame, yaw, aside) = (self.frame, self.yaw, self.aside);
+        *self = Follow { anchor: frame.turned(yaw), yaw, aim: yaw, aside, ..Follow::new(frame) };
     }
-}
 
-fn level_heading(head: &Pose) -> Option<f32> {
-    let m = &head.0;
-    (m[0][2].hypot(m[2][2]) >= LEVEL).then(|| head.heading())
+    fn away(&self, head: &Pose, angle: f32) -> bool {
+        let off = |h: f32, from: f32| wrap(h - from).abs() > angle;
+        let turned = self.heading_of(head).is_some_and(|h| off(h, self.yaw) && off(h, self.yaw + self.aside));
+        turned || distance(head.position(), self.frame.origin) > WALK
+    }
+
+    fn heading_of(&self, head: &Pose) -> Option<f32> {
+        let seen = Recentre { origin: head.position(), ..self.frame }.to_content().then(head);
+        let m = &seen.0;
+        (m[0][2].hypot(m[2][2]) >= LEVEL).then(|| seen.heading())
+    }
 }
 
 fn wrap(a: f32) -> f32 {
@@ -196,16 +212,45 @@ mod tests {
         assert!(first >= 500, "{first}");
     }
 
+    fn off(r: &Recentre, head: &Pose) -> f32 {
+        r.to_content().then(head).heading().to_degrees().abs()
+    }
+
     #[test]
     fn shown_again_far_off_it_snaps_in_front_keeping_its_recline() {
         let r = Recentre { pitch: deg(40.0), ..Recentre::from_head(&head(0.0, 0.0)) };
+        let turned = |yaw: f32| r.to_tracking().then(&Pose::yaw(deg(yaw)));
         let mut f = Follow::new(r);
-        assert!(!f.left_behind(&head(25.0, 0.0)));
-        let behind = head(160.0, 0.0);
+        assert!(!f.left_behind(&turned(25.0)));
+        let behind = turned(160.0);
         assert!(f.left_behind(&behind));
         f.snap(&behind);
-        assert!((f.anchor().heading - deg(160.0)).abs() < 1e-5);
-        assert_eq!(f.anchor().pitch, deg(40.0));
+        assert!(off(f.anchor(), &behind) < 1e-3);
+        assert_eq!(f.anchor(), &r.turned(f.yaw), "turned about the reclined up");
         assert!(!f.step(&behind, Instant::now(), 0.016, false), "nothing left to glide");
+    }
+
+    #[test]
+    fn on_a_side_it_follows_a_turn_about_the_heads_own_up_not_its_right() {
+        let t = Instant::now();
+        let r = Recentre { roll: deg(80.0), ..Recentre::from_head(&head(0.0, 0.0)) };
+        let own = |turn: Pose| r.to_tracking().then(&turn);
+        let mut f = Follow::new(r);
+        assert_eq!(run(&mut f, &own(Pose::pitch(deg(50.0))), t, 2000, 16, false), None);
+        let left = own(Pose::yaw(deg(50.0)));
+        assert!(run(&mut f, &left, t + Duration::from_secs(2), 2000, 16, false).is_some());
+        assert!(off(f.anchor(), &left) < 2.0, "{}", off(f.anchor(), &left));
+    }
+
+    #[test]
+    fn a_moved_panel_stays_put_while_looked_at_and_keeps_its_offset_when_it_follows() {
+        let t = Instant::now();
+        let mut f = start();
+        f.set_aside(deg(-60.0));
+        assert_eq!(run(&mut f, &head(-60.0, 0.0), t, 2000, 16, false), None);
+        assert_eq!(run(&mut f, &head(0.0, 0.0), t + Duration::from_secs(2), 2000, 16, false), None);
+        run(&mut f, &head(120.0, 0.0), t + Duration::from_secs(4), 3000, 16, false);
+        assert!((f.anchor().heading - deg(120.0)).abs() < deg(2.0), "{}", f.anchor().heading.to_degrees());
+        assert_eq!(run(&mut f, &head(60.0, 0.0), t + Duration::from_secs(7), 2000, 16, false), None, "looking at it again");
     }
 }

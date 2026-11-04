@@ -31,10 +31,11 @@
 .card:hover .card-play, .card:focus-within .card-play { opacity: 1; }
 @media (hover: none) { .card .card-play { display: none; } }
 .card.hidden .thumb { opacity: 0.55; }
+.card.locked .thumb { opacity: 0.4; }
+.card.locked .title { color: var(--text-3); }
 .card .thumb .br { position: absolute; bottom: 8px; right: 8px; z-index: 2; }
-.card .thumb .bl { position: absolute; bottom: 8px; left: 8px; z-index: 2; }
+.card .thumb .bl { position: absolute; bottom: 8px; left: 8px; z-index: 2; display: flex; align-items: center; gap: 6px; }
 .card .dur, .card .resume { font: 500 11px/1 var(--mono); padding: 4px 6px; border-radius: 5px; background: rgba(0, 0, 0, 0.55); color: #eef0f4; }
-.card .badge-res { font: 600 10px/1 var(--mono); padding: 3px 5px; border-radius: 5px; background: rgba(0, 0, 0, 0.5); color: #eef0f4; border: 1px solid rgba(255, 255, 255, 0.1); }
 .card .prog { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(255, 255, 255, 0.14); z-index: 3; }
 .card .prog i { display: block; height: 100%; background: var(--accent); }
 .card .heat-strip { opacity: 0.9; }

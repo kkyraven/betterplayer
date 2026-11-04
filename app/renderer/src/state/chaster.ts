@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { create } from 'zustand'
 import type { ChasterStatus } from '@shared/chaster'
-import type { ChasterState } from '@shared/gooner'
+import type { ChasterState } from '@shared/censor'
 import { invoke, on } from '@/ipc'
 
 interface ChasterStore {

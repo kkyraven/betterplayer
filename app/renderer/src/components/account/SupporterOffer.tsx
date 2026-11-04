@@ -5,7 +5,7 @@ import { electron } from '@/node'
 import { useT } from '@/state/i18n'
 import './SupporterOffer.css'
 
-export function SupporterOffer({ message }: { message?: string }) {
+export function SupporterOffer({ message, label, action }: { message?: string; label?: string; action?: { label: string; onClick: () => void } }) {
   const t = useT()
   return (
     <div className="supporter-offer">
@@ -13,8 +13,9 @@ export function SupporterOffer({ message }: { message?: string }) {
       <span>
         {message ?? t('game.supporterOnly')} <span className="supporter-offer-price">{t('game.priceFrom', { price: SUPPORTER_PRICE })}</span>
       </span>
+      {action && <Button onClick={action.onClick}>{action.label}</Button>}
       <Button variant="primary" onClick={() => void electron.shell.openExternal(SUBSCRIBE_URL)}>
-        {t('firstStart.supporter.become')}
+        {label ?? t('firstStart.supporter.become')}
         <ExternalLink />
       </Button>
     </div>

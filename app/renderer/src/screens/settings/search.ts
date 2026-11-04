@@ -21,13 +21,10 @@ const fields: Partial<Record<SettingsPageId, readonly [readonly MessageKey[], re
       'settings.video.modelPreset',
       'settings.video.scalingMode',
       'settings.video.processingHeight',
-      'settings.video.frameRate',
-      'settings.video.motionGuides',
-      'settings.video.playbackBuffer',
     ],
   ],
   subtitles: [['settings.subtitles.show', 'settings.subtitles.size', 'settings.subtitles.colour', 'settings.subtitles.style', 'settings.subtitles.height'], []],
-  gooner: [
+  censor: [
     [
       'settings.gooner.hide',
       'settings.gooner.style',
@@ -37,6 +34,7 @@ const fields: Partial<Record<SettingsPageId, readonly [readonly MessageKey[], re
       'settings.gooner.clothing',
       'settings.search.axisRules',
       'settings.gooner.holdFor',
+      'settings.censor.modelSize',
       'settings.gooner.lock',
     ],
     [],
@@ -88,8 +86,8 @@ const fields: Partial<Record<SettingsPageId, readonly [readonly MessageKey[], re
   ],
   devices: [['settings.devices.stopOnPause', 'settings.devices.manage'], []],
   models: [
-    ['settings.models.regionModel', 'settings.models.musicModel', 'settings.search.modelDownloads'],
-    ['settings.search.provider', 'settings.search.warmUp'],
+    ['settings.models.regionModel', 'settings.censor.modelSize', 'settings.models.musicModel', 'settings.search.modelDownloads'],
+    ['settings.models.passthroughModel', 'settings.search.provider', 'settings.search.warmUp'],
   ],
   tracking: [
     [
@@ -123,7 +121,7 @@ const fields: Partial<Record<SettingsPageId, readonly [readonly MessageKey[], re
   ],
   sharing: [['settings.sharing.serve'], ['settings.sharing.port']],
   source: [['settings.source.librarySource', 'settings.source.follow'], []],
-  headsets: [['settings.headsets.player', 'settings.headsets.address', 'settings.headsets.follow', 'settings.headsets.stopFollowing'], []],
+  headsets: [['quest.setup.title', 'quest.setup.byAddress', 'settings.headsets.add', 'settings.headsets.otherPlayers', 'settings.headsets.follow', 'settings.headsets.stopFollowing'], []],
   intiface: [['settings.intiface.actAs'], []],
   chaster: [['settings.search.chaster.connection', 'settings.chaster.status'], []],
   profile: [['settings.profile.signIn', 'settings.profile.signOut', 'settings.profile.displayName', 'settings.profile.friendCode'], []],
@@ -216,14 +214,14 @@ export function locateSetting(root: HTMLElement, target: string): HTMLElement {
   if (axes && ['limits', 'intensity', 'smoothing', 'invert'].includes(target)) return axes
   if (['sign-in', 'sign-out', 'display-name', 'friend-code', 'sync-video-settings', 'add-friend', 'requests', 'friends'].includes(target))
     return root.querySelector<HTMLElement>('[data-setting="account-state"], [data-setting="link-profile"]') ?? root.querySelector<HTMLElement>('h1') ?? root
-  if (target === 'stop-following') return root.querySelector<HTMLElement>('[data-setting="headset-unavailable"]') ?? root
+  if (target === 'stop-following') return root.querySelector<HTMLElement>('[data-setting="headset-list"]') ?? root
   if (target === 'restart-to-update') return root.querySelector<HTMLElement>('[data-setting="version"]') ?? root
   if (target === 'page') return root.querySelector<HTMLElement>('h1') ?? root
   return root.querySelector<HTMLElement>('[data-setting="dlss"]') ?? root.querySelector<HTMLElement>('[data-setting="advanced"]') ?? root.querySelector<HTMLElement>('h1') ?? root
 }
 
 export function markSettingRows(root: HTMLElement) {
-  for (const row of root.querySelectorAll<HTMLElement>('.prow, .rng, .settings-link, .dev-follow, .dev-intiface')) {
+  for (const row of root.querySelectorAll<HTMLElement>('.prow, .rng, .settings-link, .dev-intiface')) {
     if (!row.dataset.setting) {
       const label = row.querySelector<HTMLElement>('[aria-label]') ?? row.querySelector<HTMLElement>('.lbl, .k, .field-label, .eyebrow')
       const name = label?.getAttribute('aria-label') ?? label?.textContent

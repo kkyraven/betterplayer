@@ -22,7 +22,7 @@ import { TvSettings } from '@/screens/tv/TvSettings'
 import { TvTileOptions } from '@/screens/tv/TvTileOptions'
 import { TvToast } from '@/screens/tv/TvToast'
 import { HoldToast } from './HoldToast'
-import { VrErrorToast } from '@/screens/player/InHeadset'
+import { VrErrorToast, VrOffer } from '@/screens/player/InHeadset'
 import { TvTopBar } from '@/screens/tv/TvTopBar'
 import { useUi } from '@/state/ui'
 import { useVr } from '@/state/vr'
@@ -189,6 +189,7 @@ export function MediaCentreShell() {
       <TvToast />
       <HoldToast />
       <VrErrorToast />
+      <VrOffer />
       {overlay === 'power' && <TvPowerMenu />}
       {overlay === 'quick' && <TvQuickSettings />}
       {overlay === 'options' && optionsRow && <TvTileOptions key={optionsRow.id} row={optionsRow} />}

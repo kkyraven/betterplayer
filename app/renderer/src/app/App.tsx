@@ -19,9 +19,11 @@ import { GameScreen } from '@/screens/game/GameScreen'
 import { DomScreen } from '@/screens/dom/DomScreen'
 import { AccountPanel } from '@/components/account/AccountPanel'
 import { ProfilePhotoDialog } from '@/components/account/ProfilePhotoDialog'
+import { HeadsetToast } from '@/components/quest/HeadsetToast'
+import { QuestPairDialog } from '@/components/quest/QuestPairDialog'
 import { SessionPanel } from '@/components/together/SessionPanel'
 import { LibraryScreen } from '@/screens/library/LibraryScreen'
-import { VrErrorToast } from '@/screens/player/InHeadset'
+import { VrErrorToast, VrOffer } from '@/screens/player/InHeadset'
 import { PlayerScreen } from '@/screens/player/PlayerScreen'
 import { SessionScreen } from '@/screens/session/SessionScreen'
 import { SettingsScreen } from '@/screens/settings/SettingsScreen'
@@ -145,8 +147,20 @@ export function App() {
   }, [fullscreen, toggleFullscreen])
 
   const Current = SCREEN_COMPONENTS[screen]
-  if (firstStart) return <FirstStart />
-  if (mediaCentre && !gameRunning) return <MediaCentreShell />
+  if (firstStart)
+    return (
+      <>
+        <FirstStart />
+        <QuestPairDialog />
+      </>
+    )
+  if (mediaCentre && !gameRunning)
+    return (
+      <>
+        <MediaCentreShell />
+        <QuestPairDialog />
+      </>
+    )
   return (
     <div className={cx('window', fullscreen && 'is-fullscreen', gameRunning && 'game-running')}>
       {!fullscreen && <TitleBar />}
@@ -154,12 +168,15 @@ export function App() {
       {fullscreen && <AccountPanel floating />}
       {fullscreen && <HoldToast />}
       <ProfilePhotoDialog />
+      <QuestPairDialog />
       <main className="main">
         <div className="screen">
           <div className="screen-content"><Current /></div>
         </div>
         {screen !== 'player' && screen !== 'editor' && !gameRunning && <NowPlayingStrip />}
         {screen !== 'player' && <VrErrorToast />}
+        <VrOffer />
+        <HeadsetToast />
       </main>
       <DeviceWizard />
       <SessionPanel />

@@ -1,39 +1,18 @@
-import { isAxisId, type AxisId } from '@shared/axes'
+import { isAxisId } from '@shared/axes'
 import { mediaIdFromUrl } from '@shared/peer'
-import type { QuestToyCommand, QuestToys } from '@shared/quest'
-import { defaultAxisSettings, type PerVideoSettings, type Settings } from '@shared/settings'
+import type { QuestToys } from '@shared/quest'
+import type { PerVideoSettings } from '@shared/settings'
 import { invoke, on } from '@/ipc'
 import { applyVideoToEngine } from './axisDefaults'
-import { outputName, useDevices, type ConfiguredOutput } from './devices'
+import { useDevices } from './devices'
 import { useFollow } from './follow'
+import { applyDeviceCommand, estimLevels, toyOutputs, videoToys, withToyCommand } from './headsetToys'
 import * as live from './live'
 import { usePlayer } from './player'
 import { useSettings } from './settings'
 
-type VideoToys = NonNullable<QuestToys['video']>
-type Defaults = Settings['axesDefault'] | undefined
-
 const EMPTY_VIDEO: PerVideoSettings = { globalOffsetMs: 0, axes: {} }
 const SAVE_MS = 300
-
-const axisOf = (id: AxisId, video: PerVideoSettings, defaults: Defaults) => video.axes[id] ?? defaults?.[id] ?? defaultAxisSettings(id)
-const outputId = (o: ConfiguredOutput) => o.config.id ?? String(o.id)
-
-export function videoToys(mediaId: number, video: PerVideoSettings, shown: AxisId[], defaults: Defaults): VideoToys {
-  const first = shown[0]
-  return { mediaId, intensity: first ? axisOf(first, video, defaults).amplitude : 1, offsetMs: video.globalOffsetMs }
-}
-
-export function withToyCommand(video: PerVideoSettings, command: Exclude<QuestToyCommand, { kind: 'reconnect' }>, scripted: AxisId[], intensity: number, defaults: Defaults): PerVideoSettings {
-  if (command.kind === 'offset') return { ...video, globalOffsetMs: command.ms }
-  const step = command.value - intensity
-  const axes = { ...video.axes }
-  for (const id of scripted) {
-    const current = axisOf(id, video, defaults)
-    axes[id] = { ...current, amplitude: Math.max(0, Math.round((current.amplitude + step) * 100) / 100) }
-  }
-  return { ...video, axes }
-}
 
 export function startQuestToys() {
   let followed: { mediaId: number; path: string; video: PerVideoSettings } | null = null
@@ -42,18 +21,21 @@ export function startQuestToys() {
   let saveTimer: ReturnType<typeof setTimeout> | undefined
   let pendingSave: (() => void) | null = null
 
+  const followedHost = () => {
+    const { kind, host, state } = useFollow.getState()
+    return kind === 'quest' && state !== null ? host : null
+  }
   const scripted = () => live.axisIdsWith(live.FLAG_SCRIPT).filter(isAxisId)
   const shown = () => live.axisIdsWith(live.FLAG_SCRIPT | live.FLAG_DERIVED).filter(isAxisId)
   const defaults = () => useSettings.getState().settings?.axesDefault
 
   const publish = () => {
-    const { outputs, states } = useDevices.getState()
     const toys: QuestToys = {
-      outputs: outputs.map((o) => ({ id: outputId(o), name: outputName(o.config), connected: states[o.id]?.status === 'connected' })),
-      video: followed ? videoToys(followed.mediaId, followed.video, shown(), defaults()) : null,
+      outputs: toyOutputs(),
+      video: followed ? { mediaId: followed.mediaId, ...videoToys(followed.video, shown(), defaults()) } : null,
+      estim: estimLevels(),
     }
-    const { kind, host: followHost } = useFollow.getState()
-    const host = kind === 'quest' ? followHost : null
+    const host = followedHost()
     const json = JSON.stringify([toys, host])
     if (json === sent) return
     sent = json
@@ -102,23 +84,19 @@ export function startQuestToys() {
     if (s.outputs !== prev.outputs || s.states !== prev.states) publish()
   })
   useSettings.subscribe((s, prev) => {
-    if (s.settings?.axesDefault !== prev.settings?.axesDefault) publish()
+    if (s.settings?.axesDefault !== prev.settings?.axesDefault || s.settings?.estim !== prev.settings?.estim) publish()
   })
   usePlayer.subscribe((s, prev) => {
     if (s.snapshot.flagsVersion !== prev.snapshot.flagsVersion) publish()
   })
 
   on('headset:toys', (command) => {
-    if (command.kind === 'reconnect') {
-      const output = useDevices.getState().outputs.find((o) => outputId(o) === command.id)
-      if (output) useDevices.getState().reconnect(output.id)
-      return
-    }
-    const { kind, host } = useFollow.getState()
-    if (!followed || kind !== 'quest' || host !== command.host || followed.mediaId !== command.mediaId) return
-    const axes = scripted()
-    const { intensity } = videoToys(followed.mediaId, followed.video, shown(), defaults())
-    const video = withToyCommand(followed.video, command, axes, intensity, defaults())
+    if (command.kind === 'reconnect') return applyDeviceCommand(command)
+    if (followedHost() !== command.host) return
+    if (command.kind === 'restimVolume' || command.kind === 'coyote') return applyDeviceCommand(command)
+    if (!followed || followed.mediaId !== command.mediaId) return
+    const { intensity } = videoToys(followed.video, shown(), defaults())
+    const video = withToyCommand(followed.video, command, scripted(), intensity, defaults())
     applyVideoToEngine(video)
     followed = { ...followed, video }
     save(followed.path, video)

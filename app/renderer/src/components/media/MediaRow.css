@@ -20,7 +20,7 @@
 .mrow .thumb .tl { position: absolute; top: 5px; left: 5px; z-index: 2; }
 .mrow .thumb .tl .axis { font-size: 9.5px; padding: 2px 4px; }
 .mrow .thumb .tr { position: absolute; top: 5px; right: 5px; z-index: 2; }
-.mrow .badge-res { font: 600 9.5px/1 var(--mono); padding: 2px 4px; border-radius: 4px; background: rgba(0, 0, 0, 0.5); color: #eef0f4; border: 1px solid rgba(255, 255, 255, 0.1); }
+.mrow .vr-badge { font-size: 9.5px; border-radius: 4px; }
 .mrow .thumb .prog { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(255, 255, 255, 0.14); z-index: 3; }
 .mrow .thumb .prog i { display: block; height: 100%; background: var(--accent); }
 

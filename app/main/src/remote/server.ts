@@ -7,7 +7,8 @@ import { networkInterfaces } from 'node:os'
 import { join } from 'node:path'
 import { isAxisId } from '@shared/axes'
 import type { IpcEvent, IpcEvents, RemoteStatus } from '@shared/ipc'
-import type { QuestBeacon, QuestToys } from '@shared/quest'
+import { QUEST_ANSWER_MS, QUEST_DISCOVERY_PORT, type QuestBeacon, type QuestCensor, type QuestConnectResult, type QuestPassthrough, type QuestSampled, type QuestToys } from '@shared/quest'
+import { readPassthrough, type ResolvedPassthrough } from '@shared/passthrough'
 import type { MediaDetail, MediaRow } from '@shared/library'
 import type { ResolvedProjection } from '@shared/projection'
 import { isUrl } from '@shared/remote'
@@ -19,20 +20,24 @@ import { hereSphereIndex, hereSphereScene, readWrite, type HereSphereWrite } fro
 import { t } from '../i18n'
 import { readPerVideo } from '../settings/store'
 import { authorised } from './auth'
-import { answerProbes } from './discovery'
+import { answerProbes, invite } from './discovery'
+import { firewallBlocks } from './firewall'
+import { QuestPairing, readPairRequest } from './pairing'
 import { inbound, outbound, permitted } from './paths'
-import { peerHost, questBeacon, questScene, readHello, readPosition, readToyCommand, resumePosition } from './quest'
+import { servePortal } from './portal'
+import { vpnName } from './vpn'
+import { peerHost, questBeacon, questScene, readHello, readPosition, readSample, readToyCommand, resumePosition } from './quest'
 
 export type RemoteApi = (channel: ForwardedChannel, args: unknown[]) => Promise<unknown>
 
-export type HeadsetEvent = 'headset:hello' | 'headset:bye' | 'headset:stop' | 'headset:toys'
+export type HeadsetEvent = 'headset:hello' | 'headset:bye' | 'headset:stop' | 'headset:toys' | 'headset:play'
 export type HeadsetEmit = <E extends HeadsetEvent>(event: E, data: IpcEvents[E]) => void
 
 type StreamEvent = { event: 'playing'; data: PlayingState } | { event: 'library:changed'; data: IpcEvents['library:changed'] } | { event: 'library:progress'; data: IpcEvents['library:progress'] }
 
 const HEARTBEAT_MS = 15_000
 
-const BEACON_COUNT_MS = 5000
+const QUEST_KEY_WAIT_MS = 2_000
 
 const CONTENT_TYPES: Record<string, string> = {
   mp4: 'video/mp4',
@@ -65,6 +70,23 @@ const CONTENT_TYPES: Record<string, string> = {
 }
 
 const BODY_LIMIT = 1_000_000
+
+const UPSTREAM_ANSWER_MS = 30_000
+
+const UPSTREAM_HEADERS = ['Content-Type', 'Content-Length', 'Content-Range', 'Accept-Ranges']
+
+const CLIENT_GONE = 499
+
+const OWN_CLIENTS = /^(node|undici|libmpv|mpv|BetterPlayer)\b/i
+
+function headerFields(list: string): Record<string, string> {
+  const fields: Record<string, string> = {}
+  for (const pair of list.split(',')) {
+    const at = pair.indexOf(':')
+    if (at > 0) fields[pair.slice(0, at).trim()] = pair.slice(at + 1).trim()
+  }
+  return fields
+}
 
 interface Range {
   start: number
@@ -120,7 +142,7 @@ async function serveFile(req: IncomingMessage, res: ServerResponse, path: string
     return status
   }
 
-  const stream = createReadStream(path, { start, end })
+  const stream = createReadStream(path, { start, end, highWaterMark: 1 << 20 })
   stream.on('error', () => res.destroy())
   res.on('close', () => stream.destroy())
   stream.pipe(res)
@@ -163,17 +185,23 @@ export class RemoteServer {
   private emit: (status: RemoteStatus) => void = () => {}
   private headset: HeadsetEmit = () => {}
   private discovery: Socket | null = null
-  private counted = { videos: 0, at: Number.NEGATIVE_INFINITY }
+  private serving = false
   private api: RemoteApi | null = null
   private playing: PlayingState = IDLE_PLAYING
-  private toys: QuestToys = { outputs: [], video: null }
+  private toys: QuestToys = { outputs: [], video: null, estim: [] }
   private toysHost: string | null = null
+  private vrFreeMs: () => number | undefined = () => undefined
   private readonly streams = new Set<ServerResponse>()
   private heartbeat: NodeJS.Timeout | null = null
+  private masks: string | null = null
+  private censorTracks: string | null = null
+  private censor: QuestCensor | null | undefined = undefined
+  private readonly players = new Map<string, 'deovr' | 'heresphere'>()
 
   constructor(
     private readonly library: Library,
     private readonly forcedPort?: number,
+    readonly pairing = new QuestPairing(),
   ) {}
 
   setEmitter(emit: (status: RemoteStatus) => void) {
@@ -189,8 +217,24 @@ export class RemoteServer {
     this.toysHost = host
   }
 
+  setVrLimit(limit: () => number | undefined) {
+    this.vrFreeMs = limit
+  }
+
   setApi(api: RemoteApi) {
     this.api = api
+  }
+
+  setMasks(dir: string) {
+    this.masks = dir
+  }
+
+  setCensorTracks(dir: string) {
+    this.censorTracks = dir
+  }
+
+  setCensor(look: QuestCensor | null) {
+    this.censor = look
   }
 
   publish(state: PlayingState) {
@@ -215,18 +259,18 @@ export class RemoteServer {
 
   apply(settings: Settings) {
     this.password = settings.remote.password
-    const enabled = this.forcedPort !== undefined || settings.remote.enabled
+    this.serving = this.forcedPort !== undefined || settings.remote.enabled
     const port = this.forcedPort ?? settings.remote.port
-    if (enabled === (this.server !== null) && port === this.port) return
+    if (this.server !== null && port === this.port) return
     this.stop()
     this.port = port
-    if (enabled) this.listen(port)
-    else this.emit(this.status())
+    this.listen(port)
   }
 
   stop() {
     const server = this.server
     this.server = null
+    this.pairing.endRequests()
     this.discovery?.close()
     this.discovery = null
     if (this.heartbeat) clearInterval(this.heartbeat)
@@ -246,6 +290,8 @@ export class RemoteServer {
         else res.destroy()
       })
     })
+    server.keepAliveTimeout = 65_000
+    server.headersTimeout = 66_000
     server.on('error', (e) => {
       process.stderr.write(`remote server on ${port}: ${String(e)}\n`)
       this.server = null
@@ -255,7 +301,10 @@ export class RemoteServer {
     })
     server.listen(port, '0.0.0.0', () => this.emit(this.status()))
     this.server = server
-    this.discovery = answerProbes(port, () => this.beacon())
+    this.discovery = answerProbes(port, (probe, host, from) => {
+      this.pairing.heard(probe, host, from)
+      return this.beacon(this.pairing.isPaired(probe.id))
+    })
     this.heartbeat = setInterval(() => {
       for (const res of this.streams) res.write(':\n\n')
     }, HEARTBEAT_MS)
@@ -269,6 +318,10 @@ export class RemoteServer {
     return `http://${req.headers.host ?? `127.0.0.1:${this.port}`}`
   }
 
+  private questPassthrough(req: IncomingMessage, row: MediaRow, passthrough: ResolvedPassthrough): QuestPassthrough {
+    return passthrough.mode === 'ai' && this.masks ? { ...passthrough, maskBase: `${this.base(req)}/quest/mask/${row.id}` } : passthrough
+  }
+
   private projection(row: MediaRow): Promise<ResolvedProjection> {
     return this.library.projection(row.path)
   }
@@ -280,41 +333,46 @@ export class RemoteServer {
       sendJson(res, 405, { error: 'method not allowed' })
       return
     }
-    if (!authorised(req.headers.authorization, this.password)) {
+    const path = new URL(req.url ?? '/', 'http://library').pathname
+    const [head, second, third, fourth] = path.split('/').filter(Boolean)
+    const open = head === 'quest' && (second === 'info' || second === 'pair') && third === undefined
+    const headset = this.pairing.headsetFor(req.headers.authorization)
+    if (headset) this.pairing.used(headset, peerHost(req.socket.remoteAddress))
+    if (!open && !headset && !(this.serving && authorised(req.headers.authorization, this.password))) {
       this.log(req, 401)
-      res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Better Player"', 'Content-Type': 'application/json' })
+      res.writeHead(401, { ...(this.serving ? { 'WWW-Authenticate': 'Basic realm="Better Player"' } : {}), 'Content-Type': 'application/json' })
       res.end('{"error":"password required"}')
       return
     }
-    const path = new URL(req.url ?? '/', 'http://library').pathname
-    const [head, second, third, fourth] = path.split('/').filter(Boolean)
     const status = await this.dispatch(req, res, head, second, third, fourth)
-    if (status >= 400) this.log(req, status)
+    if (status >= 400 && status !== CLIENT_GONE) this.log(req, status)
   }
 
   private async dispatch(req: IncomingMessage, res: ServerResponse, head: string | undefined, second: string | undefined, third: string | undefined, fourth: string | undefined): Promise<number> {
     if (head === undefined) {
-      if (req.method === 'POST' || req.headers['heresphere-json-version'] !== undefined) return this.hereSphereIndex(req, res)
+      if (req.method === 'POST' || req.headers['heresphere-json-version'] !== undefined) {
+        this.players.set(peerHost(req.socket.remoteAddress), 'heresphere')
+        return this.hereSphereIndex(req, res)
+      }
+      this.players.set(peerHost(req.socket.remoteAddress), 'deovr')
       return sendJson(res, 200, deoIndex(this.library.index('all'), this.base(req)))
     }
     if (head === 'deovr') {
+      this.players.set(peerHost(req.socket.remoteAddress), 'deovr')
       const row = this.row(second)
       if (!row) return sendJson(res, 404, { error: 'not found' })
       return sendJson(res, 200, deoScene(row, (await this.projection(row)).projection, this.base(req)))
     }
     if (head === 'heresphere') {
+      this.players.set(peerHost(req.socket.remoteAddress), 'heresphere')
       if (second === undefined) return this.hereSphereIndex(req, res)
       return this.hereSphereScene(req, res, second)
     }
     if (head === 'media') {
       const row = this.row(second)
       if (!row) return sendJson(res, 404, { error: 'not found' })
-      if (isUrl(row.path)) {
-        res.writeHead(302, { Location: row.path })
-        res.end()
-        return 302
-      }
-      return serveFile(req, res, row.path, contentType(row.path))
+      this.played(req, row)
+      return isUrl(row.path) ? this.proxy(req, res, row.path) : serveFile(req, res, row.path, contentType(row.path))
     }
     if (head === 'preview') {
       const id = Number(second)
@@ -338,8 +396,11 @@ export class RemoteServer {
     if (head === 'thumb' || head === 'strip') {
       const n = Number(second)
       if (!Number.isInteger(n)) return sendJson(res, 404, { error: 'not found' })
-      return serveFile(req, res, head === 'thumb' ? this.library.posterFile(n) : this.library.stripFile(n), 'image/jpeg')
+      if (head === 'strip') return serveFile(req, res, this.library.stripFile(n), 'image/jpeg')
+      const poster = await this.library.poster(n)
+      return serveFile(req, res, poster.file, poster.type)
     }
+    if (head === 'portal') return servePortal(this.library, req, res, second)
     if (head === 'script') return this.script(req, res, second, third)
     if (head === 'scripts') return this.scripts(req, res, second, third)
     if (head === 'api') return this.call(req, res, second)
@@ -348,23 +409,60 @@ export class RemoteServer {
     return sendJson(res, 404, { error: 'not found' })
   }
 
-  private beacon(): QuestBeacon {
-    const now = performance.now()
-    if (now - this.counted.at > BEACON_COUNT_MS) this.counted = { videos: this.library.counts().all, at: now }
-    return questBeacon(this.port, this.counted.videos, this.password !== '')
+  private beacon(paired: boolean): QuestBeacon {
+    const vrFreeMs = this.vrFreeMs()
+    return { ...questBeacon(this.pairing.id, this.port, paired), ...(vrFreeMs === undefined ? {} : { vrFreeMs }) }
+  }
+
+  async connect(id: string): Promise<QuestConnectResult> {
+    if (this.invite({ id }) && (await this.pairing.answer(id, QUEST_ANSWER_MS))) return { answered: true }
+    return { answered: false, firewall: await firewallBlocks(), vpn: vpnName() }
+  }
+
+  invite(target: { id: string } | { address: string }): boolean {
+    if (!this.discovery) return false
+    if ('id' in target) {
+      const to = this.pairing.address(target.id)
+      if (!to) return false
+      invite(this.discovery, this.beacon(this.pairing.isPaired(target.id)), to.host, to.port)
+      return true
+    }
+    const m = /^\s*\[?([^\]\s]+?)\]?(?::(\d{1,5}))?\s*$/.exec(target.address)
+    if (!m?.[1]) return false
+    invite(this.discovery, this.beacon(false), m[1], m[2] ? Number(m[2]) : QUEST_DISCOVERY_PORT)
+    return true
   }
 
   private async quest(req: IncomingMessage, res: ServerResponse, name: string | undefined, id: string | undefined, action: string | undefined): Promise<number> {
-    if (name === 'info' && id === undefined) return sendJson(res, 200, this.beacon())
+    if (name === 'info' && id === undefined) {
+      const query = new URL(req.url ?? '/', 'http://library').searchParams
+      const headset = query.get('headset') ?? ''
+      const local = `${peerHost(req.socket.localAddress)}:${req.socket.localPort ?? this.port}`
+      const proof = this.pairing.proof(headset, query.get('nonce')?.slice(0, 128) ?? '', local)
+      if (headset) this.pairing.answered(headset)
+      return sendJson(res, 200, { ...this.beacon(this.pairing.isPaired(headset)), ...(proof ? { proof } : {}) })
+    }
+    if (name === 'pair' && id === undefined) return this.pair(req, res)
     if (name === 'scene' && action === undefined) {
       const row = this.row(id)
       if (!row) return sendJson(res, 404, { error: 'not found' })
+      const vrFreeMs = this.vrFreeMs()
+      if (vrFreeMs !== undefined && row.durationMs > vrFreeMs) return sendJson(res, 402, { error: 'supporter', vrFreeMs })
       const settings = this.library.videoSettings(row.path)
-      return sendJson(res, 200, questScene(row, await this.projection(row), settings?.position ?? 0, this.base(req)))
+      const [projection, passthrough] = await Promise.all([this.projection(row), this.library.passthrough(row.path, settings?.passthrough, QUEST_KEY_WAIT_MS)])
+      return sendJson(res, 200, questScene(row, projection, settings?.position ?? 0, this.base(req), this.questPassthrough(req, row, passthrough)))
+    }
+    if (name === 'censor' && id === undefined && req.method !== 'POST') return this.censor === undefined ? sendJson(res, 503, { error: 'not ready' }) : sendJson(res, 200, this.censor)
+    if ((name === 'mask' || name === 'censor') && action !== undefined && req.method !== 'POST') {
+      const row = this.row(id)
+      const root = name === 'mask' ? this.masks : this.censorTracks
+      if (!row || !root || !(action === 'meta' || /^\d{1,6}$/.test(action))) return sendJson(res, 404, { error: 'not found' })
+      const dir = join(root, String(row.id))
+      return action === 'meta' ? serveFile(req, res, join(dir, 'meta.json'), 'application/json') : serveFile(req, res, join(dir, `${Number(action)}.z`), 'application/octet-stream')
     }
     if (name === 'toys' && id === undefined && req.method !== 'POST') {
       const followed = this.toysHost !== null && peerHost(req.socket.remoteAddress) === this.toysHost
-      return sendJson(res, 200, followed ? this.toys : { ...this.toys, video: null })
+      return sendJson(res, 200, followed ? this.toys : { ...this.toys, video: null, estim: [] })
     }
     if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' })
     if (name === 'scene' && action === 'position') {
@@ -377,6 +475,23 @@ export class RemoteServer {
       const position = resumePosition(ms, row.durationMs)
       await this.api('video:set', [row.path, position === undefined ? rest : { ...rest, position }])
       return sendJson(res, 200, {})
+    }
+    if (name === 'scene' && action === 'passthrough') {
+      const row = this.row(id)
+      if (!row) return sendJson(res, 404, { error: 'not found' })
+      const passthrough = readPassthrough(await readBody(req))
+      if (!passthrough) return sendJson(res, 400, { error: 'bad request' })
+      if (!this.api) return sendJson(res, 503, { error: 'not ready' })
+      await this.api('video:set', [row.path, { ...readPerVideo(await this.api('video:get', [row.path])), passthrough }])
+      return sendJson(res, 200, this.questPassthrough(req, row, await this.library.passthrough(row.path, passthrough)))
+    }
+    if (name === 'scene' && action === 'sample') {
+      const row = this.row(id)
+      if (!row) return sendJson(res, 404, { error: 'not found' })
+      const sample = readSample(await readBody(req))
+      if (!sample) return sendJson(res, 400, { error: 'bad request' })
+      const sampled: QuestSampled = { colour: await this.library.samplePassthrough(row.path, sample.timeSec, sample.u, sample.v) }
+      return sendJson(res, 200, sampled)
     }
     const host = peerHost(req.socket.remoteAddress)
     if (name === 'hello' && id === undefined) {
@@ -400,6 +515,23 @@ export class RemoteServer {
       return sendJson(res, 200, {})
     }
     return sendJson(res, 404, { error: 'not found' })
+  }
+
+  private async pair(req: IncomingMessage, res: ServerResponse): Promise<number> {
+    if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' })
+    const request = readPairRequest(await readBody(req))
+    if (!request) return sendJson(res, 400, { error: 'bad request' })
+    return new Promise<number>((done) => {
+      const requestId = this.pairing.request(request, peerHost(req.socket.remoteAddress), (status, body) => {
+        if (!res.destroyed) sendJson(res, status, body)
+        done(status)
+      })
+      res.on('close', () => {
+        if (!requestId || res.writableFinished) return
+        this.pairing.cancel(requestId)
+        done(CLIENT_GONE)
+      })
+    })
   }
 
   private async call(req: IncomingMessage, res: ServerResponse, channel: string | undefined): Promise<number> {
@@ -436,6 +568,57 @@ export class RemoteServer {
     return Number.isInteger(n) ? this.library.media(n) : null
   }
 
+  private played(req: IncomingMessage, row: MediaDetail) {
+    if (this.pairing.headsetFor(req.headers.authorization) || OWN_CLIENTS.test(req.headers['user-agent'] ?? '')) return
+    const host = peerHost(req.socket.remoteAddress)
+    const kind = req.headers['heresphere-json-version'] !== undefined ? 'heresphere' : this.players.get(host)
+    const vrFreeMs = this.vrFreeMs()
+    if (!kind || (vrFreeMs !== undefined && row.durationMs > vrFreeMs)) return
+    this.headset('headset:play', { kind, host, mediaId: row.id })
+  }
+
+  private async proxy(req: IncomingMessage, res: ServerResponse, url: string): Promise<number> {
+    const remote = this.library.remote(url)
+    if (!remote) return sendJson(res, 404, { error: 'not found' })
+    const controller = new AbortController()
+    res.on('close', () => controller.abort())
+    const timer = setTimeout(() => controller.abort(), UPSTREAM_ANSWER_MS)
+    let upstream: Response
+    try {
+      upstream = await fetch(url, {
+        method: req.method === 'HEAD' ? 'HEAD' : 'GET',
+        headers: { ...headerFields(remote.headers), ...(req.headers.range ? { Range: req.headers.range } : { 'Accept-Encoding': 'identity' }) },
+        redirect: 'error',
+        signal: controller.signal,
+      })
+    } catch {
+      return res.destroyed ? CLIENT_GONE : sendJson(res, 502, { error: 'library server unreachable' })
+    } finally {
+      clearTimeout(timer)
+    }
+    if (res.destroyed) {
+      await upstream.body?.cancel()
+      return CLIENT_GONE
+    }
+    const headers: Record<string, string> = {}
+    for (const name of UPSTREAM_HEADERS) {
+      const value = upstream.headers.get(name)
+      if (value) headers[name] = value
+    }
+    headers['Content-Type'] ??= contentType(new URL(url).pathname)
+    res.writeHead(upstream.status, headers)
+    if (!upstream.body || req.method === 'HEAD') {
+      await upstream.body?.cancel()
+      res.end()
+      return upstream.status
+    }
+    const stream = Readable.from(upstream.body)
+    stream.on('error', () => res.destroy())
+    res.on('close', () => stream.destroy())
+    stream.pipe(res)
+    return upstream.status
+  }
+
   private hereSphereIndex(req: IncomingMessage, res: ServerResponse): number {
     const sections = [
       { name: t('main.headset.all'), rows: this.library.index('all') },
@@ -449,7 +632,7 @@ export class RemoteServer {
     let row = this.row(id)
     if (!row) return sendJson(res, 404, { error: 'not found' })
     if (req.method === 'POST') {
-      const write = readWrite(await readBody(req))
+      const write = readWrite(await readBody(req), row)
       if (write) {
         this.write(row, write)
         row = this.library.media(row.id) ?? row
@@ -465,6 +648,7 @@ export class RemoteServer {
     }
     if (write.isFavorite !== undefined && write.isFavorite !== row.favourite) this.library.setFavourite([row.id], write.isFavorite)
     if (write.tags) this.library.setTags(row.id, write.tags)
+    if (write.marks) this.library.setHeadsetMarks(row.id, write.marks)
   }
 
   private async script(req: IncomingMessage, res: ServerResponse, id: string | undefined, file: string | undefined): Promise<number> {

@@ -24,6 +24,10 @@
 .tv-row::-webkit-scrollbar { display: none; }
 .tv-row .card { flex: none; width: 392px; }
 .tv-row .card .thumb { border-radius: 14px; }
+.tv-offer-tile { flex: none; width: 392px; aspect-ratio: 16 / 9; display: grid; align-content: center; gap: 16px; padding: 24px; border-radius: 14px; border: 1px dashed var(--line-2); }
+.tv-offer-tile .name { font-size: 20px; font-weight: 600; }
+.tv-offer-tile .actions { display: flex; gap: 12px; }
+.tv-offer-tile .btn { height: 52px; padding: 0 22px; font-size: 18px; border-radius: 14px; }
 .tv-empty { color: var(--text-3); font-size: 18px; }
 .tv-np {
   position: absolute; left: 64px; right: 64px; bottom: 40px; height: 96px; border-radius: 20px; display: grid; align-items: center; padding: 0 24px; text-align: left;

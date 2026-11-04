@@ -4,23 +4,26 @@ import type { AccountStatus } from './account'
 import type { AdminStats } from './usage'
 import type { AxisId } from './axes'
 import type { ChasterStatus } from './chaster'
-import type { ModelFileInfo, ModelFileStatus, ModelProgress } from './tracking'
+import type { ModelFileInfo, ModelFileStatus, ModelInfo, ModelProgress } from './tracking'
 import type { BrowserError, BrowserFrame, BrowserHandoff, BrowserRegionEdit, BrowserStartData, BrowserTab, Rect, Region, RegionBox } from './browser'
 import type { EditorDocument, EditorFilePage, EditorFileQuery, EditorStored, Pattern } from './editor'
 import type { GameSources } from './game'
-import type { AlPersona, ChatMessage, ChatReply, ChatTool, DomAccount, DomAiSettings, DomMemory, DomMemoryKind, DomPose, DomProfile, DomYou, PleasurePain } from './dom'
+import type { AlPersona, ChatMessage, ChatReply, ChatTool, DomAccount, DomAiSettings, DomMemory, DomMemoryKind, DomPose, DomProfile, DomYou, OwnModels, PleasurePain } from './dom'
 import type { MatcherReport, MatcherResolveResult, OrphanSet } from './matcher'
 import type { DropResult, FolderNode, LibraryChange, LibraryCounts, LibraryRoot, MediaDetail, MediaPage, MediaQuery, MediaRow, Playlist, ScanProgress, Tag, TagUndo } from './library'
 import type { PlayerCommand, PlayingState, RemoteSourceStatus } from './peer'
-import type { QuestHello, QuestToyCommand, QuestToys } from './quest'
-import type { VrCommand, VrDeckState, VrPlayerState } from './vr'
+import type { QuestCensor, QuestConnectResult, QuestHeadset, QuestHello, QuestPairPrompt, QuestPinResult, QuestToyCommand, QuestToys } from './quest'
+import type { VrCommand, VrDeckState, VrHand, VrPlayerState, VrRay } from './vr'
+import type { PortalDevOp, PortalToPanel, PortalToScene, PortalUp } from './portals'
 import type { RemoteLoad, ServerInput } from './remote'
 import type { PerVideoSettings, Settings } from './settings'
 import type { ResolvedProjection } from './projection'
+import type { PassthroughSettings, ResolvedPassthrough } from './passthrough'
 import type { Cue, SubtitleTrack } from './subtitles'
 import type { UpdateState } from './update'
 import type { SavedSession, SessionHistory, SessionRun, SessionSetup } from './session'
 import type { DownloadDestination, DownloadEnqueue, DownloadState } from './downloads'
+import type { EroFacets } from './eroscripts'
 
 export const VIDEO_EXTENSIONS = [
   'mp4', 'm4v', 'mkv', 'mk3d', 'webm', 'mov', 'avi', 'divx', 'wmv', 'asf',
@@ -127,6 +130,9 @@ export interface IpcContract {
   'library:reshuffle': () => void
   'library:media': (id: number) => MediaDetail | null
   'library:projection': (path: string) => ResolvedProjection
+  'passthrough:resolve': (path: string, saved: PassthroughSettings | null) => ResolvedPassthrough
+  'censor:trackDir': (path: string) => string
+  'passthrough:sample': (path: string, timeSec: number, u: number, v: number) => number | null
   'library:suggestions': (id: number) => MediaRow[]
   'library:scriptFolders': (path: string) => Promise<string[]>
   'library:byPath': (path: string) => MediaDetail | null
@@ -182,11 +188,25 @@ export interface IpcContract {
   'remote:scripts': (url: string) => string | null
   'player:control': (command: PlayerCommand) => void
   'remote:toys': (state: QuestToys, host: string | null) => void
+  'remote:censor': (look: QuestCensor | null) => void
+  'quest:headsets': () => QuestHeadset[]
+  'quest:invite': (target: { id: string } | { address: string }) => boolean
+  'quest:connect': (id: string) => QuestConnectResult
+  'quest:forget': (id: string) => void
+  'quest:prompts': () => QuestPairPrompt[]
+  'quest:pin': (requestId: string, pin: string) => QuestPinResult
+  'quest:decline': (requestId: string) => void
+  'quest:firewall': () => boolean
+  'quest:allowFirewall': () => boolean
+  'vr:launch': () => void
   'vr:start': () => void
   'vr:stop': () => void
   'vr:state': (state: VrPlayerState) => void
   'vr:panelState': () => VrDeckState | null
   'vr:command': (command: VrCommand) => void
+  'vr:aim': (rays: Partial<Record<VrHand, VrRay>>, stick: [number, number] | null) => void
+  'portals:up': (message: PortalUp) => void
+  'portals:dev': (op: PortalDevOp) => unknown
   'chaster:status': () => ChasterStatus
   'account:status': () => AccountStatus
   'account:token': () => string | null
@@ -223,6 +243,7 @@ export interface IpcContract {
   'browser:setAdBlockEnabled': (enabled: boolean) => BrowserStartData
   'browser:open': (url?: string) => BrowserTab
   'browser:openEroScripts': () => BrowserTab
+  'browser:eroFacets': () => EroFacets
   'browser:openSource': (url: string) => BrowserTab
   'downloads:state': () => DownloadState
   'downloads:enqueue': (request: DownloadEnqueue) => string
@@ -258,6 +279,7 @@ export interface IpcContract {
   'browser:play': (id: number) => void
   'browser:setMuted': (id: number, muted: boolean) => void
   'models:dir': () => string
+  'models:catalog': () => ModelInfo[]
   'models:status': (files: string[]) => Record<string, ModelFileStatus | null>
   'models:download': (id: string, file: ModelFileInfo) => void
   'models:import': (files: ModelFileInfo[]) => string[] | null
@@ -280,9 +302,9 @@ export interface IpcContract {
   'dom:setPleasurePain': (pp: PleasurePain) => void
   'dom:ai': () => DomAiSettings
   'dom:setAi': (ai: DomAiSettings) => void
-  'dom:hasKey': () => boolean
-  'dom:setKey': (key: string | null) => void
-  'dom:ownModels': (url: string) => string[]
+  'dom:hasKey': (url: string) => boolean
+  'dom:setKey': (url: string, key: string | null) => void
+  'dom:ownModels': (url: string) => OwnModels
   'dom:account': (freeMinutes: boolean) => DomAccount
   'dom:login': (email: string, password: string, freeMinutes: boolean) => DomAccount
   'dom:register': (email: string, username: string, password: string, freeMinutes: boolean) => DomAccount
@@ -333,10 +355,15 @@ export interface IpcEvents {
   'vr:command': VrCommand
   'vr:state': VrDeckState
   'vr:ended': string | null
+  'portals:toScene': PortalToScene
+  'portals:toPanel': PortalToPanel
+  'quest:headsets': QuestHeadset[]
+  'quest:prompts': QuestPairPrompt[]
   'headset:hello': QuestHello & { host: string }
   'headset:bye': { host: string }
   'headset:stop': { host: string }
   'headset:toys': QuestToyCommand & { host: string }
+  'headset:play': { kind: 'deovr' | 'heresphere'; host: string; mediaId: number }
   'chaster:status': ChasterStatus
   'account:status': AccountStatus
   'browser:tabs': BrowserTab[]

@@ -12,6 +12,13 @@ interface ModelsState {
   clear: (id: string) => void
 }
 
+let catalog: Promise<ModelInfo[]> | null = null
+export const kinkyravenCatalog = (): Promise<ModelInfo[]> =>
+  (catalog ??= invoke('models:catalog').catch((e: unknown) => {
+    catalog = null
+    throw e
+  }))
+
 export const percent = (d: Download | undefined): number => (d?.status === 'running' ? Math.round((d.done / Math.max(1, d.total)) * 100) : 0)
 
 export const useModels = create<ModelsState>()((set, get) => {

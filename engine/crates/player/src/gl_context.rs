@@ -14,6 +14,7 @@ mod gpu {
     pub struct Section;
 
     impl Gpu {
+        #[cfg(test)]
         pub fn none() -> Gpu {
             Gpu
         }
@@ -27,7 +28,6 @@ pub use gpu::Gpu;
 
 impl GlContext {
     pub fn new() -> Result<GlContext, String> {
-        let _gpu = Gpu::none().section();
         Ok(GlContext { ctx: platform::Context::new()? })
     }
 

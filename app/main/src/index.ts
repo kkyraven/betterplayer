@@ -10,12 +10,15 @@ import { Library } from './library'
 import { logEvent } from './log'
 import { portableDataDir } from './portable'
 import { RemoteClient } from './remote/client'
+import { QuestPairing } from './remote/pairing'
 import { RemoteServer } from './remote/server'
-import { ACCOUNT_URL_DEFAULT } from '@shared/account'
+import { ACCOUNT_URL_DEFAULT, VR_FREE_MAX_MS, vrUnlimited } from '@shared/account'
 import { SettingsStore } from './settings/store'
 import { startStashApp } from './stash-app'
 import { Updater } from './update'
 import { VrHost } from './vr/host'
+import { servePortalThumb } from './library/portals'
+import { PORTAL_HEADERS } from '@shared/portals'
 import { syncNativeTheme, watchNativeTheme } from './theme'
 
 if (process.platform === 'darwin' && !app.isPackaged) {
@@ -157,6 +160,8 @@ function createWindow(store: SettingsStore, library: Library, remote: RemoteServ
       writeFileSync(screenshot, (await win.webContents.capturePage()).toPNG())
       const deck = vr.deckWindow
       if (deck) writeFileSync(`${screenshot.replace(/\.png$/i, '')}-deck.png`, (await deck.webContents.capturePage()).toPNG())
+      const library = vr.libraryWindow
+      if (library) writeFileSync(`${screenshot.replace(/\.png$/i, '')}-library.png`, (await library.webContents.capturePage()).toPNG())
       app.quit()
     }, Number(flag('seconds') ?? 4) * 1000)
   }
@@ -167,7 +172,14 @@ function createWindow(store: SettingsStore, library: Library, remote: RemoteServ
   return win
 }
 
-protocol.registerSchemesAsPrivileged([{ scheme: 'thumb', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }])
+protocol.registerSchemesAsPrivileged([{ scheme: 'thumb', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true } }])
+
+function readableAnywhere(res: Response): Response {
+  const headers = new Headers(res.headers)
+  headers.set('Access-Control-Allow-Origin', '*')
+  headers.set('Access-Control-Expose-Headers', Object.values(PORTAL_HEADERS).join(', '))
+  return new Response(res.body, { status: res.status, headers })
+}
 
 if (win32) app.setAppUserModelId('com.kinkyraven.betterplayer')
 
@@ -228,11 +240,14 @@ if (!app.requestSingleInstanceLock()) {
     library = lib
     const source = new RemoteClient(join(userData, 'remote-scripts'))
     client = source
-    protocol.handle('thumb', (request) => (source.active ? source.thumb(request.url, request.headers.get('range'), request.signal) : lib.serveThumb(request.url, request.headers.get('range'), request.signal)))
+    protocol.handle('thumb', (request) => {
+      if (new URL(request.url).host === 'portal') return servePortalThumb(lib, source, request.url, request.signal).then(readableAnywhere)
+      return source.active ? source.thumb(request.url, request.headers.get('range'), request.signal) : lib.serveThumb(request.url, request.headers.get('range'), request.signal)
+    })
     const libraryArg = flag('library')
     if (libraryArg && !lib.roots().some((r) => r.path === libraryArg)) lib.addRoot(libraryArg)
     const remotePort = Number(flag('remote'))
-    const server = new RemoteServer(lib, Number.isInteger(remotePort) ? remotePort : undefined)
+    const server = new RemoteServer(lib, Number.isInteger(remotePort) ? remotePort : undefined, new QuestPairing(join(userData, 'quest-pairing.json')))
     remote = server
     const acct = new Account((flag('account') ?? process.env.BP_ACCOUNT_URL ?? ACCOUNT_URL_DEFAULT).replace(/\/$/, ''), userData, lib, {
       os: process.platform === 'darwin' ? 'darwin' : win32 ? 'win32' : 'linux',
@@ -240,6 +255,7 @@ if (!app.requestSingleInstanceLock()) {
       version: app.getVersion(),
     })
     account = acct
+    server.setVrLimit(() => (vrUnlimited(acct.get().me) ? undefined : VR_FREE_MAX_MS))
     const upd = new Updater((state) => {
       if (win) send(win, 'update:state', state)
     })

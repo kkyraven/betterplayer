@@ -18,8 +18,18 @@ export interface Me {
   friendCode: string
   premium: boolean
   agenticLover?: boolean
+  itch?: boolean
+  vr?: boolean
   admin: boolean
 }
+
+export const ITCH_URL = 'https://kinkyraven.itch.io/betterplayer'
+
+export const VR_FREE_MAX_MS = 5 * 60_000 + 999
+
+export const vrUnlimited = (me: Me | null): boolean => me?.premium === true || me?.vr === true
+
+export const vrAllowed = (me: Me | null, durationMs: number): boolean => durationMs <= VR_FREE_MAX_MS || vrUnlimited(me)
 
 export const isAdmin = (me: Me | null): boolean => me?.admin === true
 
@@ -51,7 +61,7 @@ export interface AccountStatus {
 
 export const SIGNED_OUT: AccountStatus = { state: 'out', me: null, friends: NO_FRIENDS, stun: [], syncedAt: null }
 
-export const SYNC_VIDEO_KEYS = ['globalOffsetMs', 'axes', 'position', 'projection', 'frameGen', 'params'] as const
+export const SYNC_VIDEO_KEYS = ['globalOffsetMs', 'axes', 'position', 'projection', 'frameGen', 'params', 'passthrough'] as const
 type SyncKey = (typeof SYNC_VIDEO_KEYS)[number]
 
 export type SyncPayload = Pick<PerVideoSettings, SyncKey>
@@ -70,19 +80,21 @@ export function syncPayload(video: PerVideoSettings): SyncPayload {
   if (video.projection !== undefined) out.projection = video.projection
   if (video.frameGen !== undefined) out.frameGen = video.frameGen
   if (video.params !== undefined) out.params = video.params
+  if (video.passthrough !== undefined) out.passthrough = video.passthrough
   return out as SyncPayload
 }
 
 export function mergeSynced(local: PerVideoSettings | null, remote: SyncPayload): PerVideoSettings {
   const base: PerVideoSettings = local ?? { globalOffsetMs: 0, axes: {} }
   const out: PerVideoSettings = { ...base, globalOffsetMs: remote.globalOffsetMs, axes: remote.axes }
-  for (const key of ['position', 'projection', 'frameGen', 'params'] as const) {
+  for (const key of ['position', 'projection', 'frameGen', 'params', 'passthrough'] as const) {
     if (remote[key] === undefined) delete out[key]
   }
   if (remote.position !== undefined) out.position = remote.position
   if (remote.projection !== undefined) out.projection = remote.projection
   if (remote.frameGen !== undefined) out.frameGen = remote.frameGen
   if (remote.params !== undefined) out.params = remote.params
+  if (remote.passthrough !== undefined) out.passthrough = remote.passthrough
   return out
 }
 

@@ -6,18 +6,21 @@ import { pathToFileURL } from 'node:url'
 import { net } from 'electron'
 import type { AxisId } from '@shared/axes'
 import { isMediaPath, isVideoPath, type GeneratedResult, type GeneratedScriptRow, type IpcEvent, type IpcEvents } from '@shared/ipc'
-import type { DropResult, FolderNode, LibraryChange, LibraryCounts, LibraryRoot, MediaDetail, MediaIndexRow, MediaPage, MediaQuery, MediaRow, Playlist, ScanProgress, Tag, TagUndo } from '@shared/library'
+import type { DropResult, FolderNode, LibraryChange, LibraryCounts, LibraryRoot, MediaDetail, MediaIndexRow, MediaMark, MediaPage, MediaQuery, MediaRow, Playlist, ScanProgress, Tag, TagUndo } from '@shared/library'
 import type { MatcherReport, MatcherResolveResult, OrphanSet } from '@shared/matcher'
 import type { ScriptSet } from '@shared/peer'
 import { isUrl, type RemoteLoad, type ServerInput } from '@shared/remote'
 import { contains } from '../remote/paths'
 import type { PerVideoSettings } from '@shared/settings'
+import type { PassthroughSettings, ResolvedPassthrough } from '@shared/passthrough'
 import { needsLook, resolveProjection, type Projection, type ResolvedProjection } from '@shared/projection'
 import { hasOverrides, withoutOverrides } from '@shared/trackingRules'
 import { isEmptyPerVideo, readPerVideo } from '../settings/store'
 import { LibraryDb, type TagRow, type VideoSettingsRow } from './db'
 import { EditorStore } from '../editor'
 import { lookAtFile, LookQueue } from './look'
+import { KeyedPosters, POSTER_WIDTH, posterKeyed } from './keyPoster'
+import { Passthrough } from './passthrough'
 import { buildReport, resolveSet } from './matcher'
 import { probe } from './probe'
 import { Scanner, type JobSink } from './scanner'
@@ -30,7 +33,8 @@ import { StashAdapter } from './servers/stash'
 import { RemoteWrites } from './servers/writes'
 import { TagQueue, type TagJob } from './tagger'
 import type { SessionRun, SessionSetup } from '@shared/session'
-import { ThumbQueue } from './thumbs'
+import { ThumbQueue, viewKey, viewScale, type View } from './thumbs'
+import { PortalStills, type PortalSource } from './portals'
 
 export type Emitter = <E extends IpcEvent>(event: E, payload: IpcEvents[E]) => void
 
@@ -114,6 +118,10 @@ export class Library {
   private readonly thumbs: ThumbQueue
   private readonly tagger: TagQueue
   private readonly looks: LookQueue
+  private readonly passthroughs: Passthrough
+  private readonly keyedPosters: KeyedPosters
+  readonly portals: PortalStills
+  private passthroughModel: () => boolean = () => false
   private readonly jobs: JobSink
   private readonly scanner: Scanner
   private readonly scriptScanner: ScriptScanner
@@ -138,7 +146,18 @@ export class Library {
     this.writeBack = new RemoteWrites(this.db, (root) => this.adapter(root), () => this.changed({ kind: 'meta' }))
     this.editor = new EditorStore(this.db)
     this.looks = new LookQueue(this.db, (id) => this.thumbs.file('strip', id), (row) => this.syncKind(row.path, this.videoSettings(row.path)?.projection))
-    this.thumbs = new ThumbQueue(options.dataDir, this.db, { done: (id) => { this.thumbsDone.add(id); this.looks.enqueue(id) }, progress: this.progressChanged })
+    this.passthroughs = new Passthrough(this.db, {
+      projection: async (path) => (await this.projection(path)).projection,
+      headers: (path) => this.serverHeaders(path),
+      modelReady: () => this.passthroughModel(),
+    })
+    this.keyedPosters = new KeyedPosters(options.dataDir)
+    this.portals = new PortalStills(join(options.dataDir, 'portals'), { source: (id) => this.portalSource(id), poster: (id) => this.poster(id) })
+    this.thumbs = new ThumbQueue(options.dataDir, this.db, {
+      done: (id) => { this.thumbsDone.add(id); this.looks.enqueue(id) },
+      progress: this.progressChanged,
+      view: (id) => this.imageView(id),
+    })
     const scripts = this.scriptScanner = new ScriptScanner(options.enginePath)
     this.servers = new ServerSync(this.db, scripts, join(options.dataDir, 'remote'), (id) => this.thumbs.file('thumb', id), (id) => this.thumbs.file('strip', id), {
       changed: this.serverChanged,
@@ -159,12 +178,13 @@ export class Library {
     this.jobs = {
       enqueue: (job) => {
         this.thumbs.enqueue(job)
+        this.refreshImages(job.id)
         if (job.tags) this.tagger.enqueue(job)
         if (job.look) this.looks.enqueue(job.id)
       },
       remove: async (ids) => {
         this.tagger.remove(ids)
-        await this.thumbs.remove(ids)
+        await Promise.all([this.thumbs.remove(ids), this.keyedPosters.remove(ids)])
       },
     }
     this.scanner = new Scanner(
@@ -257,6 +277,7 @@ export class Library {
     this.writeBack.close()
     this.tagger.close()
     this.looks.close()
+    this.passthroughs.close()
     this.scanner.close()
     this.servers.close()
     this.posterDecoder.close()
@@ -361,6 +382,13 @@ export class Library {
     return { scriptsPath: this.servers.standIn(row.id), headers: headerList(this.adapter(server).headers) }
   }
 
+  private serverHeaders(path: string): Record<string, string> | undefined {
+    if (!isUrl(path)) return undefined
+    const row = this.db.mediaRowByPath(path)
+    const server = row ? this.db.server(row.rootId) : null
+    return server ? this.adapter(server).headers : undefined
+  }
+
   private adapter(server: NonNullable<ReturnType<LibraryDb['server']>>): Adapter {
     let adapter = this.adapters.get(server.id)
     if (!adapter) {
@@ -438,7 +466,7 @@ export class Library {
 
   media(id: number): MediaDetail | null {
     const row = this.db.mediaRow(id)
-    return row ? { ...row, ...this.db.metadata(id), scripts: this.db.scripts(id) } : null
+    return row ? { ...row, ...this.db.metadata(id), scripts: this.db.scripts(id), marks: this.db.marks(id) } : null
   }
 
   suggestions(id: number): MediaRow[] {
@@ -447,12 +475,12 @@ export class Library {
 
   byPath(path: string): MediaDetail | null {
     const row = this.db.mediaRowByPath(path)
-    return row ? { ...row, ...this.db.metadata(row.id), scripts: this.db.scripts(row.id) } : null
+    return row ? { ...row, ...this.db.metadata(row.id), scripts: this.db.scripts(row.id), marks: this.db.marks(row.id) } : null
   }
 
   byTitle(title: string): MediaDetail | null {
     const row = this.db.mediaRowByTitle(title)
-    return row ? { ...row, ...this.db.metadata(row.id), scripts: this.db.scripts(row.id) } : null
+    return row ? { ...row, ...this.db.metadata(row.id), scripts: this.db.scripts(row.id), marks: this.db.marks(row.id) } : null
   }
 
   folders(): FolderNode[] {
@@ -467,6 +495,11 @@ export class Library {
     this.db.setRating(id, Math.max(0, Math.min(5, Math.round(rating))))
     this.changed({ kind: 'meta' })
     this.queueWrites([id])
+  }
+
+  setHeadsetMarks(id: number, marks: MediaMark[]) {
+    this.db.setMarks(id, 'headset', marks)
+    this.changed({ kind: 'meta' })
   }
 
   setTags(id: number, tags: string[]) {
@@ -670,7 +703,43 @@ export class Library {
       this.db.setProjection(row.id, kind)
       this.changed({ kind: 'meta' })
     }
+    this.refreshImages(row.id)
     return auto
+  }
+
+  private imageView(id: number): View | null {
+    const row = this.db.projectionFactsById(id)
+    if (!row || row.remote) return null
+    const projection = this.videoSettings(row.path)?.projection ?? resolveProjection(row.input).projection
+    return { projection, width: row.input.width, height: row.input.height }
+  }
+
+  portalSource(id: number): PortalSource | null {
+    const row = this.db.mediaRow(id)
+    const facts = this.db.projectionFactsById(id)
+    if (!row || !facts) return null
+    return { path: row.path, mtimeMs: row.mtime, durationMs: row.durationMs, view: this.imageView(id), keyed: row.keyed === true, remote: facts.remote }
+  }
+
+  private refreshImages(id: number) {
+    const row = this.db.projectionFactsById(id)
+    if (!row || row.remote) return
+    const key = viewKey(this.imageView(id))
+    const thumb = row.thumb === 'ready' && !row.cover && row.views.thumb !== key
+    const strip = row.strip === 'ready' && row.views.strip !== key
+    if (thumb || strip) this.thumbs.enqueue({ id, path: row.path, durationMs: row.durationMs, cover: null, thumb, strip })
+  }
+
+  setPassthroughModel(ready: () => boolean) {
+    this.passthroughModel = ready
+  }
+
+  passthrough(path: string, saved: PassthroughSettings | undefined, waitMs?: number): Promise<ResolvedPassthrough> {
+    return this.passthroughs.resolve(path, saved, waitMs)
+  }
+
+  samplePassthrough(path: string, timeSec: number, u: number, v: number): Promise<number | null> {
+    return this.passthroughs.sample(path, timeSec, u, v)
   }
 
   videoSettings(key: string): PerVideoSettings | null {
@@ -680,12 +749,15 @@ export class Library {
 
   setVideoSettings(key: string, settings: PerVideoSettings) {
     const entry = readPerVideo(settings)
+    const before = JSON.stringify(this.videoSettings(key)?.passthrough)
     if (isEmptyPerVideo(entry)) this.db.removeVideoSettings(key)
     else {
       const { position, ...rest } = entry
       this.db.setVideoSettings(key, { positionMs: position ?? null, settings: JSON.stringify(rest) }, Date.now())
     }
     this.syncKind(key, entry.projection)
+    const id = JSON.stringify(entry.passthrough) === before ? null : this.db.passthroughFacts(key)?.id
+    if (id) this.thumbsDone.add(id)
   }
 
   overrideCount(): number {
@@ -786,6 +858,21 @@ export class Library {
     return this.thumbs.file('thumb', id)
   }
 
+  async poster(id: number): Promise<{ file: string; type: 'image/jpeg' | 'image/webp' }> {
+    const jpg = { file: this.thumbs.file('thumb', id), type: 'image/jpeg' as const }
+    const row = this.db.mediaRow(id)
+    if (!row?.keyed) return jpg
+    const saved = this.videoSettings(row.path)?.passthrough
+    const resolved = await this.passthrough(row.path, saved)
+    const facts = this.db.passthroughFacts(row.path)
+    if (!facts || !posterKeyed(saved, facts.name, facts.auto)) return jpg
+    const { projection } = await this.projection(row.path)
+    const view = this.db.projectionFactsById(id)?.views.thumb ? this.imageView(id) : null
+    const scale = view ? viewScale(view, POSTER_WIDTH) : row.width > 0 ? POSTER_WIDTH / row.width : 1
+    const file = await this.keyedPosters.file(id, jpg.file, { key: resolved.key, feather: resolved.feather, featherPx: resolved.featherPx * scale, layout: view ? 'mono' : projection.layout })
+    return file ? { file, type: 'image/webp' } : jpg
+  }
+
   stripFile(id: number): string {
     return this.thumbs.file('strip', id)
   }
@@ -822,9 +909,10 @@ export class Library {
     const kind = hostname === 'media' ? 'thumb' : hostname === 'strip' ? 'strip' : null
     if (!kind || !Number.isInteger(id)) return new Response(null, { status: 404 })
     try {
-      const file = await net.fetch(pathToFileURL(this.thumbs.file(kind, id)).toString())
+      const image = kind === 'thumb' ? await this.poster(id) : { file: this.thumbs.file('strip', id), type: 'image/jpeg' }
+      const file = await net.fetch(pathToFileURL(image.file).toString())
       if (!file.ok) return new Response(null, { status: 404 })
-      return new Response(file.body, { headers: { 'Content-Type': 'image/jpeg', 'Cache-Control': 'public, max-age=31536000, immutable' } })
+      return new Response(file.body, { headers: { 'Content-Type': image.type, 'Cache-Control': 'public, max-age=31536000, immutable' } })
     } catch {
       return new Response(null, { status: 404 })
     }

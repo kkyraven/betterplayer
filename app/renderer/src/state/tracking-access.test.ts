@@ -14,7 +14,7 @@ vi.mock('@/engine/client', () => ({ engine: native, models: () => [
   { id: DEFAULT_MODELS.music, kind: 'music', files: [{ file: 'music.onnx' }, { file: 'music.json' }] },
   { id: VARIATION, kind: 'music', files: [{ file: 'var.onnx' }, { file: 'var.json' }] },
 ] }))
-vi.mock('@/ipc', () => ({ invoke: vi.fn(async (channel: string) => channel === 'models:dir' ? '/models' : Object.fromEntries(['motion.onnx', 'motion.json', 'music.onnx', 'music.json', 'var.onnx', 'var.json'].map((file) => [file, { path: `/models/${file}` }]))), on: vi.fn() }))
+vi.mock('@/ipc', () => ({ invoke: vi.fn(async (channel: string) => channel === 'models:dir' ? '/models' : channel === 'models:catalog' ? [] : Object.fromEntries(['motion.onnx', 'motion.json', 'music.onnx', 'music.json', 'var.onnx', 'var.json'].map((file) => [file, { path: `/models/${file}` }]))), on: vi.fn() }))
 vi.mock('./audio', () => ({ releaseAudio: vi.fn(), ensureFullAudio: vi.fn(() => Promise.resolve()), ensureAudio: vi.fn() }))
 vi.mock('@/screens/browser/StartPage', () => ({ siteName: vi.fn() }))
 vi.mock('./browser', () => ({ useBrowser: { subscribe: vi.fn() }, feedColour: vi.fn(), subscribeFrames: vi.fn() }))

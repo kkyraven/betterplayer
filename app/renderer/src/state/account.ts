@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { SIGNED_OUT, type AccountStatus } from '@shared/account'
+import { SIGNED_OUT, type AccountStatus, type Me } from '@shared/account'
 import { invoke, on } from '@/ipc'
 import { ipcMessage } from '@/lib/errors'
 import { t } from './i18n'
@@ -35,13 +35,15 @@ export function startAccount(): () => void {
 }
 
 export const isPremium = (s: AccountStore) => s.status.me?.premium === true
+export const isSubscriber = (s: AccountStore) => isPremium(s) && s.status.me?.itch !== true
 export const isFree = (s: AccountStore) => s.status.state === 'out' || (s.status.me !== null && !s.status.me.premium)
+export const isUnsubscribed = (s: AccountStore) => isFree(s) || s.status.me?.itch === true
 
-export async function checkSupporter(): Promise<string | null> {
+export async function checkSupporter(unlocked: (me: Me | null) => boolean = (me) => me?.premium === true): Promise<string | null> {
   try {
     await invoke(useAccount.getState().status.me ? 'account:refresh' : 'account:login')
     const account = useAccount.getState().status
-    return account.error ?? (account.me?.premium ? null : t('account.notSubscribed'))
+    return account.error ?? (unlocked(account.me) ? null : t('account.notSubscribed'))
   } catch (error) {
     return ipcMessage(error)
   }

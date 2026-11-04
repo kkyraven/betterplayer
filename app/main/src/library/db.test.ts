@@ -185,6 +185,25 @@ describe('suggestions', () => {
   })
 })
 
+it('filters by every one of several exact tags (headset chips)', () => {
+  const db = new LibraryDb(':memory:')
+  try {
+    const rootId = db.addRoot('/fictional').id
+    const add = (n: number, tags: string[]) => {
+      const id = db.upsertMedia({ rootId, path: `/fictional/${n}.mp4`, title: `${n}`, folder: '', size: 1, mtime: 1, durationMs: 1000, width: 100, height: 100, codec: '', projection: 'flat' }, n)
+      db.setTags(id, tags)
+      return id
+    }
+    const both = add(1, ['rain', 'night'])
+    add(2, ['rain'])
+    add(3, ['rainy', 'night'])
+    const page = db.query({ section: 'all', sort: 'name', desc: false, filters: { tags: ['rain', 'night'] }, limit: 10, offset: 0 })
+    expect(page.rows.map((r) => r.id)).toEqual([both])
+  } finally {
+    db.close()
+  }
+})
+
 describe('tag manager edits', () => {
   const library = () => {
     const db = new LibraryDb(':memory:')

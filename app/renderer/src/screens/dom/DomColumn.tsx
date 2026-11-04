@@ -4,7 +4,7 @@
 import { ArrowUp, Brain, CirclePause, CirclePlay, FastForward, Flame, ListOrdered, Square, X, type LucideIcon } from 'lucide-react'
 import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
 import { DOM_LEVEL_MAX } from '@shared/dom'
-import { isPremium, useAccount } from '@/state/account'
+import { isSubscriber, useAccount } from '@/state/account'
 import { useDom, type DomActIcon } from '@/state/dom'
 import { useT } from '@/state/i18n'
 import { Portrait } from './Portrait'
@@ -42,7 +42,7 @@ export function DomColumn() {
   const thinking = useDom((s) => s.thinking)
   const freeSeconds = useDom((s) => s.account.freeSecondsLeft)
   const provider = useDom((s) => s.ai.provider)
-  const premium = useAccount(isPremium)
+  const subscribed = useAccount(isSubscriber)
   const { stop, send } = useDom.getState()
   const [draft, setDraft] = useState('')
   const log = useRef<HTMLDivElement>(null)
@@ -55,7 +55,7 @@ export function DomColumn() {
     send(draft)
     setDraft('')
   }
-  const showFree = !premium && provider === 'agenticlover' && freeSeconds !== null
+  const showFree = !subscribed && provider === 'agenticlover' && freeSeconds !== null
   return (
     <aside className="dom-col" aria-label={dom.name}>
       <div className="hd">

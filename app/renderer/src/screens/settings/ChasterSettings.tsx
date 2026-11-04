@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { fmtSpan } from '@shared/chaster'
 import { Field } from '@/components/ui/Field'
 import { useChaster, useMinuteClock } from '@/state/chaster'
-import { useGooner } from '@/state/gooner'
+import { useCensor } from '@/state/censor'
 import { useT } from '@/state/i18n'
 import { SettingsLink } from './SettingsSection'
 import { useSettings } from '@/state/settings'
@@ -12,7 +12,7 @@ export function ChasterSettings() {
   const token = useSettings((s) => s.settings?.chaster.token ?? '')
   const update = useSettings((s) => s.update)
   const status = useChaster((s) => s.status)
-  const held = useGooner((s) => s.locked && s.gooner.lock?.kind === 'chaster')
+  const held = useCensor((s) => s.locked && s.censor.lock?.kind === 'chaster')
   const now = useMinuteClock()
   const [draft, setDraft] = useState(token)
 
@@ -54,7 +54,7 @@ export function ChasterSettings() {
               autoComplete="off"
               value={draft}
               disabled={held}
-              title={held ? t('settings.chaster.held') : undefined}
+              title={held ? t('settings.chaster.censorHeld') : undefined}
               onChange={(e) => setDraft(e.target.value)}
               onBlur={(e) => commit(e.target.value)}
               onKeyDown={(e) => {
@@ -63,7 +63,7 @@ export function ChasterSettings() {
             />
           </Field>
         </div>
-        {held && <div className="prow sub">{t('settings.chaster.held')}</div>}
+        {held && <div className="prow sub">{t('settings.chaster.censorHeld')}</div>}
         <div className="prow">
           <span className="lbl">{t('settings.chaster.status')}</span>
           <span className="spacer" />
@@ -78,7 +78,7 @@ export function ChasterSettings() {
           </div>
         )}
       </div>
-      <SettingsLink page="gooner" />
+      <SettingsLink page="censor" />
     </>
   )
 }

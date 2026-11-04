@@ -3,13 +3,13 @@ import { memo, type KeyboardEvent, type MouseEvent, type PointerEvent as ReactPo
 import type { MediaRow as MediaRowData } from '@shared/library'
 import { cx } from '@/lib/cx'
 import { fmtDuration } from '@/lib/format'
-import { useT } from '@/state/i18n'
 import { useSettings } from '@/state/settings'
 import { AxisChips } from './AxisChips'
 import { HeatStrip } from './HeatStrip'
 import { resolutionLabel } from './MediaCard'
 import { Rating } from './Rating'
 import { ThumbnailImage } from './ThumbnailImage'
+import { VrBadge } from './VrBadge'
 import { SearchMatch } from './SearchMatch'
 import { useHoverPreview } from './useHoverPreview'
 import { HoverPreview } from './HoverPreview'
@@ -31,12 +31,10 @@ interface Props {
 const STRIP_FRAMES = 20
 
 export const MediaRow = memo(function MediaRow({ row, selected = false, condensed = false, onSelect, onPlay, menu, checked, order, onPointerDown, onContextMenu }: Props) {
-  const t = useT()
   const axisBadges = useSettings((s) => s.settings?.library.axisBadges) ?? true
   const hover = useHoverPreview(row, condensed)
   const { frame } = hover
   const watched = row.watchedMs !== null && row.durationMs > 0 ? Math.min(1, row.watchedMs / row.durationMs) : null
-  const projection = row.projection !== 'flat' ? t('media.vr', { degrees: row.projection === 'equirect360' ? '360' : '180' }) : null
 
   const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.key === 'Enter') {
@@ -65,7 +63,7 @@ export const MediaRow = memo(function MediaRow({ row, selected = false, condense
     >
       {order}
       <div className="thumb" {...hover.handlers}>
-        {row.thumb && <ThumbnailImage className="poster" src={row.thumb} alt="" draggable={false} loading="lazy" decoding="async" />}
+        {row.thumb && <ThumbnailImage className="poster" src={row.thumb} keyed={row.keyed} alt="" draggable={false} loading="lazy" decoding="async" />}
         {selecting && <span className="sel">{checked && <Check />}</span>}
         {!condensed && row.strip && frame !== null && (
           <div className="strip" style={{ backgroundImage: `url(${row.strip})`, backgroundPositionX: `${(frame / (STRIP_FRAMES - 1)) * 100}%` }} />
@@ -76,9 +74,9 @@ export const MediaRow = memo(function MediaRow({ row, selected = false, condense
             <AxisChips axes={row.axes} />
           </div>
         )}
-        {!condensed && projection && (
+        {!condensed && row.projection !== 'flat' && (
           <div className="tr">
-            <span className="badge-res">{projection}</span>
+            <VrBadge projection={row.projection} />
           </div>
         )}
         {!condensed && watched !== null && (
@@ -93,7 +91,7 @@ export const MediaRow = memo(function MediaRow({ row, selected = false, condense
             {row.pinned && <Pin />}
             {row.title}
           </div>
-          <span className="ax">{projection ?? row.axes.join(' ')}</span>
+          <span className="ax">{row.projection !== 'flat' ? <VrBadge projection={row.projection} /> : row.axes.join(' ')}</span>
           <HeatStrip heat={row.heat} />
           <span className="res">{row.height > 0 ? resolutionLabel(row.height) : ''}</span>
           <span className="d">{fmtDuration(row.durationMs)}</span>

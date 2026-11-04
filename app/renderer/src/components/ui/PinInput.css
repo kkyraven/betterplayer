@@ -1,0 +1,16 @@
+.pin-input { position: relative; display: flex; gap: 8px; }
+.pin-box {
+  width: 44px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  border: 1px solid var(--line-2);
+  background: rgba(var(--ink), 0.05);
+  font: 600 22px var(--mono);
+  transition: border-color 120ms var(--ease);
+}
+.pin-box.filled { border-color: rgba(var(--accent-rgb), 0.6); }
+.pin-input:focus-within .pin-box.next { border-color: var(--accent); }
+.pin-input.invalid .pin-box { border-color: var(--danger); }
+.pin-input input { position: absolute; inset: 0; width: 100%; opacity: 0; border: 0; padding: 0; font-size: 16px; caret-color: transparent; cursor: text; }

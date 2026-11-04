@@ -21,7 +21,7 @@ vi.mock('./settings', async () => {
   return { useSettings: { getState: () => ({ settings: defaultSettings(), addRecent: vi.fn(async () => {}) }) } }
 })
 vi.mock('./subtitles', () => ({ useSubtitles: { getState: () => ({ load: vi.fn(), clear: vi.fn() }) } }))
-vi.mock('./tracking', () => ({ useTracking: { getState: () => ({ stop: vi.fn(), autoStart: vi.fn(async () => {}) }) } }))
+vi.mock('./tracking', () => ({ useTracking: { getState: () => ({ stop: vi.fn(), autoStart: vi.fn(async () => {}), setBasePlaybackRate: vi.fn() }) } }))
 vi.mock('./ui', () => ({ useUi: { getState: () => ({ setScreen: mocks.setScreen, mediaCentre: false }) } }))
 vi.mock('@/engine/client', () => ({ applyEnhance: vi.fn(), warm: vi.fn(), engine: {
   setAxis: vi.fn(), setGlobalOffsetMs: vi.fn(), setVolume: vi.fn(), setMuted: vi.fn(),

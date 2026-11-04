@@ -72,7 +72,7 @@ export function RemoteSettings() {
             />
           </Field>
         </div>
-        {status?.running && status.urls.length > 0 && (
+        {remote?.enabled && status?.running && status.urls.length > 0 && (
           <div className="prow">
             <span className="urls">
               {status.urls.map((url) => (

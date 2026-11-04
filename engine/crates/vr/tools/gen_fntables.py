@@ -7,7 +7,7 @@ capi_path, hdr_path, out_path, tag = sys.argv[1:5]
 capi = open(capi_path, encoding='utf-8').read()
 hdr = open(hdr_path, encoding='utf-8').read()
 
-IFACES = ['IVRSystem', 'IVRCompositor', 'IVROverlay', 'IVRChaperone', 'IVRInput']
+IFACES = ['IVRSystem', 'IVRCompositor', 'IVROverlay', 'IVRChaperone', 'IVRInput', 'IVRApplications']
 
 # ---------- typedef / enum / struct tables from the C header ----------
 PRIM = {
@@ -244,7 +244,7 @@ w('pub const k_ulOverlayHandleInvalid: u64 = 0;')
 w('pub const k_ulInvalidActionHandle: u64 = 0;')
 w('pub const k_ulInvalidActionSetHandle: u64 = 0;')
 w('pub const k_ulInvalidInputValueHandle: u64 = 0;')
-for v in ['IVRSystem', 'IVRCompositor', 'IVROverlay', 'IVRChaperone', 'IVRInput']:
+for v in IFACES:
     mm = re.search(r'static const char \* %s_Version = "(\w+)";' % v, capi)
     w('pub const %s_Version: &str = "%s";' % (v, mm.group(1)))
     w('/// Pass to VR_GetGenericInterface to receive a *const VR_%s_FnTable (NUL-terminated).' % v)
@@ -337,7 +337,7 @@ WANT_ALL = ['EVREye', 'ETextureType', 'EColorSpace', 'ETrackingUniverseOrigin', 
             'EVROverlayError', 'VROverlayInputMethod', 'VROverlayFlags', 'EVRButtonId', 'EVRApplicationType',
             'EVRSubmitFlags', 'ETrackingResult', 'ETrackedDeviceClass', 'ETrackedControllerRole',
             'EVRInitError', 'VROverlayTransformType', 'EDeviceActivityLevel', 'EVRState', 'EVRMouseButton',
-            'EVRInputError']
+            'EVRInputError', 'EVRApplicationError']
 WANT_SOME = {
     'EVREventType': ['VREvent_None', 'VREvent_TrackedDeviceActivated', 'VREvent_TrackedDeviceDeactivated',
                      'VREvent_TrackedDeviceUserInteractionStarted', 'VREvent_TrackedDeviceUserInteractionEnded',
@@ -353,7 +353,8 @@ WANT_SOME = {
                      'VREvent_Input_ActionManifestLoadFailed', 'VREvent_Input_BindingsUpdated'],
     'ETrackedDeviceProperty': ['Prop_TrackingSystemName_String', 'Prop_ModelNumber_String',
                                'Prop_DisplayFrequency_Float', 'Prop_SecondsFromVsyncToPhotons_Float',
-                               'Prop_UserIpdMeters_Float', 'Prop_ManufacturerName_String'],
+                               'Prop_UserIpdMeters_Float', 'Prop_ManufacturerName_String',
+                               'Prop_ActualTrackingSystemName_String', 'Prop_ControllerType_String'],
 }
 enum_rs = []
 for e in sorted(enum_refs | set(WANT_ALL) | set(WANT_SOME)):

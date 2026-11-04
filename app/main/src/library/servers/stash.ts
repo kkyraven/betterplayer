@@ -1,9 +1,10 @@
 import { t } from '../../i18n'
 import { basename } from 'node:path'
+import type { MediaMark } from '@shared/library'
 import { resolveProjection } from '@shared/projection'
 import type { ServerRoot } from '../db'
 import type { Adapter, RemoteEntry, RemoteGroup, RemoteScene, RemoteWrite } from './adapter'
-import { baseUrl, request } from './http'
+import { baseUrl, HttpError, request } from './http'
 
 const CHUNK = 100
 const TAGS_TTL_MS = 60_000
@@ -25,6 +26,14 @@ interface Scene extends Listed {
   studio: { name: string } | null
   details: string | null
   performers: { id: string; name: string; alias_list: string[] }[]
+  scene_markers?: Marker[]
+}
+
+interface Marker {
+  title: string
+  seconds: number
+  end_seconds?: number | null
+  primary_tag: { name: string }
 }
 
 interface Tag {
@@ -33,10 +42,19 @@ interface Tag {
   aliases: string[]
 }
 
-const SCENE_FIELDS = `id title date created_at updated_at rating100 interactive
+const sceneFields = (markerEnds: boolean) => `id title date created_at updated_at rating100 interactive
   paths { stream funscript screenshot preview sprite vtt }
   files { path duration width height size video_codec }
-  tags { name } studio { name } details performers { id name alias_list }`
+  tags { name } studio { name } details performers { id name alias_list }
+  scene_markers { title seconds ${markerEnds ? 'end_seconds ' : ''}primary_tag { name } }`
+
+export function stashMarks(markers: Marker[]): MediaMark[] {
+  return markers.map((m) => {
+    const startMs = Math.max(0, Math.round(m.seconds * 1000))
+    const endMs = typeof m.end_seconds === 'number' ? Math.round(m.end_seconds * 1000) : 0
+    return { name: m.title.trim() || m.primary_tag.name.trim(), startMs, endMs: endMs > startMs ? endMs : null }
+  }).sort((a, b) => a.startMs - b.startMs)
+}
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null
 
@@ -55,6 +73,7 @@ export class StashAdapter implements Adapter {
   readonly headers: Record<string, string>
   private readonly base: string
   private tagCache: { at: number; byName: Map<string, string> } | null = null
+  private markerEnds = true
 
   constructor(root: Pick<ServerRoot, 'url' | 'secret'>) {
     this.base = baseUrl(root.url)
@@ -139,11 +158,23 @@ export class StashAdapter implements Adapter {
     const changed = all.filter((s) => known.get(s.id) !== s.updated_at)
     for (let i = 0; i < changed.length; i += CHUNK) {
       const ids = changed.slice(i, i + CHUNK).map((s) => s.id)
-      const page = await this.gql<{ findScenes: { scenes: Scene[] } }>(`query($ids: [ID!], $filter: FindFilterType) { findScenes(ids: $ids, filter: $filter) { scenes { ${SCENE_FIELDS} } } }`, {
+      const scenes = await this.scenePage(ids)
+      yield scenes.map((s) => ({ key: s.id, stamp: s.updated_at, scene: this.scene(s) })).filter((e): e is RemoteEntry => e.scene !== null)
+    }
+  }
+
+  private async scenePage(ids: string[]): Promise<Scene[]> {
+    try {
+      const page = await this.gql<{ findScenes: { scenes: Scene[] } }>(`query($ids: [ID!], $filter: FindFilterType) { findScenes(ids: $ids, filter: $filter) { scenes { ${sceneFields(this.markerEnds)} } } }`, {
         ids,
         filter: { per_page: -1 },
       })
-      yield page.findScenes.scenes.map((s) => ({ key: s.id, stamp: s.updated_at, scene: this.scene(s) })).filter((e): e is RemoteEntry => e.scene !== null)
+      return page.findScenes.scenes
+    } catch (e) {
+      const unknownField = (e instanceof HttpError && (e.status === 422 || e.status === 400)) || (e instanceof Error && e.message.includes('end_seconds'))
+      if (!this.markerEnds || !unknownField) throw e
+      this.markerEnds = false
+      return this.scenePage(ids)
     }
   }
 
@@ -167,6 +198,7 @@ export class StashAdapter implements Adapter {
       projection: resolveProjection({ name: fileName, width: file.width ?? 0, height: file.height ?? 0 }).projection,
       rating: s.rating100 === null ? 0 : Math.max(0, Math.min(5, Math.round(s.rating100 / 20))),
       tags: s.tags.map((t) => t.name),
+      marks: stashMarks(s.scene_markers ?? []),
       description: s.details ?? '',
       performers: (s.performers ?? []).map((p) => ({ key: p.id, name: p.name, aliases: p.alias_list ?? [] })),
       filename: fileName,

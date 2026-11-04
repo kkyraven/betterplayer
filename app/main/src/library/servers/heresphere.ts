@@ -1,6 +1,7 @@
 import { t } from '../../i18n'
 import { createHash } from 'node:crypto'
 import { resolveProjection, type Projection } from '@shared/projection'
+import type { MediaMark } from '@shared/library'
 import { normalizeSearch, type ImportedPerformer } from '@shared/search'
 import type { ServerRoot } from '../db'
 import type { Adapter, RemoteEntry, RemoteScene, RemoteWrite } from './adapter'
@@ -13,7 +14,7 @@ interface Index {
   library?: { name?: string; list?: string[] }[]
 }
 
-interface SceneTag {
+export interface SceneTag {
   name?: string
   start?: number
   end?: number
@@ -51,7 +52,21 @@ const STUDIO_PREFIX = /^studio:\s*/i
 
 const normalizedTags = (tags: string[]) => JSON.stringify([...new Set(tags.map((tag) => tag.trim().toLowerCase()))].sort())
 
-const isCuepoint = (t: SceneTag) => (t.start ?? 0) > 0 || t.end !== undefined || t.track !== undefined
+export const isTimed = (t: SceneTag, durationMs: number) => (t.start ?? 0) > 0 || ((t.end ?? 0) > 0 && durationMs > 0 && (t.end ?? 0) < durationMs - Math.max(2000, durationMs * 0.01))
+
+const isCuepoint = (t: SceneTag) => isTimed(t, 0) || t.end !== undefined || t.track !== undefined
+
+const METADATA = /^(#|@|%|(studio|talent|performer|category|tag|summary|summaryid|played|o-count|organized|resolution|rating|interactive)\s*:)/i
+
+export function tagMark(name: string, t: SceneTag): MediaMark {
+  const startMs = Math.max(0, Math.round(t.start ?? 0))
+  const endMs = Math.round(t.end ?? 0)
+  return { name: name.trim(), startMs, endMs: endMs > startMs ? endMs : null }
+}
+
+export function cuepointMarks(tags: SceneTag[], durationMs: number): MediaMark[] {
+  return tags.flatMap((t) => (typeof t.name === 'string' && t.name.trim() && !METADATA.test(t.name.trim()) && isTimed(t, durationMs) ? [tagMark(t.name, t)] : []))
+}
 
 function ownTagName(tag: SceneTag): string | null {
   if (typeof tag.name !== 'string') return null
@@ -189,6 +204,7 @@ export class HereSphereAdapter implements Adapter {
     const tags = doc.tags ?? []
     const title = typeof doc.title === 'string' && doc.title.trim() ? doc.title.trim() : url.split('/').filter(Boolean).pop() ?? url
     const addedAt = doc.dateAdded ? Date.parse(doc.dateAdded) : NaN
+    const durationMs = typeof doc.duration === 'number' && doc.duration > 0 ? Math.round(doc.duration) : 0
     return {
       key: url,
       title,
@@ -196,7 +212,7 @@ export class HereSphereAdapter implements Adapter {
       addedAt: Number.isFinite(addedAt) ? addedAt : Date.now(),
       mtime: Number.isFinite(addedAt) ? addedAt : 0,
       size: typeof best.size === 'number' ? best.size : 0,
-      durationMs: typeof doc.duration === 'number' && doc.duration > 0 ? Math.round(doc.duration) : 0,
+      durationMs,
       width: best.width ?? 0,
       height: best.height ?? best.resolution ?? 0,
       codec: '',
@@ -204,6 +220,7 @@ export class HereSphereAdapter implements Adapter {
       rating: sceneRating(doc),
       favourite: doc.isFavorite === true,
       tags: ownTags(tags),
+      marks: cuepointMarks(tags, durationMs),
       performers: performersOf(tags),
       description: typeof doc.description === 'string' ? doc.description : '',
       filename: '',

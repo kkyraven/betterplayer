@@ -30,6 +30,13 @@ describe('signing up for Agentic Lover', () => {
     answer(409, { message: 'Username already taken' })
     await expect(new AgenticLover(fakeDb()).register('you@example.com', 'you', 'long enough')).rejects.toThrow('Username already taken')
   })
+
+  it('names a wrong email or password, and passes other failures through', async () => {
+    answer(401, { message: 'Invalid credentials' })
+    await expect(new AgenticLover(fakeDb()).login('you@example.com', 'nope')).rejects.toThrow('dom:wrongLogin')
+    answer(500, { message: 'Database down' })
+    await expect(new AgenticLover(fakeDb()).login('you@example.com', 'nope')).rejects.toThrow('Database down')
+  })
 })
 
 describe('privateAddress', () => {

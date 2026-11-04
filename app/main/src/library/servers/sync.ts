@@ -188,6 +188,7 @@ export class ServerSync {
         if (scene.favourite !== undefined) this.db.setFavourite([id], scene.favourite)
       }
       if (!keepTags) this.db.setTags(id, scene.tags)
+      if (scene.marks) this.db.setMarks(id, 'server', scene.marks)
       this.db.setMetadata(id, { description: scene.description, performers: scene.performers, filename: scene.filename, studio: scene.folder })
       this.db.setRemoteStamp(id, stamp)
       if (scene.projection && (scene.projection.kind !== 'flat' || scene.projection.layout !== 'mono')) this.setProjection(scene.stream, scene.projection, now)

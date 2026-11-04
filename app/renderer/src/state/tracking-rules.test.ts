@@ -13,7 +13,7 @@ const native = vi.hoisted(() => ({
 const writes = vi.hoisted(() => vi.fn())
 const sidecar = vi.hoisted(() => ({ file: null as { text: string; stamp: string } | null }))
 vi.mock('@/engine/client', () => ({ engine: native, models: () => [] }))
-vi.mock('@/ipc', () => ({ invoke: vi.fn(async (channel: string) => (channel === 'hero:sidecar' ? sidecar.file : null)), on: vi.fn() }))
+vi.mock('@/ipc', () => ({ invoke: vi.fn(async (channel: string) => (channel === 'hero:sidecar' ? sidecar.file : channel === 'models:catalog' ? [] : null)), on: vi.fn() }))
 vi.mock('./audio', () => ({ releaseAudio: vi.fn(), ensureFullAudio: vi.fn(async () => {}), ensureAudio: vi.fn(async () => {}) }))
 vi.mock('@/screens/browser/StartPage', () => ({ siteName: vi.fn(() => '') }))
 vi.mock('./browser', () => ({ useBrowser: { subscribe: vi.fn(), getState: () => ({ tabs: [], capture: vi.fn(), setRegion: vi.fn(), setZone: vi.fn() }) }, feedColour: vi.fn(), subscribeFrames: vi.fn() }))

@@ -29,7 +29,7 @@ vi.mock('@/components/player/stage', () => ({ captureVideo: m.captureVideo }))
 vi.mock('@/ipc', () => ({ invoke: m.invoke }))
 vi.mock('@/engine/client', () => ({ engine: { haltSensation: m.haltSensation, applyPain: m.applyPain, stopPain: m.stopPain, painState: m.painState, stopSensation: m.stopSensation, startSensation: m.startSensation, resetSensation: m.resetSensation, clearPlaybackEnd: m.clearPlaybackEnd, state: () => ({ seekGeneration: m.live.seekGeneration }) } }))
 vi.mock('@/dom/level', () => ({ applyLevel: vi.fn(), reapplyRanges: vi.fn(), releaseLevel: vi.fn() }))
-vi.mock('./account', () => ({ isFree: () => false, isPremium: () => true, useAccount: { getState: () => ({}) } }))
+vi.mock('./account', () => ({ isUnsubscribed: () => false, isSubscriber: () => true, useAccount: { getState: () => ({}) } }))
 vi.mock('./library', () => ({ useLibrary: { getState: () => ({ tagEdits: m.tagEdits, setTags: m.setTags }) } }))
 vi.mock('./devices', () => ({ outputName: () => 'Toy', useDevices: { getState: () => ({ outputs: [], held: m.held }), subscribe: (fn: typeof m.devicesListener) => { m.devicesListener = fn; return () => { m.devicesListener = null } } } }))
 vi.mock('./i18n', () => ({ t: (key: string) => key }))
@@ -472,4 +472,22 @@ it('leaves ordinary chat running when the safeword is blank or only a substring'
 it("reads the code past Electron's channel name", () => {
   expect(domErrorCode(new Error("Error invoking remote method 'dom:pullMemories': Error: dom:signedOut"))).toBe('signedOut')
   expect(domErrorCode(new Error("Error invoking remote method 'dom:chat': Error: boom"))).toBeNull()
+})
+
+it('keeps keys per own server address and drops an answer for an address since left', async () => {
+  const answers: Record<string, (r: unknown) => void> = {}
+  m.invoke.mockImplementation((channel: string, url: string) => {
+    if (channel === 'dom:hasKey') return Promise.resolve(url.includes('openai'))
+    if (channel === 'dom:ownModels') return new Promise((resolve) => { answers[url] = resolve })
+    return Promise.resolve(null)
+  })
+  const store = useDom.getState()
+  await store.setKey('sk-one')
+  expect(m.invoke).toHaveBeenCalledWith('dom:setKey', defaultDomAi().ownUrl, 'sk-one')
+  const asking = store.checkOwn()
+  await store.setAi({ ownUrl: 'https://api.openai.com/v1' })
+  expect(useDom.getState().hasKey).toBe(true)
+  answers[defaultDomAi().ownUrl]?.({ kind: 'ok', models: ['old'] })
+  await asking
+  expect(useDom.getState().ownStatus).toBeNull()
 })

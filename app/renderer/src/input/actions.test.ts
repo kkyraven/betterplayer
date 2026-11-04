@@ -2,7 +2,8 @@ import { beforeEach, expect, it, vi } from 'vitest'
 
 const state = vi.hoisted(() => ({
   ui: { screen: 'library', stripHiddenFor: null as string | null },
-  player: { path: '/video.mp4' as string | null, snapshot: { loaded: true, paused: false }, togglePlay: vi.fn(), seekBy: vi.fn(), stepBookmark: vi.fn() },
+  player: { path: '/video.mp4' as string | null, snapshot: { loaded: true, paused: false, rate: 1 }, togglePlay: vi.fn(), seekBy: vi.fn(), stepBookmark: vi.fn(), chooseRate: vi.fn() },
+  tracking: { playbackBaseRate: null as number | null },
   editor: { open: false, togglePlay: vi.fn() },
   devices: { held: false, setHeld: vi.fn() },
 }))
@@ -10,7 +11,8 @@ vi.mock('@/engine/client', () => ({ enhanceCapabilities: {} }))
 vi.mock('@/state/gapSkip', () => ({ skipGap: vi.fn() }))
 vi.mock('@/state/devices', () => ({ useDevices: { getState: () => state.devices } }))
 vi.mock('@/state/editor', () => ({ useEditor: { getState: () => state.editor } }))
-vi.mock('@/state/player', () => ({ usePlayer: { getState: () => state.player } }))
+vi.mock('@/state/player', () => ({ RATES: [0.5, 0.75, 1, 1.25, 1.5, 2], usePlayer: { getState: () => state.player } }))
+vi.mock('@/state/tracking', () => ({ useTracking: { getState: () => state.tracking } }))
 vi.mock('@/state/session', () => ({ useSession: { getState: () => ({}) } }))
 vi.mock('@/state/settings', () => ({ useSettings: { getState: () => ({}) } }))
 vi.mock('@/state/i18n', () => ({ t: (key: string) => key }))
@@ -25,6 +27,8 @@ beforeEach(() => {
   state.player.path = '/video.mp4'
   state.player.snapshot.paused = false
   state.player.snapshot.loaded = true
+  state.player.snapshot.rate = 1
+  state.tracking.playbackBaseRate = null
   state.editor.open = false
   state.devices.held = false
   setBindings({ space: 'Media.PlayPause.Toggle', 'editor:space': 'Editor.Play.Toggle', arrowright: 'Media.Seek.Forward' })
@@ -112,4 +116,20 @@ it('dispatches bookmark shortcuts only on the loaded player', () => {
   state.player.snapshot.loaded = false
   expect(dispatch('pagedown')).toBe(false)
   expect(state.player.stepBookmark).toHaveBeenCalledTimes(2)
+})
+
+it('steps speed along the rate list and stops at the ends', () => {
+  setBindings({ '[': 'Media.Speed.Down', ']': 'Media.Speed.Up', backspace: 'Media.Speed.Reset' })
+  state.ui.screen = 'player'
+  dispatch(']')
+  expect(state.player.chooseRate).toHaveBeenLastCalledWith(1.25)
+  state.player.snapshot.rate = 0.6
+  state.tracking.playbackBaseRate = 1.1
+  dispatch('[')
+  expect(state.player.chooseRate).toHaveBeenLastCalledWith(1)
+  state.tracking.playbackBaseRate = 2
+  dispatch(']')
+  expect(state.player.chooseRate).toHaveBeenLastCalledWith(2)
+  dispatch('backspace')
+  expect(state.player.chooseRate).toHaveBeenLastCalledWith(1)
 })

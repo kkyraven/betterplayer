@@ -186,7 +186,7 @@ export class LookQueue {
   ) {}
 
   static wants(row: ProjectionFacts | null): row is ProjectionFacts {
-    return row !== null && !row.remote && row.strip === 'ready' && row.input.picture === undefined && needsLook(row.input)
+    return row !== null && !row.remote && row.strip === 'ready' && row.views.strip === '' && row.input.picture === undefined && needsLook(row.input)
   }
 
   enqueue(id: number) {
@@ -207,7 +207,7 @@ export class LookQueue {
 
   async atOpen(row: ProjectionFacts | null): Promise<boolean> {
     if (!row || row.remote || row.input.picture !== undefined || !needsLook(row.input)) return false
-    if (row.strip === 'ready') return this.run(row)
+    if (row.strip === 'ready' && row.views.strip === '') return this.run(row)
     const scores = await lookAtFile(row.path, row.durationMs, this.abort.signal)
     if (this.abort.signal.aborted || scores.frames === 0) return false
     this.db.setVrLook(row.id, JSON.stringify(scores))

@@ -34,6 +34,7 @@ export interface MediaRow {
   codec: string
   projection: ProjectionKind
   thumb: string | null
+  keyed?: boolean
   strip: string | null
   axes: AxisId[]
   averageSpeed: number
@@ -62,10 +63,19 @@ export interface MediaScript {
   durationMs: number
 }
 
+export interface MediaMark {
+  name: string
+  startMs: number
+  endMs: number | null
+}
+
+export type MarkSource = 'file' | 'server' | 'headset'
+
 export interface MediaDetail extends MediaRow {
   scripts: MediaScript[]
   description?: string
   studio?: string
+  marks?: (MediaMark & { source: MarkSource })[]
 }
 
 export const CORE_SECTIONS = ['all', 'continue', 'favourites', 'unscripted'] as const
@@ -101,9 +111,11 @@ export interface MediaFilters {
   script?: 'any' | 'stroke' | 'multi' | 'estim' | 'missing'
   axes?: AxisId[]
   type?: '2d' | 'vr'
+  maxDurationMs?: number
   watched?: 'yes' | 'no'
   minRating?: number
   tag?: string
+  tags?: string[]
   hidden?: 'yes'
 }
 

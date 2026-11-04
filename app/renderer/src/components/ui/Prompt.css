@@ -1,5 +1,6 @@
 .prompt { display: grid; gap: 14px; }
 .prompt h2 { font-size: 16px; font-weight: 600; }
 .prompt p { margin: -6px 0 0; color: var(--text-2); font-size: 13px; }
+.prompt p.danger { color: var(--danger); }
 .prompt .input { width: 100%; }
 .prompt .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }

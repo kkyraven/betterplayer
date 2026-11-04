@@ -68,7 +68,8 @@ struct State {
     width: u32,
     height: u32,
     writing: usize,
-    ready: Option<(usize, Instant, Option<f64>)>,
+    ready: Option<(usize, Instant, Option<f64>, u64)>,
+    serial: u64,
     reading: usize,
     hold: bool,
 }
@@ -80,22 +81,28 @@ pub struct Acquired {
     pub index: usize,
     pub waited: Duration,
     pub pts: Option<f64>,
+    pub serial: u64,
 }
+
+pub type FrameTap = Arc<dyn Fn(&[u8], u32, u32, u64) + Send + Sync>;
 
 pub struct Frames {
     state: Mutex<State>,
+    tap: Mutex<Option<FrameTap>>,
     published: Condvar,
     taken: Condvar,
 }
 
 impl Frames {
     pub fn new(width: u32, height: u32, hold: bool) -> Frames {
-        Frames { state: Mutex::new(State::new(width, height, None, hold)), published: Condvar::new(), taken: Condvar::new() }
+        Frames { state: Mutex::new(State::new(width, height, None, hold)), tap: Mutex::new(None), published: Condvar::new(), taken: Condvar::new() }
     }
 
     pub fn reset(&self, width: u32, height: u32, external: Option<External>) {
         let mut s = self.state.lock().unwrap();
+        let serial = s.serial;
         *s = State::new(width, height, external, s.hold);
+        s.serial = serial;
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -112,7 +119,20 @@ impl Frames {
         self.state.lock().unwrap().slots[index].clone()
     }
 
+    pub fn set_tap(&self, tap: Option<FrameTap>) {
+        *self.tap.lock().unwrap() = tap;
+    }
+
     pub fn publish(&self, pts: Option<f64>) -> bool {
+        let tap = self.tap.lock().unwrap().clone();
+        let (slot, width, height, serial) = {
+            let mut s = self.state.lock().unwrap();
+            s.serial += 1;
+            (s.slots[s.writing].clone(), s.width, s.height, s.serial)
+        };
+        if let Some(tap) = tap {
+            tap(unsafe { slot.as_slice() }, width, height, serial);
+        }
         let mut s = self.state.lock().unwrap();
         if s.hold && s.ready.is_some() {
             s = self.taken.wait_timeout_while(s, HOLD, |s| s.ready.is_some()).unwrap().0;
@@ -128,7 +148,7 @@ impl Frames {
                 false
             }
         };
-        s.ready = Some((old_writing, Instant::now(), pts));
+        s.ready = Some((old_writing, Instant::now(), pts, serial));
         drop(s);
         self.published.notify_one();
         dropped
@@ -146,12 +166,12 @@ impl Frames {
     }
 
     fn take(&self, s: &mut State) -> Option<Acquired> {
-        let (index, published, pts) = s.ready.take()?;
+        let (index, published, pts, serial) = s.ready.take()?;
         s.reading = index;
         if s.hold {
             self.taken.notify_one();
         }
-        Some(Acquired { index, waited: published.elapsed(), pts })
+        Some(Acquired { index, waited: published.elapsed(), pts, serial })
     }
 }
 
@@ -168,6 +188,7 @@ impl State {
             height,
             writing: 0,
             ready: None,
+            serial: 0,
             reading: 2,
             hold,
         }
@@ -223,5 +244,20 @@ mod tests {
         let t0 = Instant::now();
         assert!(f.publish(None), "no reader: replaced after the hold ran out");
         assert!(t0.elapsed() >= HOLD);
+    }
+
+    #[test]
+    fn the_tap_sees_each_frame_with_the_serial_the_reader_gets() {
+        let f = Frames::new(2, 2, false);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let tap = seen.clone();
+        f.set_tap(Some(Arc::new(move |b: &[u8], w, h, serial| tap.lock().unwrap().push((b.len(), w, h, serial)))));
+        f.publish(None);
+        f.publish(None);
+        assert_eq!(f.acquire().unwrap().serial, 2);
+        f.reset(4, 2, None);
+        f.publish(None);
+        assert_eq!(f.acquire().unwrap().serial, 3, "counts on across a resize");
+        assert_eq!(*seen.lock().unwrap(), vec![(16, 2, 2, 1), (16, 2, 2, 2), (32, 4, 2, 3)]);
     }
 }

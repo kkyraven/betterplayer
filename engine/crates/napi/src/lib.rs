@@ -789,17 +789,102 @@ pub struct ModelState {
 }
 
 #[napi(object)]
-pub struct DetectorModel {
+pub struct ModelVariant {
+    pub width: u32,
+    pub height: u32,
+    pub path: String,
+}
+
+#[napi(object)]
+pub struct DetectorFiles {
     pub id: String,
-    pub label: String,
-    pub file: String,
-    pub input: u32,
-    pub url: String,
-    pub sha256: String,
-    pub size_mb: u32,
-    pub licence: String,
-    pub licence_url: String,
-    pub source_url: String,
+    pub classes: Vec<String>,
+    pub files: Vec<ModelVariant>,
+}
+
+#[napi(object)]
+pub struct CensorSetup {
+    pub detector: DetectorFiles,
+    pub skin: Option<Vec<ModelVariant>>,
+    pub cache_dir: Option<String>,
+}
+
+#[napi(object)]
+pub struct CensorState {
+    pub status: String,
+    pub error: Option<String>,
+    pub serial: f64,
+    pub runs: f64,
+    pub run_ms: f64,
+    pub boxes: Vec<f64>,
+    pub mask_version: f64,
+    pub mask: Option<Buffer>,
+    pub mask_width: u32,
+    pub mask_height: u32,
+}
+
+fn variants(files: Vec<ModelVariant>) -> Vec<bp_core::ModelVariant> {
+    files.into_iter().map(|f| bp_core::ModelVariant { width: f.width, height: f.height, path: f.path.into() }).collect()
+}
+
+#[napi(object)]
+pub struct MatteSetup {
+    pub path: String,
+    pub dir: String,
+    pub files: Vec<ModelVariant>,
+    pub cache_dir: Option<String>,
+    pub layout: String,
+    pub swap_eyes: bool,
+}
+
+#[napi(object)]
+pub struct CensorTrackSetup {
+    pub path: String,
+    pub dir: String,
+    pub models: CensorSetup,
+    pub kinds: Vec<String>,
+    pub key: String,
+    pub layout: String,
+}
+
+#[napi(object)]
+pub struct CensorLook {
+    pub style: String,
+    pub strength: f64,
+}
+
+#[napi(object)]
+pub struct MatteStatus {
+    pub status: String,
+    pub error: Option<String>,
+    pub ahead: f64,
+    pub seconds: u32,
+}
+
+fn detector_spec(d: DetectorFiles) -> std::sync::Arc<bp_core::ModelSpec> {
+    std::sync::Arc::new(bp_core::ModelSpec::new(&d.id, &d.classes, variants(d.files)))
+}
+
+fn layout_of(layout: &str) -> Result<bp_core::EyeLayout> {
+    match layout {
+        "mono" => Ok(bp_core::EyeLayout::Mono),
+        "sbs" => Ok(bp_core::EyeLayout::Sbs),
+        "ou" => Ok(bp_core::EyeLayout::Ou),
+        l => Err(Error::from_reason(format!("unknown layout {l:?}"))),
+    }
+}
+
+fn matte_status(s: bp_core::MatteStatus) -> MatteStatus {
+    let (status, error) = match s.state {
+        bp_core::MatteState::Loading => ("loading", None),
+        bp_core::MatteState::Running => ("running", None),
+        bp_core::MatteState::Error(e) => ("error", Some(e)),
+    };
+    MatteStatus { status: status.into(), error, ahead: s.ahead_s, seconds: s.seconds as u32 }
+}
+
+fn kinds_of(ids: &[String]) -> Result<Vec<bp_core::DetectKind>> {
+    ids.iter().map(|id| bp_core::DetectKind::from_id(id).ok_or_else(|| err(format!("unknown detection kind {id}")))).collect()
 }
 
 #[napi(object)]
@@ -1431,28 +1516,84 @@ impl Engine {
     }
 
     #[napi]
-    pub fn set_detector(
-        &self,
-        model: Option<String>,
-        path: Option<String>,
-        cache_dir: Option<String>,
-    ) -> Result<()> {
-        let load = match (model, path) {
-            (Some(id), Some(path)) => {
-                let spec = bp_core::MODELS
-                    .iter()
-                    .find(|m| m.id == id)
-                    .ok_or_else(|| err(format!("unknown model {id}")))?;
-                Some((
-                    spec,
-                    std::path::PathBuf::from(path),
-                    cache_dir.map(std::path::PathBuf::from),
-                ))
-            }
-            _ => None,
-        };
-        self.inner.set_detector(load);
+    pub fn set_detector(&self, model: Option<DetectorFiles>, cache_dir: Option<String>) {
+        self.inner.set_detector(model.map(|m| (detector_spec(m), cache_dir.map(std::path::PathBuf::from))));
+    }
+
+    #[napi]
+    pub fn set_censor(&self, setup: Option<CensorSetup>, kinds: Vec<String>) -> Result<()> {
+        let kinds = kinds_of(&kinds)?;
+        self.inner.set_censor(setup.map(|s| {
+            let models = bp_core::CensorModels { detector: detector_spec(s.detector), skin: s.skin.map(variants), cache_dir: s.cache_dir.map(std::path::PathBuf::from) };
+            (models, kinds)
+        }));
         Ok(())
+    }
+
+    #[napi]
+    pub fn censor_run(&self, mask_version: f64) -> Option<CensorState> {
+        let r = self.inner.censor_run(mask_version as u64)?;
+        let (status, error) = match r.status {
+            bp_core::CensorStatus::Loading => ("loading", None),
+            bp_core::CensorStatus::Ready => ("ready", None),
+            bp_core::CensorStatus::Error(e) => ("error", Some(e)),
+        };
+        let (mask_width, mask_height) = r.mask.as_ref().map_or((0, 0), |m| (m.width as u32, m.height as u32));
+        Some(CensorState {
+            status: status.into(),
+            error,
+            serial: r.serial as f64,
+            runs: r.runs as f64,
+            run_ms: r.run_ms,
+            boxes: r.boxes.iter().flat_map(|b| [b.x, b.y, b.w, b.h]).collect(),
+            mask_version: r.mask_version as f64,
+            mask: r.mask.map(|m| m.data.clone().into()),
+            mask_width,
+            mask_height,
+        })
+    }
+
+    #[napi]
+    pub fn matte_start(&self, setup: MatteSetup) -> Result<()> {
+        let layout = layout_of(&setup.layout)?;
+        self.inner.matte_start(bp_core::MatteSetup {
+            path: setup.path,
+            dir: setup.dir.into(),
+            maker: bp_core::MatteMaker::Passthrough { skin: variants(setup.files) },
+            cache_dir: setup.cache_dir.map(std::path::PathBuf::from),
+            layout,
+            second_eye: setup.swap_eyes && layout != bp_core::EyeLayout::Mono,
+        });
+        Ok(())
+    }
+
+    #[napi]
+    pub fn matte_stop(&self) {
+        self.inner.matte_stop()
+    }
+
+    #[napi]
+    pub fn matte_status(&self) -> Option<MatteStatus> {
+        self.inner.matte_status().map(matte_status)
+    }
+
+    #[napi]
+    pub fn censor_track(&self, setup: Option<CensorTrackSetup>, look: Option<CensorLook>) -> Result<()> {
+        let track = match setup {
+            Some(s) => {
+                let maker = bp_core::MatteMaker::Censor { detector: detector_spec(s.models.detector), skin: s.models.skin.map(variants), kinds: kinds_of(&s.kinds)?, key: s.key };
+                Some(bp_core::MatteSetup { path: s.path, dir: s.dir.into(), maker, cache_dir: s.models.cache_dir.map(std::path::PathBuf::from), layout: layout_of(&s.layout)?, second_eye: false })
+            }
+            None => None,
+        };
+        let look = look.map(|l| bp_core::VrCensor { blur: l.style == "blur", strength: l.strength.clamp(0.0, 1.0) as f32 });
+        self.inner.censor_track(track, look);
+        Ok(())
+    }
+
+    #[napi]
+    pub fn censor_track_status(&self) -> Option<MatteStatus> {
+        self.inner.censor_track_status().map(matte_status)
     }
 
     #[napi]
@@ -1766,7 +1907,11 @@ impl Engine {
         let kind = bp_core::ModelKind::from_id(&kind)
             .ok_or_else(|| err(format!("unknown model kind {kind}")))?;
         if kind == bp_core::ModelKind::Detector {
-            return self.set_detector(model, path, cache_dir);
+            if model.is_some() {
+                return Err(err("a detector loads through setDetector".to_string()));
+            }
+            self.set_detector(None, None);
+            return Ok(());
         }
         let load = match (model, path, metadata) {
             (Some(id), Some(path), Some(metadata)) => {
@@ -2313,7 +2458,7 @@ impl Engine {
 
     #[napi]
     pub fn vr_view(&self, view: VrView) -> Result<()> {
-        let v = bp_player::VrView::parse(&view.kind, &view.layout, view.fov, view.swap_eyes).map_err(vr_err)?;
+        let v = bp_player::VrView::parse(&view.kind, &view.layout, view.fov, view.arc, view.swap_eyes).map_err(vr_err)?;
         self.inner.player.vr_view(v).map_err(vr_err)
     }
 
@@ -2333,8 +2478,72 @@ impl Engine {
     }
 
     #[napi]
+    pub fn vr_passthrough(&self, passthrough: VrPassthrough) -> Result<()> {
+        let video = passthrough.video.map(|k| bp_player::VrKey::parse(&k.mode, k.key, &k.feather, k.feather_px)).transpose().map_err(vr_err)?;
+        self.inner.player.vr_passthrough(bp_player::VrPassthrough { video, room: passthrough.room, idle: passthrough.idle });
+        Ok(())
+    }
+
+    #[napi]
+    pub fn vr_pick(&self, hand: Option<String>) -> Result<()> {
+        let hand = hand.map(|h| hand_index(&h)).transpose()?;
+        self.inner.player.vr_pick(hand);
+        Ok(())
+    }
+
+    #[napi]
+    pub fn vr_legend(&self, hand: Option<String>) -> Result<()> {
+        let hand = hand.map(|h| hand_index(&h)).transpose()?;
+        self.inner.player.vr_legend(hand);
+        Ok(())
+    }
+
+    #[napi]
+    pub fn vr_hands(&self, models: Vec<String>, rays: Vec<String>) -> Result<()> {
+        let set = |hands: &[String]| -> Result<[bool; 2]> {
+            let mut on = [false; 2];
+            for h in hands {
+                on[hand_index(h)?] = true;
+            }
+            Ok(on)
+        };
+        self.inner.player.vr_hands(set(&models)?, set(&rays)?);
+        Ok(())
+    }
+
+    #[napi]
+    pub fn vr_picks(&self) -> Vec<VrPick> {
+        let side = |hand: usize| if hand == 0 { "left" } else { "right" }.to_string();
+        self.inner
+            .player
+            .vr_picks()
+            .into_iter()
+            .map(|p| match p {
+                bp_player::VrPick::Pick { hand, u, v } => VrPick { kind: "pick".into(), hand: side(hand), u: u as f64, v: v as f64 },
+                bp_player::VrPick::Cancel { hand } => VrPick { kind: "cancel".into(), hand: side(hand), u: 0.0, v: 0.0 },
+            })
+            .collect()
+    }
+
+    #[napi]
     pub fn vr_shortcuts(&self) -> Vec<String> {
         self.inner.player.vr_shortcuts().into_iter().map(|s| s.name().into()).collect()
+    }
+
+    #[napi]
+    pub fn vr_buzz(&self, hand: String, buzz: String) -> Result<()> {
+        let hand = hand_index(&hand)?;
+        let buzz = bp_vr::Buzz::from_name(&buzz).ok_or_else(|| Error::from_reason(format!("unknown buzz {buzz:?}")))?;
+        self.inner.player.vr_buzz(hand, buzz);
+        Ok(())
+    }
+
+    #[napi]
+    pub fn vr_aim(&self) -> VrAim {
+        let status = self.inner.player.vr_status();
+        let [left, right] = status.as_ref().map(|s| s.aim).unwrap_or_default();
+        let stick = status.and_then(|s| s.stick).map(|v| v.map(f64::from).to_vec());
+        VrAim { left: left.map(VrRay::from), right: right.map(VrRay::from), stick }
     }
 
     #[napi]
@@ -2348,12 +2557,19 @@ impl Engine {
             lost_tracking: s.lost_tracking,
             focused: s.focused,
             presses: s.presses,
+            turn: s.turn as f64,
+            dragging: s.dragging,
             refresh_hz: s.refresh_hz as f64,
             width: s.width,
             height: s.height,
             fps: s.fps as f64,
             frames: s.frames as f64,
         })
+    }
+
+    #[napi]
+    pub fn vr_headset(&self) -> Option<VrHeadset> {
+        bp_vr::headset().map(|h| VrHeadset { driver: h.driver, system: h.system, model: h.model })
     }
 
     #[napi]
@@ -2469,6 +2685,11 @@ impl Engine {
     }
 
     #[napi]
+    pub fn frame_serial(&self) -> f64 {
+        self.inner.frame_serial() as f64
+    }
+
+    #[napi]
     pub fn stats(&self) -> RenderStats {
         let s = self.inner.player.stats();
         RenderStats {
@@ -2494,7 +2715,241 @@ impl Engine {
     pub fn close(&mut self) {
         self.inner.close()
     }
+
+    #[napi]
+    pub fn vr_portals(&self, scene: VrPortalScene) -> Result<()> {
+        let s = portal_scene(scene).map_err(err)?;
+        self.inner.player.vr_portals(s).map_err(err)
+    }
+
+    #[napi]
+    pub fn vr_still(&self, slot: u32, rgba: Uint8Array, info: VrStillInfo) -> Result<()> {
+        let info = bp_player::portals::StillInfo {
+            equirect: match info.kind.as_str() {
+                "equirect" => true,
+                "poster" => false,
+                k => return Err(err(format!("unknown still kind {k:?}"))),
+            },
+            half_h_deg: info.half_h_deg,
+            half_v_deg: info.half_v_deg,
+            width: info.width,
+            height: info.height,
+            key: info.key,
+        };
+        self.inner.player.vr_still(slot, &rgba, info).map_err(err)
+    }
+
+    #[napi]
+    pub fn vr_still_drop(&self, slot: u32) -> Result<()> {
+        self.inner.player.vr_still_drop(slot).map_err(err)
+    }
+
+    #[napi]
+    pub fn vr_dive(&self, dive: VrDive) -> Result<()> {
+        let d = bp_player::portals::Dive {
+            kind: bp_player::portals::DiveKind::parse(&dive.kind).map_err(err)?,
+            key: dive.key,
+            start_ms: dive.start_ms,
+            slide_ms: dive.slide_ms,
+            same: dive.same,
+            full: dive.full,
+            screen_deg: dive.screen_deg,
+            aspect: dive.aspect,
+        };
+        self.inner.player.vr_dive(d).map_err(err)
+    }
+
+    #[napi]
+    pub fn vr_dive_reverse(&self, at_ms: f64, failed: bool) -> Result<()> {
+        self.inner.player.vr_dive_reverse(at_ms, failed).map_err(err)
+    }
+
+    #[napi]
+    pub fn vr_portal_status(&self) -> VrPortalStatus {
+        let s = self.inner.player.vr_portal_status();
+        VrPortalStatus { phase: s.phase.into(), key: s.key, elapsed_ms: s.elapsed_ms, live_at_ms: s.live_at_ms, done: s.done, undone: s.undone }
+    }
+
+    #[napi]
+    pub fn vr_keyframe_start(&self, on: bool) {
+        self.inner.player.vr_keyframe_start(on)
+    }
+
+    #[napi]
+    pub fn vr_dev_eye(&self, offset: Option<Vec<f64>>) -> Result<()> {
+        let offset = match offset.as_deref() {
+            None => None,
+            Some(&[x, y, z]) => Some([x, y, z]),
+            Some(_) => return Err(err("an eye offset needs three numbers".into())),
+        };
+        self.inner.player.vr_dev_eye(offset);
+        Ok(())
+    }
+
+    #[napi]
+    pub fn vr_dev_debug(&self, on: bool) {
+        self.inner.player.vr_dev_debug(on)
+    }
+
+    #[napi]
+    pub fn vr_dev_hold(&self, on: bool) {
+        self.inner.player.vr_dev_hold(on)
+    }
+
+    #[napi]
+    pub fn vr_portal_dump(&self) -> String {
+        self.inner.player.vr_portal_dump()
+    }
+
+    #[napi]
+    pub fn vr_mirror(&self, prefix: String) -> Result<()> {
+        self.inner.player.vr_mirror(prefix).map_err(err)
+    }
+
+    #[napi]
+    pub fn vr_trace(&self, phase: String, key: String, at_ms: Option<f64>) {
+        self.inner.player.vr_trace(&phase, &key, at_ms)
+    }
+
+    #[napi]
+    pub fn vr_frames(&self, since_ms: f64) -> String {
+        bp_player::frame_log::json(since_ms)
+    }
 }
+
+#[napi(object)]
+pub struct VrKeyframe {
+    pub from: f64,
+    pub to: f64,
+    pub start_ms: f64,
+    pub duration_ms: f64,
+    pub ease: String,
+}
+
+#[napi(object)]
+pub struct VrPortalBand {
+    pub band: String,
+    pub pose: Vec<f64>,
+    pub metres: f64,
+    pub curvature: f64,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[napi(object)]
+pub struct VrPortalItem {
+    pub key: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    pub corner: f64,
+    pub lift_m: f64,
+    pub grow: f64,
+    pub row: i32,
+    pub kind: String,
+    pub slot: Option<u32>,
+    pub lift: VrKeyframe,
+    pub shade: VrKeyframe,
+    pub enter: VrKeyframe,
+    pub dz: f64,
+    pub op: f64,
+}
+
+#[napi(object)]
+pub struct VrPortalScene {
+    pub rev: u32,
+    pub seat: Vec<f64>,
+    pub bands: Vec<VrPortalBand>,
+    pub items: Vec<VrPortalItem>,
+    pub scroll: Vec<VrKeyframe>,
+    pub shown: VrKeyframe,
+    pub fade: VrKeyframe,
+    pub dim: f64,
+}
+
+#[napi(object)]
+pub struct VrStillInfo {
+    pub kind: String,
+    pub half_h_deg: f64,
+    pub half_v_deg: f64,
+    pub width: u32,
+    pub height: u32,
+    pub key: Option<String>,
+}
+
+#[napi(object)]
+pub struct VrDive {
+    pub kind: String,
+    pub key: String,
+    pub start_ms: f64,
+    pub slide_ms: f64,
+    pub same: bool,
+    pub full: u32,
+    pub screen_deg: f64,
+    pub aspect: f64,
+}
+
+#[napi(object)]
+pub struct VrPortalStatus {
+    pub phase: String,
+    pub key: Option<String>,
+    pub elapsed_ms: f64,
+    pub live_at_ms: Option<f64>,
+    pub done: bool,
+    pub undone: bool,
+}
+
+fn keyframe(k: VrKeyframe) -> std::result::Result<bp_player::portals::Keyframe, String> {
+    Ok(bp_player::portals::Keyframe { from: k.from, to: k.to, start_ms: k.start_ms, duration_ms: k.duration_ms, ease: bp_player::portals::Ease::parse(&k.ease)? })
+}
+
+fn portal_scene(s: VrPortalScene) -> std::result::Result<bp_player::portals::PortalScene, String> {
+    use bp_player::portals as p;
+    let bands = s
+        .bands
+        .into_iter()
+        .map(|b| {
+            let band = match b.band.as_str() {
+                "rows" => p::Band::Rows,
+                "strip" => p::Band::Strip,
+                o => return Err(format!("unknown band {o:?}")),
+            };
+            Ok(p::PortalBand { band, pose: p::pose_of(&b.pose)?, metres: b.metres, curvature: b.curvature, width: b.width, height: b.height })
+        })
+        .collect::<std::result::Result<_, String>>()?;
+    let items = s
+        .items
+        .into_iter()
+        .map(|i| {
+            Ok(p::PortalItem {
+                key: i.key,
+                x: i.x,
+                y: i.y,
+                size: p::PortalSize { w: i.w, h: i.h, corner: i.corner, lift: i.lift_m, grow: i.grow },
+                row: i.row,
+                kind: p::ItemKind::parse(&i.kind)?,
+                slot: i.slot,
+                lift: keyframe(i.lift)?,
+                shade: keyframe(i.shade)?,
+                enter: keyframe(i.enter)?,
+                dz: i.dz,
+                op: i.op,
+            })
+        })
+        .collect::<std::result::Result<_, String>>()?;
+    Ok(p::PortalScene {
+        rev: s.rev,
+        seat: p::seat_of(&s.seat)?,
+        bands,
+        items,
+        scroll: s.scroll.into_iter().map(keyframe).collect::<std::result::Result<_, String>>()?,
+        shown: keyframe(s.shown)?,
+        fade: keyframe(s.fade)?,
+        dim: s.dim,
+    })
+}
+
 
 #[napi(object)]
 pub struct VrAvailability {
@@ -2513,6 +2968,7 @@ pub struct VrView {
     pub kind: String,
     pub layout: String,
     pub fov: f64,
+    pub arc: Option<f64>,
     pub swap_eyes: bool,
 }
 
@@ -2526,11 +2982,20 @@ pub struct VrState {
     pub lost_tracking: bool,
     pub focused: bool,
     pub presses: u32,
+    pub turn: f64,
+    pub dragging: bool,
     pub refresh_hz: f64,
     pub width: u32,
     pub height: u32,
     pub fps: f64,
     pub frames: f64,
+}
+
+#[napi(object)]
+pub struct VrHeadset {
+    pub driver: String,
+    pub system: String,
+    pub model: String,
 }
 
 #[napi(object)]
@@ -2544,8 +3009,39 @@ pub struct VrOverlayEvent {
     pub dy: f64,
 }
 
+#[napi(object)]
+pub struct VrKey {
+    pub mode: String,
+    pub key: u32,
+    pub feather: String,
+    pub feather_px: f64,
+}
+
+#[napi(object)]
+pub struct VrPassthrough {
+    pub video: Option<VrKey>,
+    pub room: bool,
+    pub idle: bool,
+}
+
+#[napi(object)]
+pub struct VrPick {
+    pub kind: String,
+    pub hand: String,
+    pub u: f64,
+    pub v: f64,
+}
+
 fn vr_err(e: String) -> Error {
     err(bp_vr::coded(e))
+}
+
+fn hand_index(hand: &str) -> Result<usize> {
+    match hand {
+        "left" => Ok(0),
+        "right" => Ok(1),
+        h => Err(Error::from_reason(format!("unknown hand {h:?}"))),
+    }
 }
 
 pub struct VrWait {
@@ -2567,6 +3063,56 @@ impl Task for VrWait {
     fn resolve(&mut self, _env: Env, _: Self::Output) -> Result<Self::JsValue> {
         Ok(())
     }
+}
+
+#[napi(object)]
+pub struct VrRay {
+    pub origin: Vec<f64>,
+    pub direction: Vec<f64>,
+}
+
+impl From<bp_vr::Ray> for VrRay {
+    fn from(r: bp_vr::Ray) -> VrRay {
+        VrRay { origin: r.origin.map(f64::from).to_vec(), direction: r.direction.map(f64::from).to_vec() }
+    }
+}
+
+impl VrRay {
+    fn to_ray(&self) -> Result<bp_vr::Ray> {
+        let three = |v: &[f64]| -> Result<[f32; 3]> {
+            match v {
+                [x, y, z] => Ok([*x as f32, *y as f32, *z as f32]),
+                _ => Err(Error::from_reason("a ray needs three numbers per vector")),
+            }
+        };
+        Ok(bp_vr::Ray { origin: three(&self.origin)?, direction: three(&self.direction)? })
+    }
+}
+
+#[napi(object)]
+pub struct VrAim {
+    pub left: Option<VrRay>,
+    pub right: Option<VrRay>,
+    pub stick: Option<Vec<f64>>,
+}
+
+#[napi(object)]
+pub struct VrController {
+    pub kind: String,
+    pub model: String,
+    pub distance: f64,
+    pub angle: f64,
+    pub eye: Vec<f64>,
+    pub ray: VrRay,
+    pub head: VrRay,
+    pub laser: bool,
+}
+
+#[napi(object)]
+pub struct VrControllers {
+    pub left: Option<VrController>,
+    pub right: Option<VrController>,
+    pub connected: bool,
 }
 
 #[napi]
@@ -2602,6 +3148,18 @@ impl VrOverlays {
     }
 
     #[napi]
+    pub fn place_facing(&mut self, id: u32, centre: Vec<f64>) -> Result<()> {
+        let [x, y, z] = centre[..] else { return Err(Error::from_reason("centre needs three numbers")) };
+        self.inner.place_facing(id, [x as f32, y as f32, z as f32]).map_err(vr_err)
+    }
+
+    #[napi]
+    pub fn hit(&mut self, id: u32, ray: VrRay) -> Result<Option<Vec<f64>>> {
+        let hit = self.inner.hit(id, &ray.to_ray()?).map_err(vr_err)?;
+        Ok(hit.map(|(x, y)| vec![x as f64, y as f64]))
+    }
+
+    #[napi]
     pub fn recentre(&mut self, keep_recline: Option<bool>) -> Result<()> {
         self.inner.recentre(keep_recline.unwrap_or(false)).map_err(vr_err)
     }
@@ -2622,6 +3180,70 @@ impl VrOverlays {
     }
 
     #[napi]
+    pub fn grab_bar(&mut self, id: u32, above: bool, yaw: f64, pitch: f64, reach: Vec<f64>, distance: Option<f64>) -> Result<()> {
+        let &[near, far] = reach.as_slice() else { return Err(Error::from_reason("a reach needs 2 numbers")) };
+        let moved = bp_vr::Moved { yaw: yaw as f32, pitch: pitch as f32, distance: distance.map(|d| d as f32) };
+        self.inner.grab_bar(id, above, moved, [near as f32, far as f32]).map_err(vr_err)
+    }
+
+    #[napi]
+    pub fn offset(&mut self, id: u32) -> Result<Vec<f64>> {
+        let moved = self.inner.offset(id).map_err(vr_err)?;
+        Ok([moved.yaw as f64, moved.pitch as f64].into_iter().chain(moved.distance.map(|d| d as f64)).collect())
+    }
+
+    #[napi]
+    pub fn close_button(&mut self, id: u32, on: bool) -> Result<()> {
+        self.inner.close_button(id, on).map_err(vr_err)
+    }
+
+    #[napi]
+    pub fn grab(&mut self, id: u32) -> Result<bool> {
+        self.inner.grab(id).map_err(vr_err)
+    }
+
+    #[napi]
+    pub fn pointed(&mut self, id: u32, ray: VrRay) -> Result<bool> {
+        self.inner.pointed(id, &ray.to_ray()?).map_err(vr_err)
+    }
+
+    #[napi]
+    pub fn alpha(&mut self, id: u32, alpha: f64) -> Result<()> {
+        self.inner.alpha(id, alpha as f32).map_err(vr_err)
+    }
+
+    #[napi]
+    pub fn attach(&mut self, id: u32, hand: String, offset: Vec<f64>) -> Result<()> {
+        let hand = match hand.as_str() {
+            "left" => 0,
+            "right" => 1,
+            h => return Err(Error::from_reason(format!("unknown hand {h:?}"))),
+        };
+        if offset.len() != 12 {
+            return Err(Error::from_reason("an offset needs 12 numbers"));
+        }
+        let row = |r: usize| [0, 1, 2, 3].map(|c| offset[r * 4 + c] as f32);
+        self.inner.attach(id, hand, bp_vr::Pose([row(0), row(1), row(2)])).map_err(vr_err)
+    }
+
+    #[napi]
+    pub fn controllers(&mut self) -> VrControllers {
+        let [left, right] = self.inner.controllers().map(|c| {
+            c.map(|c| VrController {
+                kind: c.kind.to_string(),
+                model: c.model.to_string(),
+                distance: c.distance as f64,
+                angle: c.angle as f64,
+                eye: c.eye.map(f64::from).to_vec(),
+                ray: c.ray.into(),
+                head: c.head.into(),
+                laser: c.laser,
+            })
+        });
+        VrControllers { left, right, connected: self.inner.connected() }
+    }
+
+    #[napi]
     pub fn poll(&mut self) -> Vec<VrOverlayEvent> {
         self.inner
             .poll()
@@ -2639,8 +3261,48 @@ impl VrOverlays {
     }
 
     #[napi]
+    pub fn pose(&mut self, id: u32) -> Result<Vec<f64>> {
+        let p = self.inner.pose(id).map_err(vr_err)?;
+        Ok(p.0.iter().flatten().map(|&v| v as f64).collect())
+    }
+
+    #[napi]
+    pub fn seat(&mut self) -> Option<Vec<f64>> {
+        self.inner.seat().map(|r| [r.origin[0], r.origin[1], r.origin[2], r.heading, r.pitch, r.roll].map(f64::from).to_vec())
+    }
+
+    #[napi]
+    pub fn intersect(&mut self, id: u32, ray: VrRay) -> Result<Option<Vec<f64>>> {
+        let hit = self.inner.intersect(id, &ray.to_ray()?).map_err(vr_err)?;
+        Ok(hit.map(|(x, y)| vec![x as f64, y as f64]))
+    }
+
+    #[napi]
     pub fn close(&mut self) {
         self.inner.close()
+    }
+}
+
+#[napi(ts_return_type = "Promise<VrOverlays>")]
+pub fn vr_overlays_open() -> AsyncTask<OpenOverlays> {
+    AsyncTask::new(OpenOverlays)
+}
+
+pub struct OpenOverlays;
+
+pub struct Opened(bp_vr::Overlays);
+unsafe impl Send for Opened {}
+
+impl Task for OpenOverlays {
+    type Output = Opened;
+    type JsValue = VrOverlays;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        bp_vr::Overlays::new().map(Opened).map_err(vr_err)
+    }
+
+    fn resolve(&mut self, _env: Env, opened: Self::Output) -> Result<Self::JsValue> {
+        Ok(VrOverlays { inner: opened.0 })
     }
 }
 
@@ -2863,24 +3525,7 @@ fn model_state_js(m: bp_core::ModelSnapshot) -> ModelState {
 
 #[napi]
 pub fn models() -> Vec<ModelInfo> {
-    let detectors = bp_core::MODELS.iter().map(|m| ModelInfo {
-        id: m.id.to_string(),
-        label: m.label.to_string(),
-        kind: "detector".to_string(),
-        version: String::new(),
-        files: vec![ModelFile {
-            file: m.file.to_string(),
-            url: m.url.to_string(),
-            sha256: m.sha256.to_string(),
-        }],
-        bundled: false,
-        size_mb: m.size_mb,
-        licence: m.licence.to_string(),
-        licence_url: m.licence_url.to_string(),
-        source_url: m.source_url.to_string(),
-        consent: true,
-    });
-    let ours = bp_core::AI_MODELS.iter().map(|m| ModelInfo {
+    bp_core::AI_MODELS.iter().map(|m| ModelInfo {
         id: m.id.to_string(),
         label: m.label.to_string(),
         kind: m.kind.id().to_string(),
@@ -2900,27 +3545,8 @@ pub fn models() -> Vec<ModelInfo> {
         licence_url: m.licence_url.to_string(),
         source_url: m.source_url.to_string(),
         consent: false,
-    });
-    detectors.chain(ours).collect()
-}
-
-#[napi]
-pub fn detector_models() -> Vec<DetectorModel> {
-    bp_core::MODELS
-        .iter()
-        .map(|m| DetectorModel {
-            id: m.id.to_string(),
-            label: m.label.to_string(),
-            file: m.file.to_string(),
-            input: m.input,
-            url: m.url.to_string(),
-            sha256: m.sha256.to_string(),
-            size_mb: m.size_mb,
-            licence: m.licence.to_string(),
-            licence_url: m.licence_url.to_string(),
-            source_url: m.source_url.to_string(),
-        })
-        .collect()
+    })
+    .collect()
 }
 
 #[napi(object)]
@@ -3252,17 +3878,8 @@ pub struct DetectRun {
 #[napi]
 impl Detector {
     #[napi(constructor)]
-    pub fn new(model: String, path: String, cache_dir: Option<String>) -> Result<Detector> {
-        let spec = bp_core::MODELS
-            .iter()
-            .find(|m| m.id == model)
-            .ok_or_else(|| err(format!("unknown model {model}")))?;
-        let inner = bp_detect::Detector::load(
-            spec,
-            std::path::Path::new(&path),
-            cache_dir.as_deref().map(std::path::Path::new),
-        )
-        .map_err(err)?;
+    pub fn new(model: DetectorFiles, cache_dir: Option<String>) -> Result<Detector> {
+        let inner = bp_detect::Detector::load(detector_spec(model), cache_dir.as_deref().map(std::path::Path::new)).map_err(err)?;
         Ok(Detector { inner })
     }
 

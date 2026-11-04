@@ -18,10 +18,14 @@ export interface EroTopic {
   title: string
   sources: EroSource[]
   scope: 'loaded-posts'
-  categories?: Array<{ slug: string; name: string }>
 }
 
 export type EroTopicReport = Omit<EroTopic, 'tabId'>
+
+export interface EroFacets {
+  categories: Array<{ slug: string; name: string }>
+  tags: string[]
+}
 
 export const EROSCRIPTS_HOME = 'https://discuss.eroscripts.com/'
 export const ERO_CHANNELS = {

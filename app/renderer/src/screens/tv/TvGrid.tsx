@@ -8,6 +8,7 @@ import { useT } from '@/state/i18n'
 import { usePlayer } from '@/state/player'
 import { useUi } from '@/state/ui'
 import type { TvGridSource } from '@/state/tvNav'
+import { headsetPlay, overFreeLength, useHeadsetLimited } from './headset'
 import { holdForOptions, playOnClick, tileOptionsKey, tileOptionsMenu } from './tvCards'
 
 const PAGE = 48
@@ -97,10 +98,11 @@ export function TvGrid({ source }: { source: TvGridSource }) {
     return () => io.disconnect()
   }, [loadMore, rows])
 
-  const play = (row: MediaRow) => {
+  const limited = useHeadsetLimited()
+  const play = headsetPlay(limited, (row) => {
     void open(row.path)
     setTvTab('nowplaying')
-  }
+  })
   const click = playOnClick(rows, play)
   return (
     <div className="tv-body tv-gridview" data-nav-main onKeyDown={(e) => tileOptionsKey(e, rows)}>
@@ -112,7 +114,7 @@ export function TvGrid({ source }: { source: TvGridSource }) {
       {rows.length === 0 && done.current && <p className="tv-empty">{t('tv.grid.empty')}</p>}
       <div className="tv-grid">
         {rows.map((row) => (
-          <MediaCard key={row.id} row={row} density="tenfoot" onSelect={click} onPlay={play} onPointerDown={holdForOptions} onContextMenu={tileOptionsMenu} />
+          <MediaCard key={row.id} row={row} density="tenfoot" locked={limited && overFreeLength(row)} onSelect={click} onPlay={play} onPointerDown={holdForOptions} onContextMenu={tileOptionsMenu} />
         ))}
       </div>
       <div ref={end} aria-hidden />

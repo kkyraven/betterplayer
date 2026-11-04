@@ -391,7 +391,7 @@ export function ClipRow({ clip, n, action }: { clip: Clip; n: number; action?: R
     <div className="prow2">
       <span className="n">{n}</span>
       <div className="th">
-        {row.thumb && <ThumbnailImage src={row.thumb} alt="" draggable={false} />}
+        {row.thumb && <ThumbnailImage src={row.thumb} keyed={row.keyed} alt="" draggable={false} />}
         <div className="clip" style={{ left: `${left}%`, width: `${width}%` }} />
         <HeatStrip heat={row.heat} className="th-heat" />
       </div>

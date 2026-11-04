@@ -3,6 +3,7 @@ import { flatEye, type Projection } from '@shared/projection'
 import { defaultDlss, type DlssSettings, type FrameGenOverride, type UpscalingSettings } from '@shared/settings'
 import { isFree, useAccount } from '@/state/account'
 import type { ModelInfo } from '@shared/tracking'
+import type { DetectorFiles, ModelVariant } from 'bp-engine'
 
 type EngineModule = typeof import('bp-engine')
 
@@ -45,6 +46,14 @@ export async function readScripts(path: string) {
 }
 
 export const models = (): ModelInfo[] => getMod().models() as ModelInfo[]
+
+export function modelFiles(model: ModelInfo, paths: readonly string[]): ModelVariant[] {
+  return model.files.map((f, i) => ({ width: f.width ?? 640, height: f.height ?? 640, path: paths[i] ?? '' }))
+}
+
+export function detectorFiles(model: ModelInfo, paths: readonly string[]): DetectorFiles {
+  return { id: model.id, classes: model.classes ?? [], files: modelFiles(model, paths) }
+}
 
 export const MAX_HEIGHT = 1440
 export const MAX_OUTPUT_PIXELS = 3840 * 2160

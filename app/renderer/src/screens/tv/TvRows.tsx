@@ -1,20 +1,25 @@
 import { Folder, LayoutGrid, ListVideo, Tag } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
+import { ITCH_URL, SUBSCRIBE_URL, VR_FREE_MAX_MS } from '@shared/account'
 import type { MessageKey } from '@shared/i18n'
 import type { MediaQuery, MediaRow } from '@shared/library'
 import { isPlaylist } from '@shared/library'
 import { MediaCard } from '@/components/media/MediaCard'
+import { Button } from '@/components/ui/Button'
 import { invoke, on } from '@/ipc'
+import { openPage } from '@/screens/player/InHeadset'
 import { useT } from '@/state/i18n'
 import { usePlayer } from '@/state/player'
 import { useSettings } from '@/state/settings'
 import { useUi } from '@/state/ui'
+import { headsetPlay, overFreeLength, useHeadsetLimited } from './headset'
 import { holdForOptions, playOnClick, tileOptionsKey, tileOptionsMenu } from './tvCards'
 
 interface RowSpec {
   label: MessageKey
   query: MediaQuery
   resume?: boolean
+  offer?: boolean
 }
 
 const BASE: MediaQuery = { section: 'all', sort: 'added', desc: true, filters: {}, limit: 12, offset: 0 }
@@ -33,6 +38,8 @@ const ROWS: Record<'library' | 'continue', RowSpec[]> = {
   ],
 }
 
+const FREE_ROW: RowSpec = { label: 'tv.rows.freeInVr', query: { ...BASE, filters: { maxDurationMs: VR_FREE_MAX_MS } }, offer: true }
+
 const BROWSE_AFTER = 1
 
 export function TvRows({ kind }: { kind: 'library' | 'continue' }) {
@@ -42,10 +49,12 @@ export function TvRows({ kind }: { kind: 'library' | 'continue' }) {
   const open = usePlayer((s) => s.open)
   const setTvTab = useUi((s) => s.setTvTab)
   const continueRow = useSettings((s) => s.settings?.library.continueRow) ?? false
+  const limited = useHeadsetLimited()
   useEffect(() => {
     let alive = true
     const load = async () => {
-      const specs = kind === 'library' && !continueRow ? ROWS.library.filter((spec) => !spec.resume) : ROWS[kind]
+      const rowSpecs = kind === 'library' && !continueRow ? ROWS.library.filter((spec) => !spec.resume) : ROWS[kind]
+      const specs = kind === 'library' && limited ? [FREE_ROW, ...rowSpecs] : rowSpecs
       const pages = await Promise.all(specs.map((spec) => invoke('library:query', continueRow && spec.query.sort === 'recommended' ? { ...spec.query, continueRow: true } : spec.query)))
       if (!alive) return
       const next = specs.map((spec, i) => ({ spec, items: (pages[i]?.rows ?? []).filter((e): e is MediaRow => !isPlaylist(e)) })).filter((r) => r.items.length > 0)
@@ -60,11 +69,11 @@ export function TvRows({ kind }: { kind: 'library' | 'continue' }) {
       alive = false
       off()
     }
-  }, [kind, continueRow])
-  const play = (row: MediaRow) => {
+  }, [kind, continueRow, limited])
+  const play = headsetPlay(limited, (row) => {
     void open(row.path)
     setTvTab('nowplaying')
-  }
+  })
   if (!rows) return <div className="tv-body" data-nav-main />
   const all = rows.flatMap((r) => r.items)
   const click = playOnClick(all, play)
@@ -73,16 +82,33 @@ export function TvRows({ kind }: { kind: 'library' | 'continue' }) {
       <span className="eyebrow">{t(spec.label)}</span>
       <div className="tv-row">
         {items.map((row) => (
-          <MediaCard key={row.id} row={row} density="tenfoot" resume={spec.resume} onSelect={click} onPlay={play} onPointerDown={holdForOptions} onContextMenu={tileOptionsMenu} />
+          <MediaCard key={row.id} row={row} density="tenfoot" resume={spec.resume} locked={limited && overFreeLength(row)} onSelect={click} onPlay={play} onPointerDown={holdForOptions} onContextMenu={tileOptionsMenu} />
         ))}
+        {spec.offer && <OfferTile />}
       </div>
     </section>
   )
-  const children = kind === 'library' ? [...rows.slice(0, BROWSE_AFTER).map(section), <BrowseRow key="browse" />, ...rows.slice(BROWSE_AFTER).map(section)] : rows.map(section)
+  const browseAfter = BROWSE_AFTER + (rows[0]?.spec.offer ? 1 : 0)
+  const children = kind === 'library' ? [...rows.slice(0, browseAfter).map(section), <BrowseRow key="browse" />, ...rows.slice(browseAfter).map(section)] : rows.map(section)
   return (
     <div className="tv-body" data-nav-main onKeyDown={(e) => tileOptionsKey(e, all)}>
       {rows.length === 0 && kind === 'continue' && <p className="tv-empty">{t('tv.rows.empty')}</p>}
       {children}
+    </div>
+  )
+}
+
+function OfferTile() {
+  const t = useT()
+  return (
+    <div className="tv-offer-tile">
+      <span className="name">{t('vr.offer.tile')}</span>
+      <div className="actions">
+        <Button variant="primary" onClick={() => void openPage(SUBSCRIBE_URL)}>
+          {t('vr.offer.supporter')}
+        </Button>
+        <Button onClick={() => void openPage(ITCH_URL)}>{t('vr.offer.itchShort')}</Button>
+      </div>
     </div>
   )
 }

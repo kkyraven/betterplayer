@@ -9,6 +9,10 @@ export function pushEstim(estim: EstimSettings) {
   engine.setEstim({ contrast: estim.contrast, volumeFloor, volumeMax, volumeBoost: estim.volumeBoost, params: estim.params || (hold?.params ?? false) })
 }
 
+export function volumeHeld(): boolean {
+  return Boolean(hold?.volume)
+}
+
 export function holdEstim(next: { volume: [number, number] | null; params: boolean } | null) {
   hold = next
   pushEstim(useSettings.getState().settings?.estim ?? defaultEstim())

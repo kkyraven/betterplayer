@@ -1,5 +1,6 @@
 import type { KeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import type { MediaRow } from '@shared/library'
+import { invoke } from '@/ipc'
 import { useUi } from '@/state/ui'
 
 const DOUBLE_CLICK_MS = 1000
@@ -23,6 +24,7 @@ export function tileOptionsMenu(e: ReactMouseEvent<HTMLDivElement>, row: MediaRo
 
 export function holdForOptions(e: ReactPointerEvent<HTMLDivElement>, row: MediaRow) {
   if (e.button !== 0) return
+  void invoke('vr:command', { kind: 'claimPress' })
   const x = e.clientX
   const y = e.clientY
   const done = () => {

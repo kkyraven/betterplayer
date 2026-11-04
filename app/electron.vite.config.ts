@@ -1,9 +1,10 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import react from '@vitejs/plugin-react'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 
 const shared = resolve(__dirname, 'shared')
+const vrPage = resolve(__dirname, 'renderer/vr.html')
 
 export default defineConfig({
   main: {
@@ -29,7 +30,7 @@ export default defineConfig({
     root: resolve(__dirname, 'renderer'),
     plugins: [react()],
     define: { __RELEASE_NOTES__: JSON.stringify(readFileSync(resolve(__dirname, '..', 'RELEASE_NOTES.md'), 'utf8')) },
-    build: { minify: 'esbuild', rollupOptions: { input: { index: resolve(__dirname, 'renderer/index.html'), vr: resolve(__dirname, 'renderer/vr.html') } } },
+    build: { minify: 'esbuild', rollupOptions: { input: { index: resolve(__dirname, 'renderer/index.html'), ...(existsSync(vrPage) ? { vr: vrPage } : {}) } } },
     resolve: { alias: { '@': resolve(__dirname, 'renderer/src'), '@shared': shared } },
   },
 })

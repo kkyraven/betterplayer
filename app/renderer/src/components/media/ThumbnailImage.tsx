@@ -1,6 +1,8 @@
 import type { ImgHTMLAttributes, SyntheticEvent } from 'react'
+import { cx } from '@/lib/cx'
+import './ThumbnailImage.css'
 
-export function ThumbnailImage({ onError, onLoad, ...props }: ImgHTMLAttributes<HTMLImageElement>) {
+export function ThumbnailImage({ onError, onLoad, keyed, className, ...props }: ImgHTMLAttributes<HTMLImageElement> & { keyed?: boolean }) {
   const hide = (e: SyntheticEvent<HTMLImageElement>) => {
     e.currentTarget.style.visibility = 'hidden'
     onError?.(e)
@@ -10,5 +12,5 @@ export function ThumbnailImage({ onError, onLoad, ...props }: ImgHTMLAttributes<
     onLoad?.(e)
   }
 
-  return <img {...props} onError={hide} onLoad={show} />
+  return <img {...props} className={cx(className, keyed && 'keyed') || undefined} onError={hide} onLoad={show} />
 }

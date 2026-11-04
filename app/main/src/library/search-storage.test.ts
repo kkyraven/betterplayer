@@ -54,7 +54,7 @@ it('adds search storage to an existing version 14 database without losing metada
     CREATE TABLE playlists (id INTEGER PRIMARY KEY, name TEXT);
     CREATE TABLE playlist_items (playlist_id INTEGER, media_id INTEGER, position INTEGER);
     CREATE TABLE watch (media_id INTEGER, play_count INTEGER, last_played INTEGER);
-    CREATE TABLE video_settings (key TEXT, position_ms INTEGER);
+    CREATE TABLE video_settings (key TEXT, position_ms INTEGER, settings TEXT);
     CREATE TABLE excluded_folders (root_id INTEGER, folder TEXT);
     CREATE TABLE sessions (id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, planned_ms INTEGER NOT NULL DEFAULT 0);
     INSERT INTO roots VALUES (1, '/fictional', 'folder', '');
@@ -71,7 +71,7 @@ it('adds search storage to an existing version 14 database without losing metada
     expect(db.mediaRow(1)).toMatchObject({ title: 'Coast', rating: 5, tags: ['outdoor'] })
   } finally { db.close() }
   const check = new DatabaseSync(path)
-  expect(check.prepare('PRAGMA user_version').get()?.user_version).toBe(23)
+  expect(check.prepare('PRAGMA user_version').get()?.user_version).toBe(26)
   check.close()
 })
 

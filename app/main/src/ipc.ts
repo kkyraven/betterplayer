@@ -1,5 +1,5 @@
 import { mkdir } from 'node:fs/promises'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { TogetherFiles } from './together-files'
 import { app, dialog, ipcMain, powerSaveBlocker, screen, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import { readFileSync, statSync, writeFileSync } from 'node:fs'
@@ -12,6 +12,7 @@ import { checkDestination } from './downloads/files'
 import { downloadDestination, downloadSelection } from './download-selection'
 import { syncLanguage, t } from './i18n'
 import type { Library } from './library'
+import { useMaskDir } from './library/masks'
 import { copyDebugInfo, logEvent } from './log'
 import { Audio } from './audio'
 import { GameCapture } from './game'
@@ -20,15 +21,20 @@ import { Models } from './models'
 import { findSubtitles, readSubtitles } from './subtitles'
 import { readTags } from './tags'
 import type { Account } from './account'
+import { kinkyravenModels } from './censor/catalog'
 import type { Dom } from './dom'
 import type { RemoteClient } from './remote/client'
 import type { RemoteServer } from './remote/server'
+import { allowThroughFirewall, firewallBlocks } from './remote/firewall'
 import type { SettingsStore } from './settings/store'
 import type { Updater } from './update'
 import type { VrHost } from './vr/host'
+import { launchSteamvr } from './vr/steamvr'
+import { censorKey, setPortalCensor } from './library/portals'
 import { syncNativeTheme } from './theme'
 import { isForwarded, type ForwardedChannel } from '@shared/peer'
 import { sessionRun, sessionSetup } from '@shared/session-settings'
+import { passthroughModelId, readPassthrough } from '@shared/passthrough'
 
 type Handler<C extends IpcChannel> = (...args: Parameters<IpcContract[C]>) => ReturnType<IpcContract[C]> | Promise<ReturnType<IpcContract[C]>>
 
@@ -43,7 +49,7 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   function handle<C extends IpcChannel>(channel: C, handler: Handler<C>) {
     handlers.set(channel, handler as (...args: never[]) => unknown)
     ipcMain.handle(channel, (event: IpcMainInvokeEvent, ...args: Parameters<IpcContract[C]>) => {
-      if ((channel.startsWith('downloads:') || channel === 'browser:openEroScripts' || channel === 'browser:openSource') && event.sender !== win.webContents) {
+      if ((channel.startsWith('downloads:') || channel === 'browser:openEroScripts' || channel === 'browser:eroFacets' || channel === 'browser:openSource') && event.sender !== win.webContents) {
         throw new Error('This action is only available in BetterPlayer')
       }
       if (client.active && isForwarded(channel)) return client.call(channel, args)
@@ -164,9 +170,10 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   const bundledModels = app.isPackaged ? join(process.resourcesPath, 'models') : join(app.getAppPath(), 'models')
   const models = new Models(app.getPath('userData'), bundledModels, (p) => send(win, 'models:progress', p))
   handle('models:dir', () => models.dir)
+  handle('models:catalog', () => kinkyravenModels())
   handle('models:status', (files) => models.status(files))
   handle('models:download', async (id, file) => {
-    await models.download(id, file)
+    await models.download(id, file.url ? file : { ...file, url: await account.modelLink(file.file) })
     library.wakeTagger()
   })
   handle('models:import', async (files) => {
@@ -196,8 +203,8 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   handle('dom:setPleasurePain', (pp) => dom.setPleasurePain(pp))
   handle('dom:ai', () => dom.ai())
   handle('dom:setAi', (ai) => dom.setAi(ai))
-  handle('dom:hasKey', () => dom.hasKey())
-  handle('dom:setKey', (key) => dom.setKey(key))
+  handle('dom:hasKey', (url) => dom.hasKey(url))
+  handle('dom:setKey', (url, key) => dom.setKey(url, key))
   handle('dom:ownModels', (url) => dom.ownModels(url))
   handle('dom:account', (free) => dom.account(free))
   const thenSync = <T>(signIn: Promise<T>) => signIn.then((result) => {
@@ -315,6 +322,7 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   library.setEmitter((event, payload) => {
     if (!win.isDestroyed() && !client.active) send(win, event, payload)
     remote.broadcast(event, payload)
+    if (event === 'library:changed') vr.libraryChanged()
   })
   client.setEmitter((event, payload) => {
     if (!win.isDestroyed()) send(win, event, payload)
@@ -347,6 +355,27 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   handle('library:reshuffle', () => library.reshuffle())
   handle('library:media', (id) => library.media(id))
   handle('library:projection', (path) => library.projection(path))
+  library.setPassthroughModel(() => {
+    const settings = store.get()
+    const id = passthroughModelId(settings.tracking.models.detector, settings.vr.passthroughModel)
+    const model = kinkyravenModels().find((m) => m.id === id)
+    return model !== undefined && Object.values(models.status(model.files.map((f) => f.file))).every((s) => s !== null)
+  })
+  const masks = join(app.getPath('userData'), 'masks')
+  remote.setMasks(masks)
+  const trackDir = (root: string, path: string) => {
+    const dir = join(root, String(library.byPath(path)?.id ?? `file-${createHash('sha256').update(path).digest('hex').slice(0, 16)}`))
+    void useMaskDir(root, dir).catch((error: unknown) => logEvent({ processType: 'main', reason: 'error', message: `mask tracks: ${String(error)}` }))
+    return dir
+  }
+  handle('passthrough:resolve', async (path, saved) => {
+    const resolved = await library.passthrough(path, readPassthrough(saved))
+    return resolved.mode === 'ai' ? { ...resolved, maskDir: trackDir(masks, path) } : resolved
+  })
+  const censorTracks = join(app.getPath('userData'), 'censor')
+  remote.setCensorTracks(censorTracks)
+  handle('censor:trackDir', (path) => trackDir(censorTracks, path))
+  handle('passthrough:sample', (path, timeSec, u, v) => library.samplePassthrough(path, timeSec, u, v))
   handle('library:suggestions', (id) => library.suggestions(id))
   handle('library:scriptFolders', (path) => library.scriptFolders(path))
   handle('library:byPath', (path) => library.byPath(path))
@@ -462,6 +491,7 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   handle('browser:setAdBlockEnabled', (enabled) => browser.setAdBlockEnabled(enabled))
   handle('browser:open', (url) => browser.open(url))
   handle('browser:openEroScripts', () => browser.openEroScripts())
+  handle('browser:eroFacets', () => browser.eroFacets())
   handle('browser:openSource', (url) => browser.openSource(url))
   handle('downloads:state', async () => (await queueReady).state())
   handle('downloads:enqueue', async (request) => {
@@ -512,13 +542,46 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   handle('remote:status', () => remote.status())
   handle('remote:publish', (state) => remote.publish(state))
   handle('remote:toys', (toys, host) => remote.setToys(toys, host))
+  handle('remote:censor', (look) => {
+    remote.setCensor(look)
+    const before = censorKey()
+    setPortalCensor(look)
+    if (censorKey() !== before) send(win, 'portals:toScene', { kind: 'censor' })
+  })
+  let prompts = 0
+  remote.pairing.setEmitters(
+    (list) => send(win, 'quest:headsets', list),
+    (list) => {
+      if (list.length > prompts && !win.isDestroyed()) {
+        if (win.isMinimized()) win.restore()
+        win.show()
+        win.focus()
+        win.flashFrame(true)
+      }
+      prompts = list.length
+      send(win, 'quest:prompts', list)
+    },
+  )
+  handle('quest:headsets', () => remote.pairing.headsets())
+  handle('quest:invite', (target) => remote.invite(target))
+  handle('quest:connect', (id) => remote.connect(id))
+  handle('quest:forget', (id) => remote.pairing.forget(id))
+  handle('quest:prompts', () => remote.pairing.prompts())
+  handle('quest:pin', (requestId, pin) => remote.pairing.pin(requestId, pin))
+  handle('quest:decline', (requestId) => remote.pairing.decline(requestId))
+  handle('quest:firewall', () => firewallBlocks())
+  handle('quest:allowFirewall', () => allowThroughFirewall())
   handle('remote:source', () => client.status())
   handle('remote:playing', () => client.playing)
   handle('player:control', (command) => send(win, 'player:control', command))
+  handle('vr:launch', () => launchSteamvr())
   handle('vr:start', () => vr.start())
   handle('vr:stop', () => vr.stop())
   handle('vr:state', (state) => vr.setState(state))
   handle('vr:panelState', () => vr.state)
   handle('vr:command', (command) => vr.command(command))
+  handle('vr:aim', (rays, stick) => vr.aim(rays, stick))
+  handle('portals:up', (message) => vr.portalUp(message))
+  if (!app.isPackaged) handle('portals:dev', (op) => vr.dev(op))
   handle('remote:scripts', (url) => client.scripts(url))
 }

@@ -1,4 +1,4 @@
-import { isPremium, useAccount } from '@/state/account'
+import { isFree, isPremium, useAccount } from '@/state/account'
 import { entitledMusicModel, isSupporterModel, type ModelInfo } from '@shared/tracking'
 import { Segmented } from '@/components/ui/Segmented'
 import { models } from '@/engine/client'
@@ -7,10 +7,11 @@ import { useSettings } from '@/state/settings'
 import { useTracking } from '@/state/tracking'
 import { SettingsAdvanced } from './SettingsSection'
 import { ModelDownloads } from './ModelDownloads'
+import { ModelSizeRow } from './ModelSizeRow'
+import { PassthroughModelRow } from './PassthroughModelRow'
 
 let cached: readonly ModelInfo[] | null = null
 const allModels = (): readonly ModelInfo[] => (cached ??= models())
-const NONE = 'none'
 
 function statusText(s: { status: string; error?: string | null; provider?: string | null } | null | undefined): string | null {
   if (!s) return null
@@ -23,6 +24,7 @@ function statusText(s: { status: string; error?: string | null; provider?: strin
 export function ModelPanel() {
   const t = useT()
   const premium = useAccount(isPremium)
+  const free = useAccount(isFree)
   const chosen = useSettings((s) => s.settings?.tracking.models ?? { detector: null, motion: null, music: null })
   const update = useSettings((s) => s.update)
   const refreshModels = useTracking((s) => s.refreshModels)
@@ -32,21 +34,15 @@ export function ModelPanel() {
   const present = useTracking((s) => s.present)
 
   const all = allModels()
-  const detectors = all.filter((m) => m.kind === 'detector')
   const ai = all.filter((m) => m.kind === 'motion' || m.kind === 'music')
   const musicModels = all.filter((m) => m.kind === 'music')
 
-  const choose = async (id: string) => {
-    await update((s) => ({ ...s, tracking: { ...s.tracking, models: { ...s.tracking.models, detector: id === NONE ? null : id } } }))
-    await refreshModels()
-  }
   const chooseMusic = async (id: string) => {
     await update((s) => ({ ...s, tracking: { ...s.tracking, models: { ...s.tracking.models, music: id } } }))
     await refreshModels()
   }
 
-  const options = [{ value: NONE, label: t('common.off') }, ...detectors.map((m) => ({ value: m.id, label: m.label }))]
-  const detectorText = statusText(detector)
+  const detectorText = free ? t('common.supporterOnly') : statusText(detector)
   return (
     <div data-setting="model-downloads" tabIndex={-1} aria-label={t('settings.page.models')}>
       <div className="panel">
@@ -58,10 +54,8 @@ export function ModelPanel() {
               {detectorText ? ` · ${detectorText}` : ''}
             </div>
           </span>
-          <span className="spacer" />
-          <Segmented options={options} value={chosen.detector ?? NONE} onChange={(id) => void choose(id)} label={t('settings.models.regionModel')} />
         </div>
-        <ModelDownloads models={detectors} onChange={() => void refreshModels()} />
+        <ModelSizeRow />
       </div>
       <div className="panel">
         {musicModels.length > 1 && (
@@ -102,6 +96,9 @@ export function ModelPanel() {
         />
       </div>
       <SettingsAdvanced page="models">
+        <div className="panel">
+          <PassthroughModelRow />
+        </div>
         <div className="panel">
           {[
             { label: t('settings.models.regionModel'), state: detector },

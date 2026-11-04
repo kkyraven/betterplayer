@@ -48,6 +48,37 @@ describe('StashAdapter', () => {
     })
   })
 
+  const unknownField = { errors: [{ message: 'Cannot query field "end_seconds" on type "SceneMarker".' }] }
+  it.each([
+    ['a GraphQL error', () => Response.json(unknownField)],
+    ['HTTP 422', () => Response.json(unknownField, { status: 422 })],
+  ])('imports scene markers as marks, asking an older Stash again without end times after %s', async (_, refusal) => {
+    const stamp = '2026-09-01T00:00:00Z'
+    const scene = {
+      id: '1', title: 'Scene', date: null, created_at: stamp, updated_at: stamp, rating100: null, interactive: false,
+      paths: { stream: 'https://stash.example/scene/1/stream', funscript: null, screenshot: null },
+      files: [{ path: '/m/a.mp4', duration: 100, width: 1920, height: 1080, size: 1, video_codec: 'h264' }],
+      tags: [], studio: null, details: null, performers: [],
+      scene_markers: [
+        { title: ' ', seconds: 40.5, end_seconds: 55, primary_tag: { name: ' Kiss ' } },
+        { title: 'Start', seconds: 3, primary_tag: { name: 'Intro' } },
+      ],
+    }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json({ data: { findScenes: { count: 1, scenes: [{ id: '1', updated_at: stamp }] } } }))
+      .mockResolvedValueOnce(refusal())
+      .mockResolvedValueOnce(Response.json({ data: { findScenes: { scenes: [scene] } } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const entries: RemoteEntry[] = []
+    for await (const batch of adapter().scenes(new Map(), () => {})) entries.push(...batch)
+    expect(entries[0]?.scene?.marks).toEqual([
+      { name: 'Start', startMs: 3000, endMs: null },
+      { name: 'Kiss', startMs: 40_500, endMs: 55_000 },
+    ])
+    expect(String(fetchMock.mock.calls[1]![1].body)).toContain('end_seconds')
+    expect(String(fetchMock.mock.calls[2]![1].body)).not.toContain('end_seconds')
+  })
+
   it('fetches every group page and orders direct members by scene index', async () => {
     const member = (id: string, group: string, index: number | null) => ({ id, groups: [{ group: { id: group }, scene_index: index }] })
     const fetchMock = responses(

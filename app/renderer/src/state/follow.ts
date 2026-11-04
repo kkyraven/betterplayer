@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { FollowState } from 'bp-engine'
-import type { RemoteStatus } from '@shared/ipc'
+import type { IpcEvents, RemoteStatus } from '@shared/ipc'
 import { mediaIdFromUrl } from '@shared/peer'
 import type { QuestHello } from '@shared/quest'
 import { engine } from '@/engine/client'
@@ -17,6 +17,7 @@ export const FOLLOW_LABELS: Record<FollowKind, string> = { deovr: 'DeoVR', heres
 const STORAGE_KEY = 'bp.follow'
 const DISMISSED_KEY = 'bp.follow.dismissed'
 const DISMISSED_MS = 4 * 60 * 60_000
+const STREAMING_MS = 2 * 60_000
 
 export interface FollowHalt {
   host: string
@@ -34,6 +35,7 @@ interface FollowStore {
   setHost: (host: string) => void
   start: () => void
   questHello: (hello: QuestHello & { host: string }) => void
+  played: (play: IpcEvents['headset:play']) => void
   stop: () => void
   update: (state: FollowState | null) => void
 }
@@ -82,6 +84,8 @@ export const useFollow = create<FollowStore>()((set, get) => {
   const save = () => localStorage.setItem(STORAGE_KEY, JSON.stringify({ kind: get().kind, host: get().host }))
   let lastPath: string | null | undefined
   let wasPlaying = false
+  let followedPlay = false
+  const streamed = new Map<string, { session: string; at: number }>()
   let dismissed = loadDismissed(Date.now())
   const isDismissed = (host: string, session: string) => {
     const d = dismissed[host]
@@ -116,14 +120,23 @@ export const useFollow = create<FollowStore>()((set, get) => {
       set({ matched: null })
     }
   }
-  const begin = (kind: FollowKind, host: string, quest: QuestHello | null) => {
+  const begin = (kind: FollowKind, host: string, quest: QuestHello | null, played = false) => {
     if (usePlayer.getState().path) usePlayer.getState().close()
+    followedPlay = played
     engine.follow(kind, host.trim() || '127.0.0.1', quest?.port)
     lastPath = undefined
     wasPlaying = true
     const { halted } = get()
     const keep = halted !== null && kind === 'quest' && halted.host === host
     set({ kind, host, quest, state: engine.followState(), matched: null, halted: keep ? halted : null })
+  }
+  const automatic = () => get().kind === 'quest' || followedPlay
+  const free = (followingIt: boolean) => {
+    const { state } = get()
+    const player = usePlayer.getState()
+    const vr = useVr.getState()
+    const taken = state !== null && !(followingIt || (automatic() && state.status !== 'connected'))
+    return !taken && !(player.path && !player.snapshot.paused) && !vr.active && !vr.starting
   }
   return {
     ...loadSetup(),
@@ -148,19 +161,31 @@ export const useFollow = create<FollowStore>()((set, get) => {
         return
       }
       if (isDismissed(host, quest.session)) return
-      const taken = s.state !== null && !(s.kind === 'quest' && (sameHost || s.state.status !== 'connected'))
-      const player = usePlayer.getState()
-      const vr = useVr.getState()
-      if (taken || (player.path && !player.snapshot.paused) || vr.active || vr.starting) return
+      if (!free(sameHost)) return
       begin('quest', host, quest)
+    },
+    played: ({ kind, host, mediaId }) => {
+      const s = get()
+      const key = `${kind}@${host}`
+      const session = String(mediaId)
+      streamed.set(key, { session, at: Date.now() })
+      if (s.state && s.kind === kind && s.host === host) return
+      if (isDismissed(key, session) || !free(false)) return
+      begin(kind, host, null, true)
     },
     stop: () => {
       const { kind, host, quest } = get()
+      const key = `${kind}@${host.trim()}`
+      const video = streamed.get(key)
       if (kind === 'quest' && quest) dismiss(host, quest.session)
+      else if (video && Date.now() - video.at < STREAMING_MS) dismiss(key, video.session)
+      streamed.delete(key)
+      const wasAutomatic = automatic()
+      followedPlay = false
       engine.unfollow()
       engine.unload()
       applyVideoToEngine(null)
-      set({ state: null, matched: null, halted: null, ...(kind === 'quest' ? { ...loadSetup(), quest: null } : {}) })
+      set({ state: null, matched: null, halted: null, ...(wasAutomatic ? { ...loadSetup(), quest: null } : {}) })
     },
     update: (state) => {
       const path = state?.path ?? null
@@ -188,6 +213,7 @@ export const useFollow = create<FollowStore>()((set, get) => {
 
 export function startHeadsets() {
   on('headset:hello', (hello) => useFollow.getState().questHello(hello))
+  on('headset:play', (play) => useFollow.getState().played(play))
   on('headset:bye', ({ host }) => {
     const s = useFollow.getState()
     if (s.state && s.kind === 'quest' && s.host === host) s.stop()

@@ -7,6 +7,7 @@ import { TooltipGroup } from '@/components/ui/TooltipGroup'
 import { invoke, on } from '@/ipc'
 import { cx } from '@/lib/cx'
 import { fmtDuration } from '@/lib/format'
+import { scrubberMarks } from '@/lib/marks'
 import { Scrubber } from '@/screens/player/Scrubber'
 import { TimeText } from '@/screens/player/ControlBar'
 import { intensityAt, phaseAt } from '@/session/pacing'
@@ -34,6 +35,7 @@ function StripContent() {
   const paused = usePlayer((s) => s.snapshot.paused)
   const scripts = usePlayer((s) => s.scripts)
   const strip = usePlayer((s) => s.media?.strip ?? null)
+  const marks = usePlayer((s) => s.media?.marks)
   const playlist = usePlayer((s) => s.playlist)
   const togglePlay = usePlayer((s) => s.togglePlay)
   const seek = usePlayer((s) => s.seek)
@@ -53,8 +55,7 @@ function StripContent() {
   const openPlayer = () => setScreen('player')
 
   const stroke = scripts.find((s) => s.axis === 'L0' && s.selected) ?? scripts.find((s) => s.selected) ?? scripts[0]
-  const chapters = useMemo(() => scripts.filter((s) => s.selected).flatMap((s) => s.chapters), [scripts])
-  const bookmarks = useMemo(() => scripts.filter((s) => s.selected).flatMap((s) => s.bookmarks), [scripts])
+  const { chapters, bookmarks } = useMemo(() => scrubberMarks(scripts, marks), [scripts, marks])
 
   return (
     <>

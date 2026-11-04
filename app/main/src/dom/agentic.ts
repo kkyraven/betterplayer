@@ -97,6 +97,7 @@ export class AgenticLover {
   async login(email: string, password: string) {
     const res = await fetch(`${AGENTIC_LOVER_API}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) })
     const json = (await res.json().catch(() => ({}))) as AuthJson & { error?: string; message?: string }
+    if ([400, 401, 404].includes(res.status)) throw domError('wrongLogin')
     if (!res.ok) throw new Error(json.error ?? json.message ?? `${res.status}`)
     this.email = email
     this.db.setMeta('alEmail', email)

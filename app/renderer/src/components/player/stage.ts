@@ -1,9 +1,9 @@
-import { flatEye, type Projection } from '@shared/projection'
+import { flatEye, lensDegrees, type Projection } from '@shared/projection'
 import * as client from '@/engine/client'
 import { side } from '@/engine/side'
 import { on } from '@/ipc'
 import { toRgb } from '@/lib/rgb'
-import { MAX_BOXES, goonerMask } from '@/state/gooner'
+import { MAX_BOXES, censorMask, type CensorMask } from '@/state/censor'
 import * as live from '@/state/live'
 import { useCompare } from '@/state/compare'
 import { usePlayer } from '@/state/player'
@@ -11,6 +11,8 @@ import { needsFrames, useTracking } from '@/state/tracking'
 import { useVr } from '@/state/vr'
 
 const TRACK_MIN_INTERVAL_MS = 1000 / 30
+const CENSOR_WAIT_MS = 100
+const CENSOR_CATCH_UP_MS = 34
 const RESIZE_SETTLE_MS = 120
 
 function tracksFrames(): boolean {
@@ -31,6 +33,8 @@ const float PI = 3.141592653589793;
 const int MAX_BOXES = ${MAX_BOXES};
 uniform sampler2D tex;
 uniform sampler2D tex2;
+uniform sampler2D skin;
+uniform int skinOn;
 uniform int split;
 uniform int bgra;
 uniform int mode;
@@ -48,7 +52,7 @@ in vec2 uv;
 out vec4 o;
 float masked(vec2 t) {
   float feather = maskMode == 1 ? 0.015 : 0.0;
-  float m = 0.0;
+  float m = skinOn == 1 ? smoothstep(0.35, 0.65, texture(skin, t).r) : 0.0;
   for (int i = 0; i < MAX_BOXES; i++) {
     if (i >= boxCount) break;
     vec4 b = boxes[i];
@@ -73,7 +77,7 @@ vec4 hidden(sampler2D s, vec2 t) {
 }
 vec4 pickFrom(sampler2D s, vec2 t) {
   vec4 c = texture(s, t);
-  if (maskMode != 0 && boxCount > 0) {
+  if (maskMode != 0 && (boxCount > 0 || skinOn == 1)) {
     float m = masked(t);
     if (m > 0.0) c = mix(c, hidden(s, t), m);
   }
@@ -142,7 +146,7 @@ const DEFAULT_LOOK: Look = { yaw: 0, pitch: 0, fov: (90 * Math.PI) / 180 }
 class Stage {
   readonly canvas = document.createElement('canvas')
   private readonly gl: WebGL2RenderingContext
-  private uniforms!: Record<'mode' | 'hfov' | 'eyes' | 'eye' | 'outSize' | 'eyeSize' | 'look' | 'maskMode' | 'maskLevel' | 'boxCount' | 'boxes' | 'split', WebGLUniformLocation | null>
+  private uniforms!: Record<'mode' | 'hfov' | 'eyes' | 'eye' | 'outSize' | 'eyeSize' | 'look' | 'maskMode' | 'maskLevel' | 'boxCount' | 'boxes' | 'split' | 'skinOn', WebGLUniformLocation | null>
   private lost = false
   private tex: WebGLTexture | null = null
   private tex2: WebGLTexture | null = null
@@ -167,6 +171,9 @@ class Stage {
   private lastTrack = 0
   private maskOn = false
   private maskVersion = -1
+  private skinTex: WebGLTexture | null = null
+  private skinData: CensorMask['skin'] = null
+  private pending: { serial: number; first: number; since: number } | null = null
   private mips = false
   private mips2 = false
 
@@ -189,6 +196,8 @@ class Stage {
       this.texH = 0
       this.hasFrame = false
       this.maskVersion = -1
+      this.skinTex = null
+      this.skinData = null
       this.lost = false
       this.ensureTexture()
       this.dirty = true
@@ -240,9 +249,10 @@ class Stage {
     const u = (name: string) => gl.getUniformLocation(prog, name)
     gl.uniform1i(u('tex'), 0)
     gl.uniform1i(u('tex2'), 1)
+    gl.uniform1i(u('skin'), 2)
     gl.uniform1i(u('bgra'), client.engine.bgra() ? 1 : 0)
     gl.uniform1i(u('split'), this.split ? 1 : 0)
-    this.uniforms = { mode: u('mode'), hfov: u('hfov'), eyes: u('eyes'), eye: u('eye'), outSize: u('outSize'), eyeSize: u('eyeSize'), look: u('look'), maskMode: u('maskMode'), maskLevel: u('maskLevel'), boxCount: u('boxCount'), boxes: u('boxes'), split: u('split') }
+    this.uniforms = { mode: u('mode'), hfov: u('hfov'), eyes: u('eyes'), eye: u('eye'), outSize: u('outSize'), eyeSize: u('eyeSize'), look: u('look'), maskMode: u('maskMode'), maskLevel: u('maskLevel'), boxCount: u('boxCount'), boxes: u('boxes'), split: u('split'), skinOn: u('skinOn') }
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4)
   }
 
@@ -263,14 +273,14 @@ class Stage {
   capture() {
     const p = usePlayer.getState()
     const source = this.frameSource
-    if (!this.hasFrame || this.lost || !this.presenting || !source || !p.path || p.audio || !p.snapshot.loaded || source.path !== p.path || source.seekGeneration !== live.get().seekGeneration) return null
+    if (!this.hasFrame || this.lost || !this.presenting || (this.pending && this.maskOn) || !source || !p.path || p.audio || !p.snapshot.loaded || source.path !== p.path || source.seekGeneration !== live.get().seekGeneration) return null
     const canvas = document.createElement('canvas')
     const scale = Math.min(1, 960 / Math.max(this.canvas.width, this.canvas.height))
     canvas.width = Math.max(1, Math.round(this.canvas.width * scale))
     canvas.height = Math.max(1, Math.round(this.canvas.height * scale))
     const ctx = canvas.getContext('2d')
     if (!ctx) return null
-    this.applyMask(performance.now())
+    this.applyMask(censorMask())
     this.draw()
     ctx.drawImage(this.canvas, 0, 0, canvas.width, canvas.height)
     const url = canvas.toDataURL('image/jpeg', 0.8)
@@ -353,7 +363,7 @@ class Stage {
   private ensureTexture() {
     const { gl, canvas } = this
     if (this.tex && this.texW === client.width && this.texH === client.height && this.texHalf === client.half) return
-    const old = this.hasFrame ? this.tex : null
+    const old = this.hasFrame && !(this.pending && this.maskOn) ? this.tex : null
     if (this.tex && !old) gl.deleteTexture(this.tex)
     this.texW = client.width
     this.texH = client.height
@@ -374,19 +384,20 @@ class Stage {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
     if (old) gl.deleteTexture(old)
     this.hasFrame = false
+    this.pending = null
     this.mips = false
     this.dirty = false
     if (this.split) this.ensureSideTexture()
   }
 
-  private applyMask(now: number): boolean {
+  private applyMask(mask: CensorMask | null): boolean {
     const { gl, uniforms: u } = this
-    const mask = goonerMask(now)
     let changed = false
     if ((mask !== null) !== this.maskOn) {
       this.maskOn = mask !== null
       this.maskVersion = -1
       gl.uniform1i(u.maskMode, 0)
+      if (!mask) this.uploadSkin(null)
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, this.maskOn ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR)
       if (this.tex2) {
         gl.activeTexture(gl.TEXTURE1)
@@ -401,6 +412,7 @@ class Stage {
       gl.uniform1f(u.maskLevel, mask.strength)
       gl.uniform1i(u.boxCount, mask.count)
       gl.uniform4fv(u.boxes, mask.boxes)
+      if (mask.skin !== this.skinData) this.uploadSkin(mask.skin)
       changed = true
     }
     if (mask && !this.mips && this.hasFrame) {
@@ -416,6 +428,28 @@ class Stage {
     return changed
   }
 
+  private uploadSkin(skin: CensorMask['skin']) {
+    const { gl, uniforms: u } = this
+    this.skinData = skin
+    gl.uniform1i(u.skinOn, skin ? 1 : 0)
+    if (!skin) return
+    gl.activeTexture(gl.TEXTURE2)
+    if (!this.skinTex) {
+      this.skinTex = gl.createTexture()
+      gl.bindTexture(gl.TEXTURE_2D, this.skinTex)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    } else {
+      gl.bindTexture(gl.TEXTURE_2D, this.skinTex)
+    }
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, skin.width, skin.height, 0, gl.RED, gl.UNSIGNED_BYTE, skin.data)
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4)
+    gl.activeTexture(gl.TEXTURE0)
+  }
+
   private clear() {
     const { gl } = this
     gl.clearColor(0, 0, 0, 1)
@@ -426,7 +460,7 @@ class Stage {
   private draw() {
     const { gl, uniforms: u, projection: p, look: l } = this
     gl.uniform1i(u.mode, p.kind === 'flat' ? 0 : p.kind === 'fisheye' ? 2 : 1)
-    gl.uniform1f(u.hfov, p.kind === 'equirect360' ? Math.PI * 2 : p.kind === 'fisheye' ? (p.fov * Math.PI) / 180 : Math.PI)
+    gl.uniform1f(u.hfov, p.kind === 'equirect360' ? Math.PI * 2 : ((lensDegrees(p) ?? 180) * Math.PI) / 180)
     gl.uniform1i(u.eyes, this.texHalf ? 0 : p.layout === 'sbs' ? 1 : p.layout === 'ou' ? 2 : 0)
     gl.uniform1i(u.eye, p.swapEyes ? 1 : 0)
     gl.uniform2f(u.outSize, this.canvas.width, this.canvas.height)
@@ -456,6 +490,7 @@ class Stage {
         this.mips2 = false
         this.dirty = true
       }
+      const mask = censorMask()
       if (buffer && buffer.length === bytes) {
         const { gl } = this
         gl.bindTexture(gl.TEXTURE_2D, this.tex)
@@ -463,8 +498,8 @@ class Stage {
         this.hasFrame = true
         this.frameSource = { path: usePlayer.getState().path, seekGeneration: live.get().seekGeneration, timeMs: live.get().timeMs }
         this.mips = false
-        this.applyMask(now)
-        this.draw()
+        const serial = client.engine.frameSerial()
+        this.pending = { serial, first: this.pending?.first ?? serial, since: this.pending?.since ?? now }
         if (tracksFrames()) {
           if (now - this.lastTrack >= TRACK_MIN_INTERVAL_MS) {
             this.lastTrack = now
@@ -472,7 +507,16 @@ class Stage {
             client.engine.trackFrame(f.rgb, f.width, f.height, live.get().timeMs, 3)
           }
         }
-      } else if (this.hasFrame && (this.applyMask(now) || this.dirty)) {
+      }
+      const p = this.pending
+      if (p) {
+        const waited = now - p.since
+        if (!mask?.ready || mask.serial >= p.serial || (mask.serial >= p.first && waited >= CENSOR_CATCH_UP_MS) || waited >= CENSOR_WAIT_MS) {
+          this.pending = null
+          this.applyMask(mask)
+          this.draw()
+        }
+      } else if (this.hasFrame && (this.applyMask(mask) || this.dirty)) {
         this.draw()
       }
     }

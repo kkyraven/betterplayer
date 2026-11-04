@@ -18,3 +18,22 @@
 .tv .ih-toast { bottom: 64px; }
 .tv:not([data-stage]) .ih-toast { bottom: 136px; }
 .tv .ih-toast .toast { min-height: 64px; padding: 0 24px; border-radius: 16px; font-size: 20px; background: var(--bg-2); backdrop-filter: none; -webkit-backdrop-filter: none; }
+
+.in-headset.vr-offer { z-index: 40; }
+.vr-offer-card { display: grid; justify-items: center; gap: 10px; max-width: 460px; text-align: center; }
+.vr-offer .vr-offer-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 10px; }
+.vr-offer .vr-offer-actions .btn { margin-top: 0; }
+.vr-offer-fine { font-size: 12px; color: var(--text-3); }
+.vr-offer-fine.error { color: var(--danger); }
+.vr-offer-link { padding: 0; border: 0; background: none; color: var(--accent); font: inherit; cursor: pointer; }
+.vr-offer-link:hover:not(:disabled) { text-decoration: underline; }
+.vr-offer-link:disabled { color: var(--text-3); cursor: default; }
+
+.tv .in-headset.vr-offer { position: fixed; z-index: 60; }
+.tv .vr-offer-card { max-width: 860px; padding: 44px 56px; gap: 14px; border-radius: 24px; background: var(--bg-2); border: 1px solid var(--line-2); box-shadow: var(--shadow); }
+.tv .vr-offer .ih-icon { width: 88px; height: 88px; }
+.tv .vr-offer h2 { margin: 0; font-size: 34px; letter-spacing: -0.02em; }
+.tv .vr-offer .muted { font-size: 20px; }
+.tv .vr-offer .vr-offer-actions { gap: 12px; margin-top: 16px; }
+.tv .vr-offer .vr-offer-actions .btn { height: 64px; padding: 0 28px; font-size: 20px; border-radius: 16px; }
+.tv .vr-offer-fine { font-size: 17px; }

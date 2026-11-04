@@ -3,11 +3,11 @@
 
 import { create } from 'zustand'
 import { AXIS_IDS, type AxisId } from '@shared/axes'
-import { denialFires, detectKindIds, restrictDenial } from '@shared/gooner'
+import { denialFires, detectKindIds, restrictDenial } from '@shared/censor'
 import { defaultAxisSettings, defaultDenial, type AxisSettings, type DenialAxis, type DenialSettings } from '@shared/settings'
 import { engine } from '@/engine/client'
 import { isPremium, useAccount } from './account'
-import { useGooner } from './gooner'
+import { useCensor } from './censor'
 import { axisValue } from './live'
 import { onPlayback, usePlayer } from './player'
 import { useSettings } from './settings'
@@ -25,7 +25,7 @@ export const useDenial = create<DenialStore>()((_set, get) => ({
   firing: false,
   set: async (patch) => {
     const current = get().denial
-    const next = restrictDenial(current, { ...current, ...patch }, useGooner.getState().locked)
+    const next = restrictDenial(current, { ...current, ...patch }, useCensor.getState().locked)
     await useSettings.getState().update((s) => ({ ...s, denial: next }))
   },
 }))

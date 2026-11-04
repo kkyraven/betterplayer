@@ -2,8 +2,9 @@ import { ChevronDown, ChevronRight, Minus, Plus, X } from 'lucide-react'
 import { useState } from 'react'
 import type { MessageKey } from '@shared/i18n'
 import { AXES, AXIS_LABEL, AXIS_NAME, isAxisId, type AxisId } from '@shared/axes'
-import { LAYOUTS, LAYOUT_LABELS, PROJECTION_KINDS, PROJECTION_LABELS, PROJECTION_SOURCE_LABELS } from '@shared/projection'
+import { LAYOUTS, LAYOUT_LABELS, PROJECTION_KINDS, PROJECTION_LABELS, PROJECTION_SOURCE_LABELS, lensDegrees, withLens } from '@shared/projection'
 import { PARAM_AXES, PARAM_SOURCES, defaultAxisSettings, type AxisSettings, type FrameGenOverride, type ParamAxisId, type ParamSourceKind } from '@shared/settings'
+import { VR_LENS } from '@shared/vr'
 import { DetectionFields } from '@/components/estim/DetectionFields'
 import { LiveMarker } from '@/components/player/LiveMarker'
 import { Button } from '@/components/ui/Button'
@@ -373,6 +374,8 @@ function ProjectionTab() {
   const hint = PROJECTION_SOURCE_LABELS[source]
   const kinds = PROJECTION_KINDS.map((k) => ({ value: k, label: t(PROJECTION_LABELS[k]) }))
   const layouts = LAYOUTS.map((l) => ({ value: l, label: t(LAYOUT_LABELS[l]) }))
+  const lens = lensDegrees(projection)
+  const { min: lensMin, max: lensMax } = VR_LENS[projection.kind === 'equirect180' ? 'equirect180' : 'fisheye']
   return (
     <>
       <div className="grp">
@@ -393,12 +396,12 @@ function ProjectionTab() {
           )}
         </div>
       )}
-      {projection.kind === 'fisheye' && (
+      {lens !== null && (
         <div className="grp">
           <div className="lbl">
-            {t('player.sideSheet.lens')}<span className="hint">{projection.fov}°</span>
+            {t('player.sideSheet.lens')}<span className="hint">{lens}°</span>
           </div>
-          <Slider value={[projection.fov]} min={150} max={240} label={t('player.sideSheet.lensCoverage')} onValueChange={([fov]) => setProjection({ ...projection, fov: fov ?? 190 })} />
+          <Slider value={[lens]} min={lensMin} max={lensMax} label={t('player.sideSheet.lensCoverage')} onValueChange={([v]) => setProjection(withLens(projection, v ?? lens))} />
         </div>
       )}
       {source === 'user' && (

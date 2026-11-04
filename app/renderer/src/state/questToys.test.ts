@@ -3,7 +3,7 @@ import type { FollowState, OutputState } from 'bp-engine'
 import { AXIS_IDS } from '@shared/axes'
 import type { IpcEvents } from '@shared/ipc'
 import type { QuestToys } from '@shared/quest'
-import { defaultAxisSettings, type PerVideoSettings, type Settings } from '@shared/settings'
+import { defaultAxisSettings, defaultEstim, type PerVideoSettings, type Settings } from '@shared/settings'
 
 const native = vi.hoisted(() => ({ setAxis: vi.fn(), setGlobalOffsetMs: vi.fn() }))
 const listeners = vi.hoisted(() => new Map<string, (payload: unknown) => void>())
@@ -23,33 +23,12 @@ vi.mock('./devices', async () => ({
   useDevices: (await import('zustand')).create(() => ({ outputs: [], states: {}, reconnect: vi.fn() })),
   outputName: (config: { name?: string }) => config.name ?? '',
 }))
+vi.mock('./estim', () => ({ setEstim: vi.fn(), volumeHeld: () => false }))
 vi.mock('./player', async () => ({ usePlayer: (await import('zustand')).create(() => ({ snapshot: { flagsVersion: 0 } })) }))
 vi.mock('./settings', async () => ({ useSettings: (await import('zustand')).create(() => ({ settings: null })) }))
 
 const DEFAULTS = { ...Object.fromEntries(AXIS_IDS.map((id) => [id, defaultAxisSettings(id)])), L0: { ...defaultAxisSettings('L0'), amplitude: 0.8 } } as Settings['axesDefault']
 const amplitude = (value: number) => ({ ...defaultAxisSettings('L0'), amplitude: value })
-
-describe('videoToys', () => {
-  it('shows the first shown axis: its override, else its default', async () => {
-    const { videoToys } = await import('./questToys')
-    const video: PerVideoSettings = { globalOffsetMs: -40, axes: { L0: amplitude(1.5) } }
-    expect(videoToys(12, video, ['L0', 'R0'], DEFAULTS)).toEqual({ mediaId: 12, intensity: 1.5, offsetMs: -40 })
-    expect(videoToys(12, { ...video, axes: {} }, ['L0'], DEFAULTS).intensity).toBe(0.8)
-    expect(videoToys(12, video, [], DEFAULTS).intensity).toBe(1)
-  })
-})
-
-describe('withToyCommand', () => {
-  it('moves every scripted axis by the same step, floored at 0, and sets the offset', async () => {
-    const { withToyCommand } = await import('./questToys')
-    const video: PerVideoSettings = { globalOffsetMs: 0, axes: { R0: amplitude(0.2) }, position: 9_000 }
-    const next = withToyCommand(video, { kind: 'intensity', mediaId: 12, value: 0.5 }, ['L0', 'R0'], 0.8, DEFAULTS)
-    expect(next.axes.L0?.amplitude).toBe(0.5)
-    expect(next.axes.R0?.amplitude).toBe(0)
-    expect(next.position).toBe(9_000)
-    expect(withToyCommand(video, { kind: 'offset', mediaId: 12, ms: 250 }, ['L0'], 1, DEFAULTS)).toEqual({ ...video, globalOffsetMs: 250 })
-  })
-})
 
 describe('startQuestToys', () => {
   const QUEST = '192.168.1.40'
@@ -79,17 +58,17 @@ describe('startQuestToys', () => {
     const { useFollow } = await import('./follow')
     const { useDevices } = await import('./devices')
     const { useSettings } = await import('./settings')
-    useSettings.setState({ settings: { axesDefault: DEFAULTS } as Settings })
+    useSettings.setState({ settings: { axesDefault: DEFAULTS, estim: defaultEstim() } as Settings })
     useDevices.setState({ outputs: [{ id: 3, config: { id: 'h1', kind: 'handy', profile: 'stroker', name: 'Handy' } }], states: { 3: { status: 'connected' } as OutputState } })
     const { startQuestToys } = await import('./questToys')
     startQuestToys()
-    expect(published()).toEqual({ outputs: [{ id: 'h1', name: 'Handy', connected: true }], video: null })
+    expect(published()).toEqual({ outputs: [{ id: 'h1', name: 'Handy', connected: true }], video: null, estim: [] })
     expect(lastToys()?.[2]).toBeNull()
 
     useFollow.setState({ kind: 'quest', host: QUEST, state: PLAYING })
     useFollow.setState({ matched: { path: TWELVE, title: 'Twelve' } })
     await settle()
-    expect(published()?.video).toEqual({ mediaId: 12, intensity: 1.5, offsetMs: 40 })
+    expect(published()?.video).toEqual({ mediaId: 12, intensity: 1.5, offsetMs: 40, range: { min: 0, max: 1 } })
     expect(lastToys()?.[2]).toBe(QUEST)
 
     send({ kind: 'intensity', mediaId: 12, value: 1, host: '192.168.1.41' })
@@ -102,13 +81,22 @@ describe('startQuestToys', () => {
     expect(native.setAxis).toHaveBeenCalledWith('L0', amplitude(1.2))
     expect(native.setAxis).toHaveBeenCalledWith('R0', { ...defaultAxisSettings('R0'), amplitude: 0.7 })
     expect(native.setGlobalOffsetMs).toHaveBeenCalledWith(-100)
-    expect(published()?.video).toEqual({ mediaId: 12, intensity: 1.2, offsetMs: -100 })
+    expect(published()?.video).toEqual({ mediaId: 12, intensity: 1.2, offsetMs: -100, range: { min: 0, max: 1 } })
 
     saved[TWELVE] = { ...saved[TWELVE]!, position: 20_000 }
     expect(invoke).not.toHaveBeenCalledWith('video:set', TWELVE, expect.anything())
     vi.advanceTimersByTime(300)
     await settle()
     expect(saved[TWELVE]).toEqual({ globalOffsetMs: -100, axes: { L0: amplitude(1.2), R0: { ...defaultAxisSettings('R0'), amplitude: 0.7 } }, position: 20_000 })
+
+    send({ kind: 'range', mediaId: 12, min: 0.2, max: 0.9, host: QUEST })
+    expect(native.setAxis).toHaveBeenCalledWith('L0', { ...amplitude(1.2), min: 0.2, max: 0.9 })
+
+    const { setEstim } = await import('./estim')
+    send({ kind: 'restimVolume', change: 0.5, host: '192.168.1.41' })
+    expect(setEstim).not.toHaveBeenCalled()
+    send({ kind: 'restimVolume', change: 0.5, host: QUEST })
+    expect(setEstim).toHaveBeenCalled()
 
     send({ kind: 'reconnect', id: 'h1', host: '192.168.1.41' })
     expect(useDevices.getState().reconnect).toHaveBeenCalledWith(3)

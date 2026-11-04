@@ -1,10 +1,12 @@
 mod beat;
+mod censor;
 mod clock;
 mod detect;
 mod follow;
 mod generate;
 mod hero;
 mod lookahead;
+mod matte;
 mod motion;
 mod params;
 mod pass;
@@ -47,12 +49,14 @@ pub use bp_beat::{
     ONSET_HOP_MS as BEAT_ONSET_HOP_MS, Style as BeatStyle, analyse as beat_analyse,
     grid50 as beat_grid50, generate as beat_generate, GenerateOptions as BeatGenerateOptions, BeatTrack,
 };
-pub use bp_detect::{Kind as DetectKind, MODELS, ModelSpec, Rect as DetectRect};
+pub use bp_detect::{Kind as DetectKind, ModelSpec, Rect as DetectRect, Variant as ModelVariant};
 pub use bp_hero::{
     BUCKET_NAMES as HERO_BUCKET_NAMES, BUCKETS as HERO_BUCKETS, Direction as HeroDirection,
     Hero as RawHero, Note as HeroNote, Options as HeroOptions, Rect as HeroRect,
 };
 pub use bp_model::{MODELS as AI_MODELS, ModelKind, ModelSpec as AiModelSpec, TOO_SLOW_MS};
+pub use censor::{CensorModels, CensorRun, CensorStatus};
+pub use matte::{EyeLayout, Maker as MatteMaker, MatteSetup, MatteState, MatteStatus};
 pub use detect::{DetectSnapshot, DetectStatus, Found, Verdict};
 pub use generate::{GenerateProgress, GenerateStatus, Generation};
 pub use hero::{ColourRule, Flourish, HeroSnapshot, MusicOptions as HeroMusicOptions, MusicRule as HeroMusicRule};
@@ -64,7 +68,7 @@ pub use range::{
 
 pub use bp_axes::{Provider, SmartLimit};
 pub use bp_devices::{RampConfig, RampProgress};
-pub use bp_player::{External, RenderSnapshot};
+pub use bp_player::{External, RenderSnapshot, VrCensor};
 pub use bp_script::{Bookmark, Chapter, Interpolation};
 use bp_tracking::CutDetector;
 pub use bp_tracking::{
@@ -315,7 +319,7 @@ fn energies(axes: &TrackAxes) -> [f64; Component::COUNT] {
     out
 }
 
-pub type DetectorModel = (&'static ModelSpec, PathBuf, Option<PathBuf>);
+pub type DetectorModel = (Arc<ModelSpec>, Option<PathBuf>);
 
 pub type AiModel = (&'static AiModelSpec, PathBuf, PathBuf, Option<PathBuf>);
 
@@ -561,6 +565,9 @@ pub struct Engine {
     shared: Arc<Shared>,
     tick: Option<JoinHandle<()>>,
     follow: Mutex<Option<Follow>>,
+    censor: Mutex<Option<censor::Censor>>,
+    matte: Mutex<Option<matte::MatteTrack>>,
+    censor_track: Mutex<Option<matte::MatteTrack>>,
     hz: u32,
     next_output: u32,
 }
@@ -668,6 +675,9 @@ impl Engine {
             shared,
             tick: Some(tick),
             follow: Mutex::new(None),
+            censor: Mutex::new(None),
+            matte: Mutex::new(None),
+            censor_track: Mutex::new(None),
             hz: opts.hz,
             next_output: 1,
         })
@@ -1155,6 +1165,69 @@ impl Engine {
     pub fn wants_frames(&self) -> bool {
         self.shared.detect_wanted.load(Ordering::Relaxed)
             || self.shared.boxes_wanted.load(Ordering::Relaxed)
+    }
+
+    pub fn set_censor(&self, setup: Option<(CensorModels, Vec<DetectKind>)>) {
+        let mut current = self.censor.lock().unwrap();
+        match (setup, current.as_mut()) {
+            (None, _) => {
+                self.player.set_frame_tap(None);
+                *current = None;
+            }
+            (Some((models, kinds)), Some(c)) => {
+                c.set_models(models);
+                c.set_kinds(kinds);
+            }
+            (Some((models, kinds)), None) => {
+                let c = censor::Censor::start(models, kinds);
+                self.player.set_frame_tap(Some(c.tap(self.player.bgra())));
+                *current = Some(c);
+            }
+        }
+    }
+
+    pub fn censor_run(&self, mask_version: u64) -> Option<CensorRun> {
+        self.censor.lock().unwrap().as_ref().map(|c| c.run(mask_version))
+    }
+
+    pub fn matte_start(&self, setup: MatteSetup) {
+        let mut slot = self.matte.lock().unwrap();
+        if slot.as_ref().is_some_and(|m| m.setup == setup) {
+            return;
+        }
+        *slot = None;
+        let hwdec = Some(self.player.hwdec_current()).filter(|h| !h.is_empty());
+        let track = matte::MatteTrack::start(self.shared.clone(), setup, hwdec);
+        self.player.vr_matte(Some(track.source()));
+        *slot = Some(track);
+    }
+
+    pub fn censor_track(&self, setup: Option<MatteSetup>, look: Option<VrCensor>) {
+        let mut slot = self.censor_track.lock().unwrap();
+        let setup = setup.filter(|_| look.is_some());
+        if slot.as_ref().map(|m| &m.setup) != setup.as_ref() {
+            *slot = None;
+            let hwdec = Some(self.player.hwdec_current()).filter(|h| !h.is_empty());
+            *slot = setup.map(|s| matte::MatteTrack::start(self.shared.clone(), s, hwdec));
+        }
+        self.player.vr_censor(look, slot.as_ref().map(|t| t.source()));
+    }
+
+    pub fn censor_track_status(&self) -> Option<MatteStatus> {
+        self.censor_track.lock().unwrap().as_ref().map(|m| m.status())
+    }
+
+    pub fn matte_stop(&self) {
+        self.player.vr_matte(None);
+        *self.matte.lock().unwrap() = None;
+    }
+
+    pub fn matte_status(&self) -> Option<MatteStatus> {
+        self.matte.lock().unwrap().as_ref().map(|m| m.status())
+    }
+
+    pub fn frame_serial(&self) -> u64 {
+        self.player.frame_serial()
     }
 
     pub fn set_boxes_wanted(&self, wanted: bool) {
@@ -1941,6 +2014,8 @@ impl Engine {
         if let Some(mut t) = self.shared.track.lock().unwrap().take() {
             t.stop();
         }
+        self.matte_stop();
+        self.censor_track(None, None);
         self.shared.stop.store(true, Ordering::Relaxed);
         if let Some(t) = self.tick.take() {
             let _ = t.join();

@@ -2,7 +2,7 @@ use std::ffi::{CStr, CString, c_char};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use bp_vr::{Eye, Frame, Pose, Recentre, Scene, eye_view};
+use bp_vr::{Aim, Buzz, Drag, Eye, Frame, Grab, Offset, Pose, Ray, Recentre, Scene, Shortcut, eye_view};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, ID3D11Device, ID3D11Texture2D,
 };
@@ -10,11 +10,13 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SA
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::core::Interface;
 
+use super::controllers::Controllers;
 use super::egl::{Context, D3dImage};
 use crate::gl_context::{GlContext, Gpu};
 use crate::mpv::{mpv_render_context, mpv_render_context_report_swap};
 use crate::render::{draw_mpv, skip_one, take_gl_error};
 use crate::vr::{ASKED, VrKind, VrLayout, VrStatus, VrView};
+use crate::{Feather, KEYING, KeyMode, Matte, VrPassthrough, VrPick};
 
 const SCREEN_RADIUS: f32 = 3.0;
 
@@ -33,6 +35,21 @@ const float RADIUS = 3.0;
 const float FLOOR = -1.3;
 // Footprints are scaled by this before filtering: about 0.4 of a mip level sharper.
 const float SHARPEN = 0.75;
+// VR_PASSTHROUGH_KEY in app/shared/vr.ts.
+const vec3 PASS = vec3(0.0, 1.0, 0.0);
+// KEY_SOFT_FROM, KEY_SOFT_TO, KEY_GREY_FROM, KEY_GREY_TO, KEY_SPILL and KEY_FILL* in app/shared/passthrough.ts.
+const float SOFT_FROM = 0.03;
+const float SOFT_TO = 0.95;
+const float GREY_FROM = 0.005;
+const float GREY_TO = 0.06;
+const float SPILL = 0.27;
+const float FILL = 0.06;
+const float FILL_NEAR_FROM = 0.008;
+const float FILL_NEAR_TO = 0.02;
+const float FILL_FAR_FROM = 0.025;
+const float FILL_FAR_TO = 0.06;
+// The Pick's reticle: a ring this many eye pixels round where the controller aims.
+const float RETICLE = 14.0;
 uniform sampler2D video;
 uniform vec2 size;
 uniform vec4 tangents;
@@ -44,11 +61,172 @@ uniform int stereo;
 uniform int side;
 uniform vec2 screen;
 uniform float pixel;
+// 1 keys `keyColour` out of the video, 2 keys by `mask`; 0 keys nothing.
+uniform int keying;
+uniform vec3 keyColour;
+// 0 Edges, 1 Colour distance.
+uniform int feather;
+uniform float featherPx;
+// The AI mask over one eye's picture, 1 where the video shows (`matte::showing`).
+uniform sampler2D mask;
+// 1 shows the room (the pass colour) round the picture and wherever it is keyed.
+uniform int passRoom;
+// Beta Censoring: 0 off, 1 blur, 2 pixels, at `censorLevel` (0 to 1). `censor` is 1 where the
+// picture is hidden, over the whole frame; with `censorWhole` 1 all of it is.
+uniform int censorMode;
+uniform float censorLevel;
+uniform int censorWhole;
+uniform sampler2D censor;
+// The Pick's aim on the picture (u, v) when z is 1.
+uniform vec3 reticle;
 out vec4 o;
 vec2 eyeOf(vec2 t) {
   if (stereo == 1) t.x = t.x * 0.5 + float(side) * 0.5;
   else if (stereo == 2) t.y = t.y * 0.5 + float(side) * 0.5;
   return t;
+}
+// One eye's share of the texture, which scales its footprint too.
+vec2 share() {
+  return stereo == 1 ? vec2(0.5, 1.0) : stereo == 2 ? vec2(1.0, 0.5) : vec2(1.0);
+}
+// The video at `t` (0 to 1 across this eye), filtered over the pixel's footprint `dx`, `dy`.
+vec3 sampleAt(vec2 t, vec2 dx, vec2 dy) {
+  vec2 s = share();
+  // On the axis the eyes split, stay a footprint (at least half a texel) inside this eye, so
+  // neither the filter nor a mip texel across the split reaches the other eye.
+  vec2 texel = 1.0 / (vec2(textureSize(video, 0)) * s);
+  vec2 inset = step(s, vec2(0.5)) * min(max(abs(dx) + abs(dy), 0.5 * texel), 0.5);
+  vec2 at = eyeOf(clamp(t, inset, 1.0 - inset));
+  return textureGrad(video, at, dx * s * SHARPEN, dy * s * SHARPEN).rgb;
+}
+// BT.601 full range, as `ycbcr` in passthrough.ts.
+vec3 ycc(vec3 c) {
+  return vec3(dot(c, vec3(0.299, 0.587, 0.114)), 0.5 + dot(c, vec3(-0.168736, -0.331264, 0.5)), 0.5 + dot(c, vec3(0.5, -0.418688, -0.081312)));
+}
+// BT.601 full range back to RGB.
+vec3 rgb(vec3 y) {
+  return y.x + vec3(1.402 * (y.z - 0.5), -0.344136 * (y.y - 0.5) - 0.714136 * (y.z - 0.5), 1.772 * (y.y - 0.5));
+}
+// How much of colour `c` shows over `key`, 0 to 1. A saturated key fades by chroma distance, whole
+// at SOFT_TO of the key's own chroma; a black, white or grey key by the largest channel difference.
+float shows(vec3 c, vec3 key) {
+  vec2 k = ycc(key).yz;
+  float sat = distance(k, vec2(0.5));
+  float chroma = clamp((distance(ycc(c).yz, k) - SOFT_FROM) / max(SOFT_TO * sat - SOFT_FROM, 0.001), 0.0, 1.0);
+  vec3 d = abs(c - key);
+  float grey = clamp((max(d.r, max(d.g, d.b)) - GREY_FROM) / (GREY_TO - GREY_FROM), 0.0, 1.0);
+  return mix(grey, chroma, smoothstep(0.05, 0.15, sat));
+}
+// Colour `c` as the picture's own where `a` of it shows: the key's share taken out, then the key's
+// hue (spill) kept only past SPILL of the chroma across it. A grey key has no hue to take.
+vec3 unkeyed(vec3 c, vec3 key, float a) {
+  if (a <= 0.0) return c;
+  vec3 y = ycc(clamp((c - (1.0 - a) * key) / a, 0.0, 1.0));
+  vec2 k = ycc(key).yz - 0.5;
+  float sat = length(k);
+  vec2 along = k / max(sat, 0.001);
+  vec2 v = y.yz - 0.5;
+  float spill = max(dot(v, along) - abs(dot(v, vec2(along.y, -along.x))) * SPILL, 0.0);
+  y.yz -= along * spill * smoothstep(0.05, 0.15, sat);
+  return clamp(rgb(y), 0.0, 1.0);
+}
+// How much `c`, a mip level's mean, hits the picture over a black, white or grey key: its largest
+// channel difference, from `from` to `to`.
+float hits(vec3 c, float from, float to) {
+  vec3 d = abs(c - keyColour);
+  return smoothstep(from, to, max(d.r, max(d.g, d.b)));
+}
+// How much the picture encloses `t`, for a black, white or grey key: of 8 rays FILL of the eye's
+// width long, the least by the more its 2 taps hit the picture, the near one by picture as dim as
+// hair and the far one by brighter picture, so dim gaps stay open. Each tap is the mip level a quarter
+// of the ray across, which with bilinear filtering sees 3/8 of the ray either side of it, so taps
+// 3/8 and 7/8 along see the whole ray and nothing behind it. A hole the picture surrounds fills;
+// the backdrop, open on a side, does not. Pure backdrop all round stops at once, and opposite rays
+// go in turn to find an open side soon.
+float enclosed(vec2 t) {
+  vec2 eye = vec2(textureSize(video, 0)) * share();
+  vec2 reach = FILL * eye.x / eye;
+  float lod = log2(FILL * eye.x / 4.0);
+  vec3 d = abs(textureLod(video, eyeOf(t), lod + 3.0).rgb - keyColour);
+  if (max(d.r, max(d.g, d.b)) < GREY_FROM) return 0.0;
+  float least = 1.0;
+  for (int i = 0; i < 8 && least > 0.0; i++) {
+    float a = float(i / 2) * PI * 0.25 + float(i % 2) * PI;
+    vec2 ray = reach * vec2(cos(a), sin(a));
+    float most = hits(textureLod(video, eyeOf(clamp(t + ray * 0.375, 0.0, 1.0)), lod).rgb, FILL_NEAR_FROM, FILL_NEAR_TO);
+    if (most < 1.0) most = max(most, hits(textureLod(video, eyeOf(clamp(t + ray * 0.875, 0.0, 1.0)), lod).rgb, FILL_FAR_FROM, FILL_FAR_TO));
+    least = min(least, most);
+  }
+  return least;
+}
+// How much of the video shows at `t`, whose colour is `c`; `own` is how much `c` alone shows.
+// Edges takes the lesser of that and the taps' mean, so it softens inward and never grows the
+// picture. Colour distance shows whole where every tap shows (filling holes), hides where none do,
+// and between them (an edge is near) follows the colour. A black, white or grey key then fills
+// what the picture encloses, as such a backdrop was not made for keying.
+float keyAlpha(vec2 t, vec2 dx, vec2 dy, vec3 c, out float own) {
+  own = shows(c, keyColour);
+  float k = own;
+  if (featherPx > 0.0) {
+    vec2 r = featherPx / (vec2(textureSize(video, 0)) * share());
+    float sum = own;
+    float least = 1.0;
+    float most = 0.0;
+    for (int i = 0; i < 8; i++) {
+      float a = float(i) * PI * 0.25;
+      float s = shows(sampleAt(t + r * vec2(cos(a), sin(a)), dx, dy), keyColour);
+      sum += s;
+      least = min(least, s);
+      most = max(most, s);
+    }
+    k = feather == 0 ? min(own, sum / 9.0) : least > 0.5 ? 1.0 : most < 0.5 ? 0.0 : own;
+  }
+  float grey = 1.0 - smoothstep(0.05, 0.15, length(ycc(keyColour).yz - 0.5));
+  if (grey > 0.0 && k < 1.0) k = max(k, grey * enclosed(t));
+  return k;
+}
+// AI: the mask (255 shows) at `t`, softened by the same taps as Edges. As maskAlpha in the Quest's
+// passthrough.frag.
+float maskAlpha(vec2 t) {
+  float sum = texture(mask, t).r;
+  if (featherPx > 0.0) {
+    vec2 reach = featherPx / (vec2(textureSize(video, 0)) * share());
+    for (int i = 0; i < 8; i++) {
+      float a = float(i) * PI * 0.25;
+      sum += texture(mask, clamp(t + reach * vec2(cos(a), sin(a)), 0.0, 1.0)).r;
+    }
+    sum /= 9.0;
+  }
+  return smoothstep(0.35, 0.65, sum);
+}
+// Beta Censoring's cover at `t` in this eye, as `hidden` in app/renderer/src/components/player/stage.ts.
+vec3 hidden(vec2 t) {
+  vec2 eye = vec2(textureSize(video, 0)) * share();
+  if (censorMode == 2) {
+    float across = mix(64.0, 14.0, censorLevel);
+    vec2 grid = vec2(across, across * eye.y / eye.x);
+    return textureLod(video, eyeOf((floor(t * grid) + 0.5) / grid), log2(eye.x / across)).rgb;
+  }
+  float lod = log2(eye.x / mix(160.0, 24.0, censorLevel));
+  vec2 px = exp2(lod) / eye;
+  vec3 sum = textureLod(video, eyeOf(t), lod).rgb * 2.0;
+  for (int i = 0; i < 4; i++) {
+    vec2 o = i < 2 ? vec2(px.x * float(i * 2 - 1), 0.0) : vec2(0.0, px.y * float(i * 2 - 5));
+    sum += textureLod(video, eyeOf(clamp(t + o, 0.0, 1.0)), lod).rgb;
+  }
+  return sum / 6.0;
+}
+// How much of the picture at `t` is hidden. Half a cell inside this eye's cells, so the filter
+// never blends in the other eye's.
+float censored(vec2 t) {
+  if (censorWhole == 1) return 1.0;
+  vec2 inset = 0.5 / (vec2(textureSize(censor, 0)) * share());
+  return smoothstep(0.35, 0.65, texture(censor, eyeOf(clamp(t, inset, 1.0 - inset))).r);
+}
+// What shows the room for the user's streamer: the picture's `a` over the pass colour, with
+// straight alpha for a runtime that reads it. The one place SteamVR's room comes from.
+vec4 overRoom(vec3 c, float a) {
+  return vec4(mix(PASS, c, a), a);
 }
 vec3 room(vec3 p, vec3 d) {
   vec3 c = ROOM;
@@ -90,6 +268,7 @@ vec2 hit(vec3 p, vec3 d, out float edge) {
   edge = -1.0;
   return vec2(0.0);
 }
+// @portals:decls
 void main() {
   // ANGLE puts GL row 0 in the D3D texture's top row, so uv.y runs down the eye's image.
   vec2 uv = gl_FragCoord.xy / size;
@@ -105,21 +284,46 @@ void main() {
     dx.x -= round(dx.x);
     dy.x -= round(dy.x);
   }
-  vec3 c = room(p, d);
-  float cover = clamp(edge + 0.5, 0.0, 1.0);
-  if (cover > 0.0) {
-    // One eye's share of the texture, which scales its footprint too.
-    vec2 share = stereo == 1 ? vec2(0.5, 1.0) : stereo == 2 ? vec2(1.0, 0.5) : vec2(1.0);
-    // On the axis the eyes split, stay a footprint (at least half a texel) inside this eye, so
-    // neither the filter nor a mip texel across the split reaches the other eye.
-    vec2 texel = 1.0 / (vec2(textureSize(video, 0)) * share);
-    vec2 inset = step(share, vec2(0.5)) * min(max(abs(dx) + abs(dy), 0.5 * texel), 0.5);
-    vec2 at = eyeOf(clamp(t, inset, 1.0 - inset));
-    c = mix(c, textureGrad(video, at, dx * share * SHARPEN, dy * share * SHARPEN).rgb, cover);
+  vec3 back = passRoom == 1 ? PASS : room(p, d);
+  vec3 c = back;
+  // How much of the picture shows here: its coverage at the border, then the key.
+  float a = clamp(edge + 0.5, 0.0, 1.0);
+  if (a > 0.0) {
+    c = sampleAt(t, dx, dy);
+    if (keying == 1) {
+      float own;
+      float k = keyAlpha(t, dx, dy, c, own);
+      // Unmixed by the larger, so a filled hole keeps its own colour and an eroded edge loses none.
+      c = unkeyed(c, keyColour, max(own, k));
+      a *= k;
+    } else if (keying == 2) a *= maskAlpha(t);
+    if (censorMode != 0) {
+      float m = censored(t);
+      if (m > 0.0) c = mix(c, hidden(t), m);
+    }
+    if (reticle.z > 0.5) {
+      // The aim in this pixel's own steps across the picture, so the ring keeps its size.
+      vec2 r = t - reticle.xy;
+      if (mode == 2 && hfov > 6.28) r.x -= round(r.x);
+      mat2 j = mat2(dx, dy);
+      if (determinant(j) != 0.0) {
+        float off = abs(length(inverse(j) * r) - RETICLE);
+        c = mix(c, vec3(0.05), 0.6 * (1.0 - smoothstep(2.0, 3.0, off)));
+        c = mix(c, vec3(1.0), 1.0 - smoothstep(0.75, 1.5, off));
+      }
+    }
   }
+  // @portals:main
   // One dither over everything, last, so neither the glow nor the video bands in the 8-bit eye.
-  float n = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
-  o = vec4(c + (n - 0.5) / 255.0, 1.0);
+  // Over the room it scales with how much video shows, so the pass colour stays exact for the
+  // streamer's match and a keyed edge gets only its share.
+  float n = (fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) / 255.0;
+  if (passRoom == 1) {
+    o = overRoom(c, a);
+    o.rgb += n * a;
+  } else {
+    o = vec4(mix(back, c, a) + n, 1.0);
+  }
 }";
 
 const VIDEO_DEPTH: i32 = 10;
@@ -204,13 +408,24 @@ struct Program {
     side: i32,
     screen: i32,
     pixel: i32,
+    keying: i32,
+    key_colour: i32,
+    feather: i32,
+    feather_px: i32,
+    mask: i32,
+    pass_room: i32,
+    reticle: i32,
+    censor: i32,
+    censor_mode: i32,
+    censor_level: i32,
+    censor_whole: i32,
 }
 
 impl Program {
     fn new(gpu: Gpu) -> Result<Program, String> {
         unsafe {
             let vs = compile(gl::VERTEX_SHADER, VERTEX)?;
-            let fs = match compile(gl::FRAGMENT_SHADER, FRAGMENT) {
+            let fs = match compile(gl::FRAGMENT_SHADER, &super::portals::fragment(FRAGMENT)) {
                 Ok(fs) => fs,
                 Err(e) => {
                     gl::DeleteShader(vs);
@@ -251,6 +466,17 @@ impl Program {
                 side: at("side"),
                 screen: at("screen"),
                 pixel: at("pixel"),
+                keying: at("keying"),
+                key_colour: at("keyColour"),
+                feather: at("feather"),
+                feather_px: at("featherPx"),
+                mask: at("mask"),
+                pass_room: at("passRoom"),
+                reticle: at("reticle"),
+                censor: at("censor"),
+                censor_mode: at("censorMode"),
+                censor_level: at("censorLevel"),
+                censor_whole: at("censorWhole"),
             })
         }
     }
@@ -266,7 +492,7 @@ impl Drop for Program {
     }
 }
 
-unsafe fn compile(kind: u32, source: &str) -> Result<u32, String> {
+pub(super) unsafe fn compile(kind: u32, source: &str) -> Result<u32, String> {
     unsafe {
         let s = gl::CreateShader(kind);
         let src = CString::new(source).unwrap();
@@ -283,11 +509,58 @@ unsafe fn compile(kind: u32, source: &str) -> Result<u32, String> {
     }
 }
 
-unsafe fn info_log(id: u32, get: unsafe fn(u32, i32, *mut i32, *mut gl::types::GLchar)) -> String {
+pub(super) unsafe fn info_log(id: u32, get: unsafe fn(u32, i32, *mut i32, *mut gl::types::GLchar)) -> String {
     let mut buf = vec![0u8; 2048];
     let mut len = 0;
     unsafe { get(id, buf.len() as i32, &mut len, buf.as_mut_ptr() as *mut gl::types::GLchar) };
     String::from_utf8_lossy(&buf[..len.max(0) as usize]).into_owned()
+}
+
+struct MaskTexture {
+    tex: u32,
+    w: u32,
+    h: u32,
+    at: (u64, u64),
+    gpu: Gpu,
+}
+
+impl MaskTexture {
+    fn show(slot: &mut Option<MaskTexture>, gpu: Gpu, at: (u64, u64), m: &Matte) -> bool {
+        if m.w == 0 || m.h == 0 || m.cover.len() != m.w as usize * m.h as usize {
+            return false;
+        }
+        unsafe {
+            if slot.as_ref().is_none_or(|t| (t.w, t.h) != (m.w, m.h)) {
+                *slot = None;
+                let mut tex = 0;
+                gl::GenTextures(1, &mut tex);
+                gl::BindTexture(gl::TEXTURE_2D, tex);
+                gl::TexStorage2D(gl::TEXTURE_2D, 1, gl::R8, m.w as i32, m.h as i32);
+                gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
+                gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
+                gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
+                gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
+                *slot = Some(MaskTexture { tex, w: m.w, h: m.h, at: (u64::MAX, u64::MAX), gpu });
+            }
+            let Some(t) = slot.as_mut() else { return false };
+            if t.at != at {
+                gl::BindTexture(gl::TEXTURE_2D, t.tex);
+                gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);
+                gl::TexSubImage2D(gl::TEXTURE_2D, 0, 0, 0, m.w as i32, m.h as i32, gl::RED, gl::UNSIGNED_BYTE, m.cover.as_ptr().cast());
+                gl::PixelStorei(gl::UNPACK_ALIGNMENT, 4);
+                t.at = at;
+            }
+            gl::BindTexture(gl::TEXTURE_2D, 0);
+        }
+        true
+    }
+}
+
+impl Drop for MaskTexture {
+    fn drop(&mut self) {
+        let _gpu = self.gpu.section();
+        unsafe { gl::DeleteTextures(1, &self.tex) };
+    }
 }
 
 struct EyeTarget {
@@ -322,15 +595,26 @@ pub(crate) struct Headset {
     size: (u32, u32),
     eyes: [Eye; 2],
     program: Program,
+    controllers: Option<Controllers>,
+    legend: Option<usize>,
+    models: [bool; 2],
+    rays: [bool; 2],
     video: Option<Video>,
     max_texture: u32,
     anisotropy: f32,
     view: VrView,
+    passthrough: VrPassthrough,
+    mask: Option<MaskTexture>,
+    censor: Option<MaskTexture>,
+    pick: Option<usize>,
+    held_back: [bool; 2],
+    aim: [Option<Ray>; 2],
     head: Option<Pose>,
     recentre: Recentre,
     recentre_next: bool,
     keep_recline: bool,
-    turn: f32,
+    offset: Offset,
+    grab: Option<Grab>,
     screen: f32,
     status: Arc<Mutex<Option<VrStatus>>>,
     period: Duration,
@@ -338,6 +622,7 @@ pub(crate) struct Headset {
     second: (Instant, u32),
     failing: Option<(Instant, String)>,
     ended: bool,
+    portals: super::portals::Stage,
     scene: Scene,
 }
 
@@ -357,6 +642,10 @@ impl Headset {
         let _gpu = gpu.section();
         let targets = [EyeTarget::new(angle, size)?, EyeTarget::new(angle, size)?];
         let program = Program::new(gpu)?;
+        let portals = super::portals::Stage::new(gpu, program.id);
+        let controllers = Controllers::new(gpu, [targets[0].image.fbo, targets[1].image.fbo], size)
+            .inspect_err(|e| eprintln!("bp-player: the controllers are not drawn: {e}"))
+            .ok();
         let mut max_texture = 0;
         unsafe { gl::GetIntegerv(gl::MAX_TEXTURE_SIZE, &mut max_texture) };
         let anisotropy = unsafe { max_anisotropy() };
@@ -379,21 +668,38 @@ impl Headset {
             asked.recentred = false;
             asked.screen
         };
+        let passthrough = {
+            let mut keying = KEYING.lock().unwrap();
+            keying.pick = None;
+            keying.picks.clear();
+            keying.passthrough
+        };
         Ok(Headset {
             gpu,
             targets,
             size,
             eyes,
             program,
+            controllers,
+            legend: None,
+            models: [true; 2],
+            rays: [false; 2],
             video: None,
             max_texture: max_texture.max(1) as u32,
             anisotropy,
             view,
+            passthrough,
+            mask: None,
+            censor: None,
+            pick: None,
+            held_back: [false; 2],
+            aim: [None; 2],
             head,
             recentre: head.map(|h| Recentre::from_head(&h)).unwrap_or_default(),
             recentre_next: head.is_none(),
             keep_recline: false,
-            turn: 0.0,
+            offset: Offset::default(),
+            grab: None,
             screen,
             status,
             period: Duration::from_secs_f32(1.0 / if refresh_hz.is_finite() && refresh_hz >= 1.0 { refresh_hz } else { 90.0 }),
@@ -401,11 +707,15 @@ impl Headset {
             second: (Instant::now(), 0),
             failing: None,
             ended: false,
+            portals,
             scene,
         })
     }
 
     pub fn view(&mut self, view: VrView) {
+        if self.portals.hold_view(view) {
+            return;
+        }
         self.view = view;
     }
 
@@ -469,14 +779,27 @@ impl Headset {
     }
 
     pub fn frame(&mut self) {
+        let called = Instant::now();
         match self.wait() {
             Ok(()) => {
+                let woke = Instant::now();
                 self.take_asked();
+                self.take_keying();
+                let taken = self.portals.take();
+                if let Some(seat) = taken.seat {
+                    self.recentre = seat;
+                    self.offset = Offset::default();
+                    self.grab = None;
+                }
+                if let Some(view) = taken.view {
+                    self.view = view;
+                }
                 if let Some(head) = self.head {
                     match self.draw(&head) {
                         Ok(()) => self.failing = None,
                         Err(e) => self.trouble(e),
                     }
+                    self.portals.log_frame(&mut self.scene, called, woke);
                 }
             }
             Err(e) => {
@@ -495,22 +818,27 @@ impl Headset {
     fn draw(&mut self, head: &Pose) -> Result<(), String> {
         let p = &self.program;
         let (w, h) = self.size;
-        let (mode, hfov) = match (&self.video, self.view.kind) {
-            (None, _) => (0, 0.0),
-            (Some(_), VrKind::Flat) => (1, self.screen.to_radians()),
-            (Some(_), VrKind::Equirect180) => (2, std::f32::consts::PI),
-            (Some(_), VrKind::Equirect360) => (2, std::f32::consts::TAU),
-            (Some(_), VrKind::Fisheye) => (3, self.view.fov.to_radians()),
-        };
+        let (mode, hfov) = self.mode();
         let stereo = match self.view.layout {
             VrLayout::Mono => 0,
             VrLayout::Sbs => 1,
             VrLayout::Ou => 2,
         };
-        let aspect = self.video.as_ref().map_or(1.0, |v| flat_aspect(self.view.layout, v.w as f32, v.h as f32));
-        let screen = flat_screen(self.screen, aspect);
-        let content = self.recentre.turned(self.turn);
+        let screen = self.flat();
+        let key = self.passthrough.video.filter(|_| self.pick.is_none());
+        let matte = key.filter(|k| k.mode == KeyMode::Ai && mode != 0).and_then(|_| crate::matte::showing());
+        let reticle = self.pick.and_then(|hand| self.aimed(hand));
+        let models = self.scene.controllers();
+        let asked = Instant::now();
         let _gpu = self.gpu.section();
+        self.portals.locked(asked);
+        let masked = matte.is_some_and(|(at, m)| MaskTexture::show(&mut self.mask, self.gpu, at, &m));
+        let censoring = crate::matte::censoring().map(|(look, grid)| (look, grid.is_some_and(|(at, m)| MaskTexture::show(&mut self.censor, self.gpu, at, &m))));
+        let keying = match key {
+            Some(k) if k.mode == KeyMode::Colour => 1,
+            Some(_) if masked => 2,
+            _ => 0,
+        };
         unsafe {
             for cap in [gl::BLEND, gl::SCISSOR_TEST, gl::DEPTH_TEST, gl::STENCIL_TEST, gl::CULL_FACE] {
                 gl::Disable(cap);
@@ -527,9 +855,37 @@ impl Headset {
             gl::Uniform1f(p.hfov, hfov);
             gl::Uniform1i(p.stereo, stereo);
             gl::Uniform2f(p.screen, screen.0, screen.1);
+            gl::Uniform1i(p.keying, keying);
+            if keying == 2 {
+                gl::ActiveTexture(gl::TEXTURE1);
+                gl::BindTexture(gl::TEXTURE_2D, self.mask.as_ref().map_or(0, |t| t.tex));
+                gl::BindSampler(1, 0);
+                gl::ActiveTexture(gl::TEXTURE0);
+            }
+            gl::Uniform1i(p.mask, 1);
+            gl::Uniform1i(p.censor_mode, censoring.map_or(0, |(look, _)| if look.blur { 1 } else { 2 }));
+            gl::Uniform1f(p.censor_level, censoring.map_or(0.0, |(look, _)| look.strength));
+            gl::Uniform1i(p.censor_whole, censoring.is_some_and(|(_, shown)| !shown) as i32);
+            if censoring.is_some_and(|(_, shown)| shown) {
+                gl::ActiveTexture(gl::TEXTURE2);
+                gl::BindTexture(gl::TEXTURE_2D, self.censor.as_ref().map_or(0, |t| t.tex));
+                gl::BindSampler(2, 0);
+                gl::ActiveTexture(gl::TEXTURE0);
+            }
+            gl::Uniform1i(p.censor, 2);
+            if let Some(k) = key {
+                let [r, g, b] = [16, 8, 0].map(|shift| ((k.key >> shift) & 0xff) as f32 / 255.0);
+                gl::Uniform3f(p.key_colour, r, g, b);
+                gl::Uniform1i(p.feather, (k.feather == Feather::Distance) as i32);
+                gl::Uniform1f(p.feather_px, k.feather_px);
+            }
+            gl::Uniform1i(p.pass_room, self.passthrough.room as i32);
+            let [u, v] = reticle.unwrap_or_default();
+            gl::Uniform3f(p.reticle, u, v, reticle.is_some() as i32 as f32);
             gl::Viewport(0, 0, w as i32, h as i32);
+            self.portals.bind(head);
             for (i, eye) in self.eyes.iter().enumerate() {
-                let v = eye_view(&content, head, &eye.to_head);
+                let v = eye_view(&self.recentre, &self.offset, head, &eye.to_head);
                 let [l, r, t, b] = eye.tangents;
                 let pixel = (r - l) / w as f32;
                 gl::Uniform4f(p.tangents, l, r, t, b);
@@ -537,22 +893,34 @@ impl Headset {
                 gl::Uniform3f(p.eye_pos, v.position[0], v.position[1], v.position[2]);
                 gl::Uniform1i(p.side, (i == 1) as i32 ^ self.view.swap_eyes as i32);
                 gl::Uniform1f(p.pixel, pixel);
+                self.portals.eye(head, &eye.to_head);
                 gl::BindFramebuffer(gl::FRAMEBUFFER, self.targets[i].image.fbo);
                 gl::DrawArrays(gl::TRIANGLES, 0, 3);
             }
+            self.portals.done();
             gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+            gl::ActiveTexture(gl::TEXTURE2);
+            gl::BindTexture(gl::TEXTURE_2D, 0);
+            gl::ActiveTexture(gl::TEXTURE1);
+            gl::BindTexture(gl::TEXTURE_2D, 0);
+            gl::ActiveTexture(gl::TEXTURE0);
             gl::BindTexture(gl::TEXTURE_2D, 0);
             gl::BindVertexArray(0);
             gl::UseProgram(0);
+            if let Some(c) = &mut self.controllers {
+                c.draw(models, self.models, self.legend, self.rays, self.aim, &self.recentre, head, &self.eyes);
+            }
             gl::Flush();
         }
         if let Some(e) = take_gl_error() {
             eprintln!("bp-player: headset draw: GL error 0x{e:x}");
         }
+        let submitting = Instant::now();
         for (i, t) in self.targets.iter().enumerate() {
             self.scene.submit(i, t.tex.as_raw())?;
         }
         self.scene.handoff();
+        self.portals.submitted(submitting);
         self.second.1 += 1;
         let elapsed = self.second.0.elapsed();
         if let Some(s) = self.status.lock().unwrap().as_mut() {
@@ -566,15 +934,23 @@ impl Headset {
     }
 
     fn events(&mut self) {
-        let e = self.scene.events();
+        let buzzes = self.status.lock().unwrap().as_mut().map(|s| std::mem::take(&mut s.buzzes)).unwrap_or_default();
+        for (hand, buzz) in buzzes {
+            self.scene.buzz(hand, buzz);
+        }
+        let mut e = self.scene.events();
         if e.eyes_changed {
             self.eyes = [self.scene.eye(0), self.scene.eye(1)];
         }
         if e.space_changed {
             self.recentre_next = true;
             self.keep_recline = false;
-            self.turn = 0.0;
+            self.offset = Offset::default();
+            self.grab = None;
         }
+        self.aim = e.aim;
+        self.pick_input(&mut e);
+        self.drag(&e);
         if let Some(s) = self.status.lock().unwrap().as_mut() {
             if let Some(m) = e.mounted {
                 s.mounted = m;
@@ -582,6 +958,10 @@ impl Headset {
             s.lost_tracking = e.lost_tracking;
             s.focused = e.focused;
             s.push_shortcuts(e.shortcuts);
+            s.aim = e.aim;
+            s.stick = e.stick;
+            s.turn = self.offset.turn;
+            s.dragging = self.grab.is_some();
             s.presses += e.presses;
             if e.quit {
                 s.quit = true;
@@ -592,13 +972,106 @@ impl Headset {
         self.ended |= e.quit;
     }
 
+    fn drag(&mut self, e: &bp_vr::Events) {
+        let aim = |hand: usize| Aim::of(&self.recentre, self.head?.position(), e.hands[hand].as_ref()?);
+        match e.drag {
+            Some(Drag::Start(hand)) if self.video.is_some() => self.grab = aim(hand).map(|a| Grab::start(hand, a, &self.offset)),
+            Some(Drag::End) => self.grab = None,
+            _ => {}
+        }
+        let Some(g) = &mut self.grab else { return };
+        let Some(a) = aim(g.hand) else { return };
+        if g.drag(a, &mut self.offset) {
+            self.scene.buzz(g.hand, Buzz::Detent);
+        }
+    }
+
+    fn mode(&self) -> (i32, f32) {
+        if self.passthrough.idle {
+            return (0, 0.0);
+        }
+        match (&self.video, self.view.kind) {
+            (None, _) => (0, 0.0),
+            (Some(_), VrKind::Flat) => (1, self.screen.to_radians()),
+            (Some(_), VrKind::Equirect180) => (2, self.view.arc.to_radians()),
+            (Some(_), VrKind::Equirect360) => (2, std::f32::consts::TAU),
+            (Some(_), VrKind::Fisheye) => (3, self.view.fov.to_radians()),
+        }
+    }
+
+    fn flat(&self) -> (f32, f32) {
+        let aspect = self.video.as_ref().map_or(1.0, |v| flat_aspect(self.view.layout, v.w as f32, v.h as f32));
+        flat_screen(self.screen, aspect)
+    }
+
+    fn aimed(&self, hand: usize) -> Option<[f32; 2]> {
+        let ray = self.aim[hand]?.to_video(&self.recentre, &self.offset);
+        match self.mode() {
+            (1, _) => {
+                let (w, h) = self.flat();
+                ray.on_screen(SCREEN_RADIUS, w, h)
+            }
+            (2, hfov) => ray.on_equirect(hfov),
+            (3, fov) => ray.on_fisheye(fov),
+            _ => None,
+        }
+    }
+
+    fn take_keying(&mut self) {
+        let mut keying = KEYING.lock().unwrap();
+        self.passthrough = keying.passthrough;
+        if let Some(pick) = keying.pick.take() {
+            self.pick = pick;
+            if pick.is_some() {
+                self.grab = None;
+            }
+        }
+    }
+
+    fn pick_input(&mut self, e: &mut bp_vr::Events) {
+        if self.pick.is_some() && matches!(e.drag, Some(Drag::Start(_))) {
+            e.drag = None;
+        }
+        let mut picks = Vec::new();
+        e.shortcuts.retain(|&s| {
+            let (side, press) = match s {
+                Shortcut::PointLeft => (0, true),
+                Shortcut::PointRight => (1, true),
+                Shortcut::ReleaseLeft => (0, false),
+                Shortcut::ReleaseRight => (1, false),
+                Shortcut::Back => {
+                    let Some(hand) = self.pick.take() else { return true };
+                    picks.push(VrPick::Cancel { hand });
+                    return false;
+                }
+                _ => return true,
+            };
+            if !press {
+                return !std::mem::take(&mut self.held_back[side]);
+            }
+            self.held_back[side] = self.pick.is_some();
+            let Some(hand) = self.pick else { return true };
+            if let Some([u, v]) = (side == hand).then(|| self.aimed(hand)).flatten() {
+                picks.push(VrPick::Pick { hand, u, v });
+                self.pick = None;
+            }
+            false
+        });
+        if !picks.is_empty() {
+            KEYING.lock().unwrap().picks.extend(picks);
+        }
+    }
+
     fn take_asked(&mut self) {
         let mut asked = ASKED.lock().unwrap();
         if std::mem::take(&mut asked.recentred) {
-            self.turn = 0.0;
+            self.offset = Offset::default();
+            self.grab = None;
         }
-        self.turn = (self.turn + std::mem::take(&mut asked.turn) + 180.0).rem_euclid(360.0) - 180.0;
+        self.offset.turn = (self.offset.turn + std::mem::take(&mut asked.turn) + 180.0).rem_euclid(360.0) - 180.0;
         self.screen = asked.screen;
+        self.legend = asked.legend;
+        (self.models, self.rays) = (asked.models, asked.rays);
     }
 
     fn wait(&mut self) -> Result<(), String> {
@@ -673,6 +1146,11 @@ fn adapter(device: &ID3D11Device) -> Result<u64, String> {
 }
 
 #[cfg(test)]
+pub(super) fn fragment_source() -> &'static str {
+    FRAGMENT
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -696,5 +1174,37 @@ mod tests {
         assert!(near(flat_screen(75.0, 2.39), (arc(75.0), arc(75.0) / 2.39)));
         assert!(near(flat_screen(40.0, 4.0 / 3.0), (arc(40.0) * 9.0 / 16.0 * 4.0 / 3.0, arc(40.0) * 9.0 / 16.0)));
         assert!(near(flat_screen(3.2f32.to_degrees() / 3.0, 16.0 / 9.0), (3.2, 1.8)));
+    }
+
+    #[test]
+    fn the_shader_keys_with_the_apps_numbers() {
+        let shared = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../app/shared/");
+        let read = |file: &str| std::fs::read_to_string(format!("{shared}{file}")).expect(file);
+        let value = |ts: &str, name: &str| ts.split_once(&format!("export const {name} = ")).and_then(|(_, rest)| rest.split_whitespace().next()).expect(name).to_owned();
+        let passthrough = read("passthrough.ts");
+        let quest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../quest/app/src/shaders/passthrough.frag")).expect("passthrough.frag");
+        for (ts, glsl) in [("KEY_SOFT_FROM", "SOFT_FROM"), ("KEY_SOFT_TO", "SOFT_TO"), ("KEY_GREY_FROM", "GREY_FROM"), ("KEY_GREY_TO", "GREY_TO"), ("KEY_SPILL", "SPILL"), ("KEY_FILL", "FILL"), ("KEY_FILL_NEAR_FROM", "FILL_NEAR_FROM"), ("KEY_FILL_NEAR_TO", "FILL_NEAR_TO"), ("KEY_FILL_FAR_FROM", "FILL_FAR_FROM"), ("KEY_FILL_FAR_TO", "FILL_FAR_TO")] {
+            let line = format!("const float {glsl} = {};", value(&passthrough, ts));
+            assert!(FRAGMENT.contains(&line), "{glsl} differs from {ts}");
+            assert!(quest.contains(&line), "the Quest's {glsl} differs from {ts}");
+        }
+        assert_eq!(value(&read("vr.ts"), "VR_PASSTHROUGH_KEY"), "0x00ff00");
+        assert!(FRAGMENT.contains("const vec3 PASS = vec3(0.0, 1.0, 0.0);"));
+    }
+
+    #[test]
+    #[ignore = "requires ANGLE: libEGL.dll and libGLESv2.dll on the path"]
+    fn the_shader_compiles_and_links() {
+        let gl_context = GlContext::new().unwrap();
+        gl::load_with(|name| gl_context.get_proc_address(&CString::new(name).unwrap()) as *const _);
+        let gpu = gl_context.gpu();
+        let _gpu = gpu.section();
+        let p = Program::new(gpu).unwrap();
+        for (name, at) in [("keyColour", p.key_colour), ("featherPx", p.feather_px), ("mask", p.mask), ("passRoom", p.pass_room), ("reticle", p.reticle), ("censor", p.censor), ("censorMode", p.censor_mode), ("censorLevel", p.censor_level), ("censorWhole", p.censor_whole)] {
+            assert!(at >= 0, "{name} is not a live uniform");
+        }
+        for (name, at) in super::super::portals::PortalUniforms::of(p.id).all() {
+            assert!(at >= 0, "{name} is not a live uniform");
+        }
     }
 }

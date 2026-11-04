@@ -1,4 +1,5 @@
 import { t } from '../i18n'
+import { createHash } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { basename, dirname, extname, join } from 'node:path'
 import { DatabaseSync, type SQLInputValue, type SQLOutputValue, type StatementSync } from 'node:sqlite'
@@ -12,7 +13,9 @@ import {
   type GridEntry,
   type LibraryCounts,
   type LibraryRoot,
+  type MarkSource,
   type MediaIndexRow,
+  type MediaMark,
   type MediaPage,
   type MediaQuery,
   type MediaRow,
@@ -34,6 +37,8 @@ import {
   type PictureFacts,
   type ProjectionKind,
 } from '@shared/projection'
+import { readPassthrough, type AutoKey } from '@shared/passthrough'
+import { posterKeyed } from './keyPoster'
 import { ROOT_KINDS, type RootKind } from '@shared/remote'
 import { holdBack, mixRecommended, pickSuggestions, recommendSeed, SUGGESTION_COUNT, type MixEntry } from './recommend'
 import type { Validators } from './servers/images'
@@ -322,6 +327,23 @@ CREATE TABLE IF NOT EXISTS blocked_tags (name TEXT PRIMARY KEY);
 
 const VR_COLUMNS = ['vr_probe', 'vr_look'] as const
 
+const PASSTHROUGH_COLUMNS = { passthrough_key: 'INTEGER', passthrough_candidates: "TEXT NOT NULL DEFAULT ''" } as const
+
+const VIEW_COLUMNS = ['thumb_view', 'strip_view'] as const
+
+const MARK_SOURCES: readonly MarkSource[] = ['file', 'server', 'headset']
+
+const SCHEMA_V26 = `
+CREATE TABLE IF NOT EXISTS marks (
+  media_id INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+  source TEXT NOT NULL,
+  start_ms INTEGER NOT NULL,
+  end_ms INTEGER,
+  name TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS marks_media ON marks(media_id, source);
+`
+
 export type AssetKind = 'scripts' | 'thumb' | 'strip'
 export interface AssetJob {
   mediaId: number
@@ -335,7 +357,7 @@ export interface AssetJob {
   priority: number
 }
 
-const SCHEMA_VERSION = 23
+const SCHEMA_VERSION = 26
 
 function parseValidators(raw: string): Validators {
   if (!raw) return {}
@@ -403,6 +425,12 @@ function migrate(db: DatabaseSync) {
         db.exec(SCHEMA_V22)
       case 22:
         for (const column of VR_COLUMNS) if (!hasColumn(db, 'media', column)) db.exec(`ALTER TABLE media ADD COLUMN ${column} TEXT NOT NULL DEFAULT ''`)
+      case 23:
+        for (const [column, type] of Object.entries(PASSTHROUGH_COLUMNS)) if (!hasColumn(db, 'media', column)) db.exec(`ALTER TABLE media ADD COLUMN ${column} ${type}`)
+      case 24:
+        for (const column of VIEW_COLUMNS) if (!hasColumn(db, 'media', column)) db.exec(`ALTER TABLE media ADD COLUMN ${column} TEXT NOT NULL DEFAULT ''`)
+      case 25:
+        db.exec(SCHEMA_V26)
       default:
         break
     }
@@ -467,6 +495,12 @@ export interface MediaStamp {
   height: number
   vrProbe: string
   vrLook: string
+  views: ImageViews
+}
+
+export interface ImageViews {
+  thumb: string
+  strip: string
 }
 
 export interface ProjectionFacts {
@@ -475,8 +509,19 @@ export interface ProjectionFacts {
   kind: ProjectionKind
   remote: boolean
   strip: ThumbState
+  thumb: ThumbState
+  cover: boolean
+  views: ImageViews
   durationMs: number
   input: DetectInput & { container?: ContainerFacts; picture?: PictureFacts }
+}
+
+export interface PassthroughFacts {
+  id: number
+  name: string
+  remote: boolean
+  durationMs: number
+  auto: AutoKey | null
 }
 
 export interface MatchMedia {
@@ -518,7 +563,8 @@ export interface GeneratedRows {
 
 const MEDIA_FROM = 'FROM media m LEFT JOIN watch w ON w.media_id = m.id LEFT JOIN video_settings v ON v.key = m.path'
 
-const ROW_COLUMNS = `m.*, v.position_ms, w.play_count, w.last_played,
+const ROW_COLUMNS = `m.*, v.position_ms, w.play_count, w.last_played, json_extract(v.settings, '$.passthrough') AS passthrough,
+  (SELECT d.filename FROM media_details d WHERE d.media_id = m.id) AS filename,
   (SELECT json_group_array(name) FROM (SELECT t.name FROM media_tags mt JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = m.id ORDER BY t.name)) AS tag_names`
 const ROW_SELECT = `SELECT ${ROW_COLUMNS} ${MEDIA_FROM}`
 
@@ -699,7 +745,7 @@ export class LibraryDb {
   }
 
   stamp(path: string): MediaStamp | null {
-    const row = this.stmt('SELECT id, size, mtime, duration_ms, thumb_ready, strip_ready, thumb_quality, strip_quality, remote_key, tags_ready, scripts_stamp, cover_stamp, remote_stamp, projection, width, height, vr_probe, vr_look FROM media WHERE path = ?').get(path)
+    const row = this.stmt('SELECT id, size, mtime, duration_ms, thumb_ready, strip_ready, thumb_quality, strip_quality, remote_key, tags_ready, scripts_stamp, cover_stamp, remote_stamp, projection, width, height, vr_probe, vr_look, thumb_view, strip_view FROM media WHERE path = ?').get(path)
     if (!row) return null
     return {
       id: num(row, 'id'),
@@ -717,6 +763,7 @@ export class LibraryDb {
       height: num(row, 'height'),
       vrProbe: text(row, 'vr_probe'),
       vrLook: text(row, 'vr_look'),
+      views: { thumb: text(row, 'thumb_view'), strip: text(row, 'strip_view') },
     }
   }
 
@@ -727,7 +774,7 @@ export class LibraryDb {
        ON CONFLICT(path) DO UPDATE SET root_id = excluded.root_id, folder = excluded.folder, title = CASE WHEN title_set THEN title ELSE excluded.title END,
          size = excluded.size, mtime = excluded.mtime, duration_ms = excluded.duration_ms, width = excluded.width,
          height = excluded.height, codec = excluded.codec, projection = excluded.projection, vr_probe = excluded.vr_probe, vr_look = '',
-         remote_key = excluded.remote_key, thumb_ready = 0, strip_ready = 0, tags_ready = 0
+         passthrough_key = NULL, passthrough_candidates = '', remote_key = excluded.remote_key, thumb_ready = 0, strip_ready = 0, tags_ready = 0
        RETURNING id`,
     ).get(m.rootId, m.path, m.folder, m.title, m.size, m.mtime, now, m.durationMs, m.width, m.height, m.codec, m.projection, m.vrProbe ?? '', m.remoteKey ?? '')
     return row ? num(row, 'id') : 0
@@ -868,9 +915,9 @@ export class LibraryDb {
     })
   }
 
-  setThumbState(id: number, kind: ThumbKind, state: ThumbState) {
-    const quality = kind !== 'tags' && state === 'ready' ? `, ${kind}_quality = 1` : ''
-    this.stmt(`UPDATE media SET ${READY_COLUMN[kind]} = ?${quality} WHERE id = ?`).run(THUMB_CODE[state], id)
+  setThumbState(id: number, kind: ThumbKind, state: ThumbState, view = '') {
+    if (kind === 'tags' || state !== 'ready') this.stmt(`UPDATE media SET ${READY_COLUMN[kind]} = ? WHERE id = ?`).run(THUMB_CODE[state], id)
+    else this.stmt(`UPDATE media SET ${READY_COLUMN[kind]} = ?, ${kind}_quality = 1, ${kind}_view = ? WHERE id = ?`).run(THUMB_CODE[state], view, id)
   }
 
   resetTags(servers = false): TagRow[] {
@@ -1037,6 +1084,17 @@ export class LibraryDb {
     return row ? toProjectionFacts(row) : null
   }
 
+  passthroughFacts(path: string): PassthroughFacts | null {
+    const row = this.stmt(`SELECT m.id, m.path, m.title, m.duration_ms, m.remote_key, m.passthrough_key, m.passthrough_candidates, d.filename
+      FROM media m LEFT JOIN media_details d ON d.media_id = m.id WHERE m.path = ?`).get(path)
+    if (!row) return null
+    return { id: num(row, 'id'), name: passthroughName(row), remote: text(row, 'remote_key') !== '', durationMs: num(row, 'duration_ms'), auto: autoKeyOf(row) }
+  }
+
+  setPassthroughAuto(mediaId: number, auto: AutoKey) {
+    this.stmt('UPDATE media SET passthrough_key = ?, passthrough_candidates = ? WHERE id = ?').run(auto.key ?? -1, JSON.stringify(auto.candidates), mediaId)
+  }
+
   setCoverStamp(mediaId: number, stamp: string) {
     const result = this.stmt('UPDATE media SET cover_stamp = ?, thumb_ready = 0 WHERE id = ? AND cover_stamp != ?').run(stamp, mediaId, stamp)
     if (result.changes) this.rec = null
@@ -1050,6 +1108,21 @@ export class LibraryDb {
         insert.run(mediaId, s.axis, s.source, s.container, s.actions, s.durationMs, s.averageSpeed, s.maxSpeed, JSON.stringify(s.heatmap))
       }
       this.stmt('UPDATE media SET axes = ?, average_speed = ?, heat = ? WHERE id = ?').run(JSON.stringify(summary.axes), summary.averageSpeed, JSON.stringify(summary.heat), mediaId)
+    })
+  }
+
+  marks(mediaId: number): (MediaMark & { source: MarkSource })[] {
+    return this.stmt('SELECT source, start_ms, end_ms, name FROM marks WHERE media_id = ? ORDER BY start_ms, rowid').all(mediaId).flatMap((row) => {
+      const source = MARK_SOURCES.find((s) => s === text(row, 'source'))
+      return source ? [{ name: text(row, 'name'), startMs: num(row, 'start_ms'), endMs: numOrNull(row, 'end_ms'), source }] : []
+    })
+  }
+
+  setMarks(mediaId: number, source: MarkSource, marks: readonly MediaMark[]) {
+    this.transaction(() => {
+      this.stmt('DELETE FROM marks WHERE media_id = ? AND source = ?').run(mediaId, source)
+      const insert = this.stmt('INSERT INTO marks (media_id, source, start_ms, end_ms, name) VALUES (?, ?, ?, ?, ?)')
+      for (const m of marks) insert.run(mediaId, source, Math.round(m.startMs), m.endMs === null ? null : Math.round(m.endMs), m.name)
     })
   }
 
@@ -1162,7 +1235,8 @@ export class LibraryDb {
           `SELECT (SELECT count(*) FROM playlists) || ':' || (SELECT coalesce(sum(c),0) FROM (SELECT count(*) c FROM playlist_items GROUP BY playlist_id))
              || ':' || (SELECT coalesce(max(id),0) FROM playlists)
              || ':' || (SELECT coalesce(sum(m.thumb_ready * m.id),0) FROM playlist_items pi JOIN media m ON m.id = pi.media_id)
-             || ':' || (SELECT coalesce(sum(m.thumb_quality * m.id),0) FROM playlist_items pi JOIN media m ON m.id = pi.media_id) s`,
+             || ':' || (SELECT coalesce(sum(m.thumb_quality * m.id),0) FROM playlist_items pi JOIN media m ON m.id = pi.media_id)
+             || ':' || (SELECT coalesce(sum(length(m.thumb_view) * m.id),0) FROM playlist_items pi JOIN media m ON m.id = pi.media_id) s`,
         ).get()!,
         's',
       )
@@ -1177,11 +1251,11 @@ export class LibraryDb {
 
     const pls = this.stmt(`SELECT p.id, p.name, count(pi.media_id) cnt FROM playlists p JOIN playlist_items pi ON pi.playlist_id = p.id GROUP BY p.id ORDER BY cnt DESC, p.id`).all()
     const thumbs = new Map<number, string[]>()
-    for (const r of this.stmt(`SELECT pi.playlist_id pid, m.id mid, m.mtime mt, m.cover_stamp cs, m.thumb_quality tq FROM playlist_items pi JOIN media m ON m.id = pi.media_id WHERE m.thumb_ready = 1 ORDER BY pi.playlist_id, pi.position`).all()) {
+    for (const r of this.stmt(`SELECT pi.playlist_id pid, m.id mid, m.mtime mt, m.cover_stamp cs, m.thumb_quality tq, m.thumb_view tv FROM playlist_items pi JOIN media m ON m.id = pi.media_id WHERE m.thumb_ready = 1 ORDER BY pi.playlist_id, pi.position`).all()) {
       const pid = num(r, 'pid')
       const list = thumbs.get(pid) ?? []
       if (list.length < 4) {
-        list.push(`thumb://media/${num(r, 'mid')}?v=${num(r, 'mt')}${coverKey(text(r, 'cs'))}&q=${num(r, 'tq')}`)
+        list.push(`thumb://media/${num(r, 'mid')}?v=${num(r, 'mt')}${coverKey(text(r, 'cs'))}&q=${num(r, 'tq')}${viewParam(text(r, 'tv'))}`)
         thumbs.set(pid, list)
       }
     }
@@ -1248,6 +1322,10 @@ export class LibraryDb {
     else if (f.script === 'missing') where.push(`NOT ${HAS_SCRIPTS_SQL}`)
     if (f.type === 'vr') where.push("m.projection != 'flat'")
     else if (f.type === '2d') where.push("m.projection = 'flat'")
+    if (f.maxDurationMs !== undefined) {
+      where.push('m.duration_ms > 0 AND m.duration_ms <= ?')
+      params.push(f.maxDurationMs)
+    }
     if (f.watched === 'yes') where.push('coalesce(w.play_count, 0) > 0')
     else if (f.watched === 'no') where.push('coalesce(w.play_count, 0) = 0')
     if (f.minRating !== undefined && f.minRating > 0) {
@@ -1257,6 +1335,10 @@ export class LibraryDb {
     if (f.tag) {
       where.push('EXISTS (SELECT 1 FROM media_tags mt JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = m.id AND t.name = ?)')
       params.push(f.tag)
+    }
+    for (const tag of f.tags ?? []) {
+      where.push('EXISTS (SELECT 1 FROM media_tags mt JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = m.id AND t.name = ?)')
+      params.push(tag)
     }
     for (const axis of f.axes ?? []) {
       where.push('EXISTS (SELECT 1 FROM scripts s WHERE s.media_id = m.id AND s.axis = ?)')
@@ -1927,8 +2009,9 @@ function toScript(row: Row): ScriptRow {
 }
 
 const coverKey = (stamp: string) => (stamp ? `&c=${encodeURIComponent(stamp)}` : '')
+const viewParam = (view: string) => (view ? `&p=${encodeURIComponent(view)}` : '')
 
-const FACTS_SELECT = `SELECT m.id, m.path, m.title, m.title_set, m.width, m.height, m.duration_ms, m.projection, m.remote_key, m.strip_ready, m.vr_probe, m.vr_look, d.filename
+const FACTS_SELECT = `SELECT m.id, m.path, m.title, m.title_set, m.width, m.height, m.duration_ms, m.projection, m.remote_key, m.thumb_ready, m.strip_ready, m.cover_stamp, m.thumb_view, m.strip_view, m.vr_probe, m.vr_look, d.filename
   FROM media m LEFT JOIN media_details d ON d.media_id = m.id`
 
 function toProjectionFacts(row: Row): ProjectionFacts {
@@ -1942,6 +2025,9 @@ function toProjectionFacts(row: Row): ProjectionFacts {
     kind: PROJECTION_KINDS.find((k) => k === kind) ?? 'flat',
     remote,
     strip: thumbState(num(row, 'strip_ready')),
+    thumb: thumbState(num(row, 'thumb_ready')),
+    cover: text(row, 'cover_stamp') !== '',
+    views: { thumb: text(row, 'thumb_view'), strip: text(row, 'strip_view') },
     durationMs: num(row, 'duration_ms'),
     input: {
       name: remote ? serverName : basename(path, extname(path)),
@@ -1953,10 +2039,30 @@ function toProjectionFacts(row: Row): ProjectionFacts {
   }
 }
 
+const passthroughName = (row: Row) => `${text(row, 'remote_key') !== '' ? text(row, 'filename') : basename(text(row, 'path'))} ${text(row, 'title')}`.trim()
+
+function autoKeyOf(row: Row): AutoKey | null {
+  const key = numOrNull(row, 'passthrough_key')
+  return key === null ? null : { key: key < 0 ? null : key, candidates: numbers(text(row, 'passthrough_candidates')) }
+}
+
+function posterKey(row: Row): string | null {
+  const json = text(row, 'passthrough')
+  let saved: unknown
+  try {
+    saved = json ? JSON.parse(json) : undefined
+  } catch {
+    saved = undefined
+  }
+  if (!posterKeyed(readPassthrough(saved), passthroughName(row), autoKeyOf(row))) return null
+  return createHash('sha1').update(`${json}:${String(row.passthrough_key)}:${text(row, 'passthrough_candidates')}`).digest('hex').slice(0, 8)
+}
+
 function toMediaRow(row: Row): MediaRow {
   const id = num(row, 'id')
   const mtime = num(row, 'mtime')
   const projection = text(row, 'projection')
+  const keyed = posterKey(row)
   return {
     id,
     ...(row.playlist_position === undefined ? {} : { playlistPosition: num(row, 'playlist_position') }),
@@ -1973,8 +2079,9 @@ function toMediaRow(row: Row): MediaRow {
     height: num(row, 'height'),
     codec: text(row, 'codec'),
     projection: PROJECTION_KINDS.find((k) => k === projection) ?? 'flat',
-    thumb: num(row, 'thumb_ready') === 1 ? `thumb://media/${id}?v=${mtime}${coverKey(text(row, 'cover_stamp'))}&q=${num(row, 'thumb_quality')}` : null,
-    strip: num(row, 'strip_ready') === 1 ? `thumb://strip/${id}?v=${mtime}${coverKey(text(row, 'strip_stamp'))}&q=${num(row, 'strip_quality')}` : null,
+    thumb: num(row, 'thumb_ready') === 1 ? `thumb://media/${id}?v=${mtime}${coverKey(text(row, 'cover_stamp'))}&q=${num(row, 'thumb_quality')}${viewParam(text(row, 'thumb_view'))}${keyed ? `&k=${keyed}` : ''}` : null,
+    ...(keyed && num(row, 'thumb_ready') === 1 ? { keyed: true } : {}),
+    strip: num(row, 'strip_ready') === 1 ? `thumb://strip/${id}?v=${mtime}${coverKey(text(row, 'strip_stamp'))}&q=${num(row, 'strip_quality')}${viewParam(text(row, 'strip_view'))}` : null,
     axes: strings(text(row, 'axes')).filter(isAxisId),
     averageSpeed: num(row, 'average_speed'),
     heat: numbers(text(row, 'heat')),

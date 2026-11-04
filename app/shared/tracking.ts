@@ -402,6 +402,8 @@ export interface ModelFileInfo {
   file: string
   url: string
   sha256: string
+  width?: number
+  height?: number
 }
 
 export interface ModelFileStatus {
@@ -412,7 +414,7 @@ export interface ModelFileStatus {
 export interface ModelInfo {
   id: string
   label: string
-  kind: ModelKind | 'tagger'
+  kind: ModelKind | 'tagger' | 'skin'
   version: string
   files: ModelFileInfo[]
   bundled: boolean
@@ -421,6 +423,7 @@ export interface ModelInfo {
   licenceUrl: string
   sourceUrl: string
   consent: boolean
+  classes?: string[]
 }
 
 export interface ModelProgress {

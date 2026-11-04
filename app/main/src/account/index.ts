@@ -209,7 +209,7 @@ export class Account {
       const { stun, ...rest } = me
       if (avatarRevision !== this.avatarRevision) rest.avatarUrl = this.status.me?.avatarUrl
       this.set({ ...this.status, state: 'in', me: rest, friends, stun, error: undefined })
-      if ((!rest.premium || rest.agenticLover) && Date.now() - this.agenticLoverAt > AGENTIC_LOVER_EVERY_MS) void this.syncAgenticLover().catch(() => undefined)
+      if ((!rest.premium || rest.agenticLover || rest.itch) && Date.now() - this.agenticLoverAt > AGENTIC_LOVER_EVERY_MS) void this.syncAgenticLover().catch(() => undefined)
       await this.pull()
     } catch (e) {
       if (token !== this.token) return
@@ -230,12 +230,17 @@ export class Account {
       throw e
     })
     if (token !== this.token || !this.status.me) return
-    this.set({ ...this.status, me: { ...this.status.me, premium: me.premium, agenticLover: me.agenticLover } })
+    this.set({ ...this.status, me: { ...this.status.me, premium: me.premium, agenticLover: me.agenticLover, itch: me.itch, vr: me.vr } })
   }
 
   private sessionLost() {
     this.setToken(null)
     this.set({ ...SIGNED_OUT, state: 'error', error: t('account.error.signedOut') })
+  }
+
+  async modelLink(file: string): Promise<string> {
+    const { url } = await this.request<{ url: string }>('GET', `/models/kinkyraven/${encodeURIComponent(file)}`)
+    return url
   }
 
   async setName(name: string): Promise<void> {

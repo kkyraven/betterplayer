@@ -10,6 +10,7 @@ import { AxisChips } from './AxisChips'
 import { HeatStrip } from './HeatStrip'
 import { Rating } from './Rating'
 import { ThumbnailImage } from './ThumbnailImage'
+import { VrBadge } from './VrBadge'
 import { SearchMatch } from './SearchMatch'
 import { useHoverPreview } from './useHoverPreview'
 import { HoverPreview } from './HoverPreview'
@@ -30,6 +31,7 @@ interface Props {
   onPointerDown?: (e: ReactPointerEvent<HTMLDivElement>, row: MediaRow) => void
   onContextMenu?: (e: MouseEvent<HTMLDivElement>, row: MediaRow) => void
   flush?: boolean
+  locked?: boolean
 }
 
 const STRIP_FRAMES = 20
@@ -42,7 +44,7 @@ export function resolutionLabel(height: number): string {
   return height > 0 ? `${height}p` : ''
 }
 
-export const MediaCard = memo(function MediaCard({ row, selected = false, resume = false, density = 'comfortable', onSelect, onPlay, menu, checked, order, onPointerDown, onContextMenu, flush = false }: Props) {
+export const MediaCard = memo(function MediaCard({ row, selected = false, resume = false, density = 'comfortable', onSelect, onPlay, menu, checked, order, onPointerDown, onContextMenu, flush = false, locked = false }: Props) {
   const t = useT()
   const axisBadges = useSettings((s) => s.settings?.library.axisBadges) ?? true
   const hover = useHoverPreview(row)
@@ -62,7 +64,7 @@ export const MediaCard = memo(function MediaCard({ row, selected = false, resume
   const selecting = checked !== undefined
   return (
     <div
-      className={cx('card', `card-${density}`, flush && 'card-flush', selected && 'selected', row.hidden && 'hidden', selecting && 'selecting', checked && 'picked')}
+      className={cx('card', `card-${density}`, flush && 'card-flush', selected && 'selected', row.hidden && 'hidden', selecting && 'selecting', checked && 'picked', locked && 'locked')}
       tabIndex={0}
       role="option"
       aria-selected={selecting ? checked : selected}
@@ -76,7 +78,7 @@ export const MediaCard = memo(function MediaCard({ row, selected = false, resume
     >
       {order && <div className="playlist-card-order">{order}<div className="card-menu" onClick={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>{menu}</div></div>}
       <div className="thumb" {...hover.handlers}>
-        {row.thumb && <ThumbnailImage className="poster" src={row.thumb} alt="" draggable={false} loading="lazy" decoding="async" />}
+        {row.thumb && <ThumbnailImage className="poster" src={row.thumb} keyed={row.keyed} alt="" draggable={false} loading="lazy" decoding="async" />}
         {selecting && <span className="sel">{checked && <Check />}</span>}
         {row.strip && frame !== null && (
           <div className="strip" style={{ backgroundImage: `url(${row.strip})`, backgroundPositionX: `${(frame / (STRIP_FRAMES - 1)) * 100}%` }} />
@@ -104,10 +106,12 @@ export const MediaCard = memo(function MediaCard({ row, selected = false, resume
         )}
         <div className="tr">
           {row.pinned && <span className="badge-pin" title={t('media.pinned')}><Pin /></span>}
-          {row.projection !== 'flat' && <span className="badge-res">{t('media.vr', { degrees: row.projection === 'equirect360' ? '360' : '180' })}</span>}
           {menu && !order && <div className="card-menu" onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>{menu}</div>}
         </div>
-        {resume && watched !== null && <div className="bl"><span className="resume">{t('media.timeLeft', { time: fmtDuration(row.durationMs - (row.watchedMs ?? 0)) })}</span></div>}
+        <div className="bl">
+          <VrBadge projection={row.projection} />
+          {resume && watched !== null && <span className="resume">{t('media.timeLeft', { time: fmtDuration(row.durationMs - (row.watchedMs ?? 0)) })}</span>}
+        </div>
         <div className="br"><span className="dur">{fmtDuration(row.durationMs)}</span></div>
         {watched !== null && (
           <div className="prog">

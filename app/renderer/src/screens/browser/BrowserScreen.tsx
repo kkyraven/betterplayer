@@ -153,7 +153,7 @@ export function BrowserScreen() {
         <AddressRow adBlockOpen={overlay === 'adblock'} onAdBlockOpen={(open) => void openMenu(open ? 'adblock' : null)} />
         {(startPage || bookmarksBar) && <BookmarksBar openSite={menuSite} onOpenSite={(site) => void openMenu(site === null ? null : `site:${site}`)} />}
         <TrackBar variant="browser" />
-        {active && isEroScriptsUrl(active.url) && <EroScriptsSearch key={active.id} tabId={active.id} url={active.url} topic={topic} />}
+        {active && isEroScriptsUrl(active.url) && <EroScriptsSearch key={active.id} tabId={active.id} url={active.url} />}
       </div>
       <div className="bbody">
         <div ref={page} className="bpage">

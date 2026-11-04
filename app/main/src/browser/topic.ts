@@ -45,13 +45,5 @@ export function topicReport(value: unknown, tabId: number, generation: number, c
       for (const source of group) source.mirrorKey = null
     }
   }
-  const categories: NonNullable<EroTopic['categories']> = []
-  if ('categories' in value && Array.isArray(value.categories)) {
-    for (const category of value.categories.slice(0, 100)) {
-      if (category && typeof category === 'object' && 'slug' in category && text(category.slug, 100)
-        && /^[\w-]+$/.test(category.slug) && 'name' in category && text(category.name, 100)
-        && !categories.some((known) => known.slug === category.slug)) categories.push({ slug: category.slug, name: category.name })
-    }
-  }
-  return { tabId, generation, url: currentUrl, title: value.title, scope: 'loaded-posts', sources, categories }
+  return { tabId, generation, url: currentUrl, title: value.title, scope: 'loaded-posts', sources }
 }

@@ -2,6 +2,7 @@ import { defaultTheme, type ThemeSettings } from './theme'
 import { TCODE_AXES, axisRecord, type AxisId } from './axes'
 import { CORE_SECTIONS, type Section } from './library'
 import type { Projection } from './projection'
+import type { PassthroughModel, PassthroughSettings } from './passthrough'
 import { defaultTrackingDefaults, type TrackingDefaults, type TrackingSettings } from './tracking'
 import { defaultGameSettings, type GameSettings } from './game'
 import type { LanguagePreference, MessageKey } from './i18n'
@@ -284,23 +285,23 @@ export function defaultParamSource(): ParamSourceSettings {
   return { source: 'restim', value: 0.5, provider: 'sine', providerPeriodMs: 4000, providerSpeed: 0.5, kinds: ['genitals'], bias: 0, holdOnCut: false, holdCoverageOver: null, jump: 0.6 }
 }
 
-export const GOONER_STYLES = ['pixelate', 'blur'] as const
-export type GoonerStyle = (typeof GOONER_STYLES)[number]
-export const GOONER_STYLE_LABELS: Record<GoonerStyle, MessageKey> = { pixelate: 'goonerStyle.pixelate', blur: 'goonerStyle.blur' }
+export const CENSOR_STYLES = ['pixelate', 'blur'] as const
+export type CensorStyle = (typeof CENSOR_STYLES)[number]
+export const CENSOR_STYLE_LABELS: Record<CensorStyle, MessageKey> = { pixelate: 'goonerStyle.pixelate', blur: 'goonerStyle.blur' }
 
-export const GOONER_LOCK_MINUTES = [30, 60, 120, 240, 480, 1440] as const
+export const CENSOR_LOCK_MINUTES = [30, 60, 120, 240, 480, 1440] as const
 
-export type GoonerLock = { kind: 'until'; endsAt: number } | { kind: 'chaster' }
+export type CensorLock = { kind: 'until'; endsAt: number } | { kind: 'chaster' }
 
-export interface GoonerSettings {
+export interface CensorSettings {
   enabled: boolean
-  style: GoonerStyle
+  style: CensorStyle
   strength: number
   kinds: DetectKindId[]
-  lock: GoonerLock | null
+  lock: CensorLock | null
 }
 
-export function defaultGooner(): GoonerSettings {
+export function defaultCensor(): CensorSettings {
   return { enabled: false, style: 'pixelate', strength: 0.6, kinds: ['genitals', 'breasts', 'buttocks'], lock: null }
 }
 
@@ -393,6 +394,7 @@ export interface PerVideoSettings {
   tracking?: TrackingSettings
   frameGen?: FrameGenOverride
   params?: Partial<Record<ParamAxisId, ParamSourceSettings>>
+  passthrough?: PassthroughSettings
 }
 
 export type Shortcuts = Record<string, string>
@@ -522,6 +524,9 @@ export function defaultShortcuts(): Shortcuts {
     '.': 'Media.Offset.Later',
     '<': 'Media.Offset.EarlierLong',
     '>': 'Media.Offset.LaterLong',
+    '[': 'Media.Speed.Down',
+    ']': 'Media.Speed.Up',
+    backspace: 'Media.Speed.Reset',
     t: 'Window.MediaCentre.Toggle',
     n: 'Session.Next',
     p: 'Session.Previous',
@@ -589,9 +594,32 @@ export interface Settings {
   tracking: TrackingDefaults
   game: GameSettings
   chaster: ChasterSettings
-  gooner: GoonerSettings
+  censor: CensorSettings
   denial: DenialSettings
   account: AccountSettings
+  vr: { passthroughMenus: boolean; panelOffsets?: VrPanelOffsets; passthroughModel: PassthroughModel }
+}
+
+export const VR_MOVABLE_PANELS = ['screen', 'deck'] as const
+export type VrMovablePanel = (typeof VR_MOVABLE_PANELS)[number]
+export interface VrPanelOffset {
+  yaw: number
+  pitch: number
+  distance?: number
+}
+export type VrPanelOffsets = Partial<Record<VrMovablePanel, VrPanelOffset>>
+
+export function readPanelOffsets(raw: unknown): VrPanelOffsets {
+  const out: VrPanelOffsets = {}
+  if (typeof raw !== 'object' || raw === null) return out
+  for (const panel of VR_MOVABLE_PANELS) {
+    const o: unknown = (raw as Record<string, unknown>)[panel]
+    if (typeof o !== 'object' || o === null) continue
+    const { yaw, pitch, distance } = o as Record<string, unknown>
+    if (typeof yaw !== 'number' || !Number.isFinite(yaw) || typeof pitch !== 'number' || !Number.isFinite(pitch)) continue
+    out[panel] = typeof distance === 'number' && Number.isFinite(distance) && distance > 0 ? { yaw, pitch, distance } : { yaw, pitch }
+  }
+  return out
 }
 
 export const INTIFACE_PORT_DEFAULT = 12345
@@ -642,8 +670,9 @@ export function defaultSettings(): Settings {
     tracking: defaultTrackingDefaults(),
     game: defaultGameSettings(),
     chaster: { token: '' },
-    gooner: defaultGooner(),
+    censor: defaultCensor(),
     denial: defaultDenial(),
     account: { sync: true, usageStats: true },
+    vr: { passthroughMenus: false, passthroughModel: 'people' },
   }
 }

@@ -3,9 +3,10 @@ use std::time::Instant;
 
 use crate::input::Input;
 use crate::presence::signal_of;
+use crate::render_models::{ControllerModels, RenderModels};
 use crate::runtime::{Session, connected_table, device_string, head_pose, output_luid, vr};
 use crate::sys::*;
-use crate::{Pose, Presence, Shortcut, Signal};
+use crate::{Drag, Pose, Presence, Ray, Shortcut, Signal};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Eye {
@@ -19,6 +20,30 @@ pub enum Frame {
     Unfocused,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FrameTiming {
+    pub index: u32,
+    pub presents: u32,
+    pub mispresented: u32,
+    pub dropped: u32,
+    pub reprojection: u32,
+    pub system_s: f64,
+    pub gpu_ms: f32,
+    pub post_gpu_ms: f32,
+    pub compositor_gpu_ms: f32,
+    pub interval_ms: f32,
+    pub ready_ms: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FrameTotals {
+    pub presents: u32,
+    pub dropped: u32,
+    pub reprojected: u32,
+    pub timed_out: u32,
+    pub submits: u32,
+}
+
 #[derive(Default, Debug)]
 pub struct Events {
     pub quit: bool,
@@ -27,6 +52,10 @@ pub struct Events {
     pub shortcuts: Vec<Shortcut>,
     pub presses: u32,
     pub focused: bool,
+    pub aim: [Option<Ray>; 2],
+    pub hands: [Option<Pose>; 2],
+    pub drag: Option<Drag>,
+    pub stick: Option<[f32; 2]>,
     pub eyes_changed: bool,
     pub space_changed: bool,
 }
@@ -36,6 +65,8 @@ pub struct Scene {
     compositor: &'static VR_IVRCompositor_FnTable,
     presence: Presence,
     input: Option<Input>,
+    render_models: Option<RenderModels>,
+    poses: Vec<TrackedDevicePose_t>,
     focused: bool,
     dashboard: bool,
     _session: Session,
@@ -48,7 +79,19 @@ impl Scene {
         let compositor: &VR_IVRCompositor_FnTable = unsafe { session.table(IVRCompositor_FnTable)? };
         vr!(compositor, SetTrackingSpace(ETrackingUniverseOrigin::TrackingUniverseStanding));
         let input = Input::new(&session).inspect_err(|e| eprintln!("bp-vr: controller shortcuts are off: {e}")).ok();
-        Ok(Scene { system, compositor, presence: Presence::default(), input, focused: true, dashboard: false, _session: session })
+        let render_models = RenderModels::new(&session).inspect_err(|e| eprintln!("bp-vr: the controllers are not drawn: {e}")).ok();
+        *HEADSET.lock().unwrap() = Some(Self::read_headset(system));
+        Ok(Scene {
+            system,
+            compositor,
+            presence: Presence::default(),
+            input,
+            render_models,
+            poses: vec![TrackedDevicePose_t::default(); k_unMaxTrackedDeviceCount as usize],
+            focused: true,
+            dashboard: false,
+            _session: session,
+        })
     }
 
     pub fn adapter(&self) -> u64 {
@@ -59,6 +102,15 @@ impl Scene {
         let (mut w, mut h) = (0, 0);
         vr!(self.system, GetRecommendedRenderTargetSize(&mut w, &mut h));
         (w.max(1), h.max(1))
+    }
+
+    fn read_headset(system: &VR_IVRSystem_FnTable) -> Headset {
+        let read = |prop| device_string(system, k_unTrackedDeviceIndex_Hmd, prop);
+        Headset {
+            driver: read(ETrackedDeviceProperty::Prop_ActualTrackingSystemName_String),
+            system: read(ETrackedDeviceProperty::Prop_TrackingSystemName_String),
+            model: read(ETrackedDeviceProperty::Prop_ModelNumber_String),
+        }
     }
 
     pub fn hmd_name(&self) -> String {
@@ -78,20 +130,30 @@ impl Scene {
     }
 
     pub fn wait(&mut self) -> Result<Frame, String> {
-        let mut poses = [TrackedDevicePose_t::default(); 1];
-        let e = vr!(self.compositor, WaitGetPoses(poses.as_mut_ptr(), 1, std::ptr::null_mut(), 0));
+        let poses = &mut self.poses;
+        let e = vr!(self.compositor, WaitGetPoses(poses.as_mut_ptr(), poses.len() as u32, std::ptr::null_mut(), 0));
+        if e != EVRCompositorError::VRCompositorError_None {
+            poses.fill(TrackedDevicePose_t::default());
+        }
         match e {
             EVRCompositorError::VRCompositorError_None => {
-                let tracked = poses[0].bPoseIsValid;
-                self.presence.signal(Signal::Tracked(tracked), Instant::now());
+                let head = poses[k_unTrackedDeviceIndex_Hmd as usize];
+                self.presence.signal(Signal::Tracked(head.bPoseIsValid), Instant::now());
                 self.focused = true;
-                Ok(if tracked { Frame::Head(Pose(poses[0].mDeviceToAbsoluteTracking.m)) } else { Frame::Untracked })
+                Ok(if head.bPoseIsValid { Frame::Head(Pose(head.mDeviceToAbsoluteTracking.m)) } else { Frame::Untracked })
             }
             EVRCompositorError::VRCompositorError_DoNotHaveFocus => {
                 self.focused = false;
                 Ok(Frame::Unfocused)
             }
             e => Err(compositor_error(e)),
+        }
+    }
+
+    pub fn controllers(&mut self) -> ControllerModels {
+        match &mut self.render_models {
+            Some(r) => r.frame(self.system, &self.poses),
+            None => ControllerModels::default(),
         }
     }
 
@@ -105,6 +167,34 @@ impl Scene {
 
     pub fn handoff(&self) {
         vr!(self.compositor, PostPresentHandoff());
+    }
+
+    pub fn frame_timings(&mut self, max: usize) -> Vec<FrameTiming> {
+        let mut raw = vec![Compositor_FrameTiming::default(); max.max(1)];
+        raw[0].m_nSize = size_of::<Compositor_FrameTiming>() as u32;
+        let n = vr!(self.compositor, GetFrameTimings(raw.as_mut_ptr().cast(), raw.len() as u32)) as usize;
+        raw[..n.min(raw.len())]
+            .iter()
+            .map(|t| FrameTiming {
+                index: t.m_nFrameIndex,
+                presents: t.m_nNumFramePresents,
+                mispresented: t.m_nNumMisPresented,
+                dropped: t.m_nNumDroppedFrames,
+                reprojection: t.m_nReprojectionFlags,
+                system_s: t.m_flSystemTimeInSeconds,
+                gpu_ms: t.m_flPreSubmitGpuMs,
+                post_gpu_ms: t.m_flPostSubmitGpuMs,
+                compositor_gpu_ms: t.m_flCompositorRenderGpuMs,
+                interval_ms: t.m_flClientFrameIntervalMs,
+                ready_ms: t.m_flNewFrameReadyMs,
+            })
+            .collect()
+    }
+
+    pub fn frame_totals(&self) -> FrameTotals {
+        let mut s = Compositor_CumulativeStats::default();
+        vr!(self.compositor, GetCumulativeStats((&mut s as *mut Compositor_CumulativeStats).cast(), size_of::<Compositor_CumulativeStats>() as u32));
+        FrameTotals { presents: s.m_nNumFramePresents, dropped: s.m_nNumDroppedFrames, reprojected: s.m_nNumReprojectedFrames, timed_out: s.m_nNumTimedOut, submits: s.m_nNumFrameSubmits }
     }
 
     pub fn events(&mut self) -> Events {
@@ -123,6 +213,14 @@ impl Scene {
                 }
                 EVREventType::VREvent_ButtonPress if self.input.is_none() => out.presses += 1,
                 EVREventType::VREvent_IpdChanged => out.eyes_changed = true,
+                EVREventType::VREvent_TrackedDeviceActivated
+                | EVREventType::VREvent_TrackedDeviceDeactivated
+                | EVREventType::VREvent_TrackedDeviceUpdated
+                | EVREventType::VREvent_TrackedDeviceRoleChanged => {
+                    if let Some(r) = &mut self.render_models {
+                        r.forget();
+                    }
+                }
                 EVREventType::VREvent_DashboardActivated => self.dashboard = true,
                 EVREventType::VREvent_DashboardDeactivated => self.dashboard = false,
                 EVREventType::VREvent_SeatedZeroPoseReset | EVREventType::VREvent_StandingZeroPoseReset | EVREventType::VREvent_ChaperoneUniverseHasChanged => {
@@ -142,6 +240,10 @@ impl Scene {
                 self.presence.signal(Signal::Worn(worn), now);
             }
             out.shortcuts = polled.shortcuts;
+            out.aim = polled.hands.map(|h| h.map(|p| Ray::from_pose(&p)));
+            out.hands = polled.hands;
+            out.drag = polled.drag;
+            out.stick = polled.stick;
         }
         out.mounted = self.presence.changed(now);
         out.lost_tracking = self.presence.lost_tracking();
@@ -149,9 +251,34 @@ impl Scene {
         out
     }
 
+    pub fn buzz(&self, hand: usize, buzz: crate::Buzz) {
+        if let Some(input) = &self.input {
+            input.buzz_hand(hand, buzz);
+        }
+    }
+
     pub fn head(&self) -> Option<Pose> {
         head_pose(self.system)
     }
+}
+
+impl Drop for Scene {
+    fn drop(&mut self) {
+        *HEADSET.lock().unwrap() = None;
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Headset {
+    pub driver: String,
+    pub system: String,
+    pub model: String,
+}
+
+static HEADSET: std::sync::Mutex<Option<Headset>> = std::sync::Mutex::new(None);
+
+pub fn headset() -> Option<Headset> {
+    HEADSET.lock().unwrap().clone()
 }
 
 pub unsafe fn mirror(eye: usize, device: *mut c_void) -> Result<*mut c_void, String> {

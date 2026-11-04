@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { ActionId } from '@/input/actions'
+import { playbackRate, type ActionId } from '@/input/actions'
 import { cx } from '@/lib/cx'
 import { isAxisId } from '@shared/axes'
 import { t } from '@/state/i18n'
@@ -21,6 +21,7 @@ export function toastFor(id: ActionId): string | null {
   if (id.startsWith('Media.Volume.') || id === 'Media.Mute.Toggle') return p.muted ? t('tv.toast.muted') : t('tv.toast.volume', { value: Math.round(p.volume * 100) })
   if (id.startsWith('Media.Intensity.')) return t('tv.toast.intensity', { value: Math.round(scriptedAmplitude() * 100) })
   if (id.startsWith('Media.Offset.')) return t('tv.toast.offset', { value: p.video.globalOffsetMs })
+  if (id.startsWith('Media.Speed.')) return t('tv.toast.speed', { value: playbackRate() })
   return null
 }
 

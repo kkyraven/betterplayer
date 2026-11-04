@@ -159,6 +159,45 @@ describe('Quest hellos', () => {
   })
 })
 
+describe('HereSphere or DeoVR playing from this library', () => {
+  const play = (mediaId: number, kind: 'deovr' | 'heresphere' = 'deovr', host = QUEST) => listeners.get('headset:play')?.({ kind, host, mediaId } satisfies IpcEvents['headset:play'])
+
+  it('is followed on its usual port, and after Stop following only once it plays another video', () => {
+    play(12)
+    play(12)
+    play(13)
+    expect(native.follow).toHaveBeenCalledTimes(1)
+    expect(native.follow).toHaveBeenCalledWith('deovr', QUEST, undefined)
+    store().stop()
+    expect(store()).toMatchObject({ kind: 'heresphere', host: '127.0.0.1', state: null })
+    play(13)
+    expect(native.follow).toHaveBeenCalledTimes(1)
+    play(12)
+    expect(native.follow).toHaveBeenCalledTimes(2)
+  })
+
+  it('picked on the Headsets page is not followed again after Stop following while it streams the same video', () => {
+    store().setKind('deovr')
+    store().setHost(QUEST)
+    store().start()
+    play(12)
+    store().stop()
+    expect(store()).toMatchObject({ kind: 'deovr', host: QUEST, state: null })
+    play(12)
+    expect(native.follow).toHaveBeenCalledTimes(1)
+  })
+
+  it('is ignored while a connected Quest is followed, and takes over one that is not', () => {
+    hello('s1')
+    poll(A, true)
+    play(12, 'heresphere', '192.168.1.41')
+    expect(native.follow).toHaveBeenCalledTimes(1)
+    poll(undefined, false, 'error')
+    play(12, 'heresphere', '192.168.1.41')
+    expect(native.follow).toHaveBeenLastCalledWith('heresphere', '192.168.1.41', undefined)
+  })
+})
+
 describe('a Quest Stop', () => {
   beforeEach(() => {
     hello('s1')

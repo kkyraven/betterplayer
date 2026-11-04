@@ -7,6 +7,7 @@ import { invoke } from '@/ipc'
 import { useT } from '@/state/i18n'
 import { usePlayer } from '@/state/player'
 import { useUi } from '@/state/ui'
+import { headsetPlay, useHeadsetLimited } from './headset'
 
 export function TvTileOptions({ row }: { row: MediaRow }) {
   const t = useT()
@@ -14,10 +15,12 @@ export function TvTileOptions({ row }: { row: MediaRow }) {
   const setTvTab = useUi((s) => s.setTvTab)
   const [favourite, setFavourite] = useState(row.favourite)
   const [rating, setRating] = useState(row.rating)
-  const play = (fromStart: boolean) => {
-    void open(row.path, fromStart ? 0 : undefined)
-    setTvTab('nowplaying')
-  }
+  const limited = useHeadsetLimited()
+  const play = (fromStart: boolean) =>
+    headsetPlay(limited, () => {
+      void open(row.path, fromStart ? 0 : undefined)
+      setTvTab('nowplaying')
+    })(row)
   const fav = (on: boolean) => {
     setFavourite(on)
     void invoke('library:setFavourite', [row.id], on)

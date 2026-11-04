@@ -110,9 +110,10 @@ export interface DomAiSettings {
   ownModel: string
   tagEditing: boolean
   viewVideo: boolean
+  setupDone: boolean
 }
 
-export const defaultDomAi = (): DomAiSettings => ({ provider: 'agenticlover', alModel: '', ownUrl: 'http://127.0.0.1:1234/v1', ownModel: '', tagEditing: false, viewVideo: false })
+export const defaultDomAi = (): DomAiSettings => ({ provider: 'agenticlover', alModel: '', ownUrl: 'http://127.0.0.1:1234/v1', ownModel: '', tagEditing: false, viewVideo: false, setupDone: false })
 
 export function normalizeDomAi(raw: unknown): DomAiSettings {
   const d = defaultDomAi()
@@ -124,8 +125,23 @@ export function normalizeDomAi(raw: unknown): DomAiSettings {
     ownModel: str(raw.ownModel, d.ownModel),
     tagEditing: raw.tagEditing === true,
     viewVideo: raw.viewVideo === true,
+    setupDone: raw.setupDone === true,
   }
 }
+
+export const OWN_SERVERS = [
+  { id: 'lmstudio', name: 'LM Studio', url: 'http://127.0.0.1:1234/v1', local: true },
+  { id: 'ollama', name: 'Ollama', url: 'http://127.0.0.1:11434/v1', local: true },
+  { id: 'openrouter', name: 'OpenRouter', url: 'https://openrouter.ai/api/v1', key: 'https://openrouter.ai/settings/keys' },
+  { id: 'openai', name: 'OpenAI', url: 'https://api.openai.com/v1', key: 'https://platform.openai.com/api-keys' },
+] as const
+export type OwnServerId = (typeof OWN_SERVERS)[number]['id'] | 'custom'
+
+export type OwnModels =
+  | { kind: 'ok'; models: string[] }
+  | { kind: 'unreachable'; detail: string }
+  | { kind: 'auth'; hasKey: boolean; detail: string }
+  | { kind: 'error'; status: number; detail: string }
 
 const point = (at0: number, at15: number, on: boolean): PainPoint => ({ on, at0, at15 })
 const span = (at0: [number, number], at15: [number, number], on: boolean): PainSpan => ({ on, at0, at15 })
@@ -284,7 +300,7 @@ export interface ChatReply {
   toolCalls: ChatToolCall[]
 }
 
-export const DOM_ERRORS = ['signedOut', 'emailTaken', 'notSupporter', 'freeTimeUsed', 'quota', 'model', 'blocked', 'network', 'server'] as const
+export const DOM_ERRORS = ['signedOut', 'emailTaken', 'wrongLogin', 'notSupporter', 'freeTimeUsed', 'quota', 'model', 'blocked', 'network', 'server'] as const
 export type DomErrorCode = (typeof DOM_ERRORS)[number]
 export const DOM_ERROR_PREFIX = 'dom:'
 
@@ -322,9 +338,9 @@ export interface DomPose {
 
 export type DomAccess = 'ok' | 'signIn' | 'freeUsed'
 
-export function domAccess(s: { ai: Pick<DomAiSettings, 'provider'>; account: Pick<DomAccount, 'signedIn' | 'freeSecondsLeft'> }, premium: boolean): DomAccess {
+export function domAccess(s: { ai: Pick<DomAiSettings, 'provider'>; account: Pick<DomAccount, 'signedIn' | 'freeSecondsLeft'> }, subscribed: boolean): DomAccess {
   if (s.ai.provider === 'own') return 'ok'
   if (!s.account.signedIn) return 'signIn'
-  if (premium) return 'ok'
+  if (subscribed) return 'ok'
   return (s.account.freeSecondsLeft ?? 0) > 0 ? 'ok' : 'freeUsed'
 }

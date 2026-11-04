@@ -1,10 +1,6 @@
 import {
-  DLSS_BUFFER_MAX,
-  DLSS_BUFFER_MIN,
   DLSS_FACTORS,
   DLSS_FACTOR_LABELS,
-  DLSS_GUIDES,
-  DLSS_GUIDE_LABELS,
   DLSS_INPUT_HEIGHTS,
   DLSS_MODEL_PRESETS,
   DLSS_MODEL_PRESET_LABELS,
@@ -12,8 +8,6 @@ import {
   DLSS_NR_PRESET_LABELS,
   DLSS_NR_STYLES,
   DLSS_NR_STYLE_LABELS,
-  DLSS_RATES,
-  DLSS_RATE_LABELS,
   DLSS_SKIN_MIN,
   DLSS_STRENGTH_MAX,
   DLSS_STRENGTH_MIN,
@@ -49,8 +43,6 @@ const FRAME_GEN_OPTIONS = FRAME_GEN_TARGETS.map((value) => ({ value, label: FRAM
 const NR_PRESET_OPTIONS = DLSS_NR_PRESETS.map((value) => ({ value, label: DLSS_NR_PRESET_LABELS[value] }))
 const NR_STYLE_OPTIONS = DLSS_NR_STYLES.map((value) => ({ value, label: DLSS_NR_STYLE_LABELS[value] }))
 const MODEL_PRESET_OPTIONS = DLSS_MODEL_PRESETS.map((value) => ({ value, label: DLSS_MODEL_PRESET_LABELS[value] }))
-const RATE_OPTIONS = DLSS_RATES.map((value) => ({ value, label: DLSS_RATE_LABELS[value] }))
-const GUIDE_OPTIONS = DLSS_GUIDES.map((value) => ({ value, label: DLSS_GUIDE_LABELS[value] }))
 const FACTOR_OPTIONS = DLSS_FACTORS.map((f) => ({ value: String(f), label: DLSS_FACTOR_LABELS[f] }))
 const HEIGHT_OPTIONS = DLSS_INPUT_HEIGHTS.map((h) => ({ value: String(h), label: h === 0 ? ('common.auto' as const) : h === 2160 ? '4K' : h === 1440 ? '2K' : `${h}p` }))
 
@@ -229,41 +221,6 @@ function DlssRows({ dlss: saved }: { dlss: DlssSettings }) {
             onChange={(v) => setDlss({ inputHeight: DLSS_INPUT_HEIGHTS.find((h) => String(h) === v) ?? dlss.inputHeight })}
             label={t('settings.video.processingHeight')}
           />
-        </div>
-        <div className="prow">
-          <span>
-            <div className="lbl">{t('settings.video.frameRate')}</div>
-            <div className="sub">{t('settings.video.frameRateHint')}</div>
-          </span>
-          <span className="spacer" />
-          <Segmented options={RATE_OPTIONS.map((o) => ({ ...o, label: t(o.label) }))} value={dlss.rate} onChange={(rate) => setDlss({ rate })} label={t('settings.video.frameRate')} disabled />
-        </div>
-        <div className="prow">
-          <span>
-            <div className="lbl">{t('settings.video.motionGuides')}</div>
-            <div className="sub">{t('settings.video.motionGuidesHint')}</div>
-          </span>
-          <span className="spacer" />
-          <Segmented options={GUIDE_OPTIONS.map((o) => ({ ...o, label: t(o.label) }))} value={dlss.guide} onChange={(guide) => setDlss({ guide })} label={t('settings.video.motionGuides')} disabled />
-        </div>
-        <div className="prow">
-          <span>
-            <div className="lbl">{t('settings.video.playbackBuffer')}</div>
-            <div className="sub">{t('settings.video.playbackBufferHint')}</div>
-          </span>
-          <span className="spacer" />
-          <span className="sl">
-            <Slider
-              value={[dlss.bufferSeconds]}
-              min={DLSS_BUFFER_MIN}
-              max={DLSS_BUFFER_MAX}
-              step={1}
-              label={t('settings.video.playbackBuffer')}
-              onValueChange={([v]) => setDlss({ bufferSeconds: v ?? DLSS_BUFFER_MIN })}
-              disabled
-            />
-          </span>
-          <span className="val">{dlss.bufferSeconds} s</span>
         </div>
       </div>
       <Prompt

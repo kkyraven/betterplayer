@@ -12,15 +12,17 @@ import { startEngineEvents } from './engine/events'
 import { startAccount } from './state/account'
 import { startChaster } from './state/chaster'
 import { startDenial } from './state/denial'
-import { startGooner } from './state/gooner'
+import { startCensor } from './state/censor'
 import { applyIntiface } from './state/intiface'
 import { invoke, on } from './ipc'
+import type { PortalDevOp } from '@shared/portals'
 import { startBroadcast } from './state/broadcast'
 import { useBrowser } from './state/browser'
 import { pushStopOnPause, useDevices } from './state/devices'
 import { useEditor } from './state/editor'
 import { pushEstim } from './state/estim'
 import { startHeadsets, useFollow } from './state/follow'
+import { startHeadsetCensor } from './state/headsetCensor'
 import { startI18n } from './state/i18n'
 import { useLibrary } from './state/library'
 import { usePlayer } from './state/player'
@@ -30,13 +32,16 @@ import { useRemote } from './state/remote'
 import { useSettings } from './state/settings'
 import { useTracking } from './state/tracking'
 import { useUi } from './state/ui'
-import { startVr } from './state/vr'
+import { startVr, useVr } from './state/vr'
+import { startPassthrough } from './state/passthrough'
 
 document.documentElement.dataset.platform = process.platform
 
 const RESHUFFLE_IDLE_MS = 30 * 60_000
 
-Object.assign(window, { __bp: { get engine() { return engine }, usePlayer, useSession, useDevices, useSettings, useUi, useFollow, useTracking, useBrowser, useRemote, useEditor } })
+Object.assign(window, {
+  __bp: { get engine() { return engine }, usePlayer, useSession, useDevices, useSettings, useUi, useFollow, useTracking, useBrowser, useRemote, useEditor, useVr, invoke, portalsDev: (op: PortalDevOp) => invoke('portals:dev', op) },
+})
 
 async function boot() {
   const root = document.getElementById('root')
@@ -77,10 +82,12 @@ async function boot() {
     startHeadsets()
     startQuestToys()
     startChaster()
-    startGooner()
+    startCensor()
     startDenial()
     startAccount()
     startVr()
+    startPassthrough()
+    startHeadsetCensor()
     void useRemote.getState().init()
     void startBroadcast()
     useBrowser.getState().init()

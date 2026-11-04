@@ -40,4 +40,4 @@ node scripts/bundle-engine.mjs
 cd app && pnpm build && pnpm dist --mac   # or --win, --linux
 ```
 
-The AI models are not included, so AI features do not work in your own build.
+The AI models and the app's VR are not included, so AI features and headset playback do not work in your own build.

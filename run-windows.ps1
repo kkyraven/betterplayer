@@ -128,7 +128,7 @@ function Start-App {
 
 function Stop-App {
   if ($script:app -and -not $script:app.HasExited) {
-    & taskkill /PID $script:app.Id /T /F 2>&1 | Out-Null
+    cmd /c "taskkill /PID $($script:app.Id) /T /F >nul 2>&1"
   }
   $script:app = $null
 }

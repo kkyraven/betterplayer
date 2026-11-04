@@ -427,13 +427,9 @@ fn run(
     ];
     let gpu = gl.gpu();
     let mut ctx: *mut mpv_render_context = ptr::null_mut();
-    let r = {
-        let _gpu = gpu.section();
-        unsafe { mpv_render_context_create(&mut ctx, mpv.handle, params.as_mut_ptr()) }
-    };
+    let r = unsafe { mpv_render_context_create(&mut ctx, mpv.handle, params.as_mut_ptr()) };
     if r < 0 {
         let _ = ready.send(Err(format!("mpv_render_context_create: {}", error_string(r))));
-        let _gpu = gpu.section();
         drop(gl);
         return;
     }
@@ -442,7 +438,6 @@ fn run(
     let mut target = match Target::new(w, h, None, cfg, gpu) {
         Ok(t) => t,
         Err(e) => {
-            let _gpu = gpu.section();
             unsafe { mpv_render_context_free(ctx) };
             drop(gl);
             let _ = ready.send(Err(e));
@@ -537,7 +532,11 @@ fn run(
                     }
                     if let Some(h) = headset.as_mut().filter(|_| wanted(true)) {
                         skipped_frame = false;
-                        if !h.draw_video(ctx, source()) {
+                        let drew = h.draw_video(ctx, source());
+                        if decoded && drew {
+                            crate::portals::drawn();
+                        }
+                        if !drew {
                             stats.render_error();
                         } else if presenting {
                             let at = FeedPace::display_us(info.target_time, unsafe { mpv_get_time_us(mpv.handle) });
@@ -755,7 +754,6 @@ fn run(
     }
     drop(headset);
 
-    let _gpu = gpu.section();
     unsafe {
         mpv_render_context_set_update_callback(ctx, None, ptr::null_mut());
         mpv_render_context_free(ctx);

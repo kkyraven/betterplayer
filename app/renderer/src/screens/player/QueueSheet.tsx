@@ -119,7 +119,7 @@ function QueueContents({ playlist }: { playlist: NonNullable<ReturnType<typeof u
                 }}><GripVertical /></IconButton>
               <button className="queue-play" type="button" disabled={!row} aria-current={playing ? 'true' : undefined} onClick={() => void jump(id)}>
                 <span className="queue-position">{playing ? <Play /> : index + 1}</span>
-                <span className="queue-thumb">{row?.thumb && <ThumbnailImage src={row.thumb} alt="" draggable={false} loading="lazy" />}</span>
+                <span className="queue-thumb">{row?.thumb && <ThumbnailImage src={row.thumb} keyed={row.keyed} alt="" draggable={false} loading="lazy" />}</span>
                 <span className="queue-details"><span className="queue-name">{row?.title ?? (unavailable ? t('player.queue.videoUnavailable') : t('player.queue.loading'))}</span><span className="queue-duration">{playing && t('player.queue.playing')}{playing && row && ' · '}{row && fmtDuration(row.durationMs)}</span></span>
               </button>
             </li>

@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { useLayoutEffect, useRef, useState, type ComponentType, type SyntheticEvent } from 'react'
 import { isCapturingBinding } from '@/input/actions'
 import { cx } from '@/lib/cx'
-import { useGooner } from '@/state/gooner'
+import { useCensor } from '@/state/censor'
 import { useT } from '@/state/i18n'
 import { useSettings } from '@/state/settings'
 import { useSettingsFeedback } from '@/state/settingsFeedback'
@@ -15,14 +15,15 @@ import { TrackingSettings } from './TrackingSettings'
 import { AppearanceSettings } from './AppearanceSettings'
 import { AxesSettings } from './AxesSettings'
 import { ChasterSettings } from './ChasterSettings'
-import { GoonerSettings } from './GoonerSettings'
+import { CensorSettings } from './CensorSettings'
 import { LibrarySettings, SourcePanel } from './LibrarySettings'
 import { PlaybackSettings, SubtitlesSettings } from './PlaybackSettings'
 import { RemoteSettings } from './RemoteSettings'
 import { SupportSettings } from './SupportSettings'
 import { UpscalingSettings } from './UpscalingSettings'
 import { ModelPanel } from './ModelPanel'
-import { FollowPanel, IntifacePanel } from './ConnectionSettings'
+import { IntifacePanel } from './ConnectionSettings'
+import { HeadsetsSettings } from './HeadsetsSettings'
 import { DeviceSettings, MediaCentreSettings, SourcesSettings, TechnicalSettings } from './GeneralSettings'
 import { categoryFor, PAGE_LABELS, PAGE_TITLES, SETTINGS_CATEGORIES, type SettingsPageId } from './navigation'
 import { focusSetting, locateSetting, markSettingRows, searchSettings } from './search'
@@ -37,7 +38,7 @@ const PAGES: Record<SettingsPageId, ComponentType> = {
   playback: PlaybackSettings,
   video: UpscalingSettings,
   subtitles: SubtitlesSettings,
-  gooner: GoonerSettings,
+  censor: CensorSettings,
   sources: SourcesSettings,
   tagging: LibrarySettings,
   devices: DeviceSettings,
@@ -47,7 +48,7 @@ const PAGES: Record<SettingsPageId, ComponentType> = {
   models: ModelPanel,
   sharing: RemoteSettings,
   source: SourcePanel,
-  headsets: FollowPanel,
+  headsets: HeadsetsSettings,
   intiface: IntifacePanel,
   chaster: ChasterSettings,
   profile: AccountSettings,
@@ -65,7 +66,7 @@ export function SettingsScreen() {
   const nav = useSettingsNavigation()
   const errors = useSettingsFeedback((s) => s.errors)
   const loaded = useSettings((s) => s.settings !== null)
-  const locked = useGooner((s) => s.locked)
+  const locked = useCensor((s) => s.locked)
   const page = useRef<HTMLElement>(null)
   const search = useRef<HTMLInputElement>(null)
   const [active, setActive] = useState(0)
@@ -191,7 +192,7 @@ export function SettingsScreen() {
                         onClick={() => choose(id)}
                       >
                         <span>{t(PAGE_LABELS[id])}</span>
-                        {id === 'gooner' && locked && <Lock aria-label={t('settings.screen.locked')} />}
+                        {id === 'censor' && locked && <Lock aria-label={t('settings.screen.locked')} />}
                       </button>
                     </li>
                   ))}

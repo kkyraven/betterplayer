@@ -68,7 +68,7 @@ impl DetectSnapshot {
 #[derive(Default)]
 struct Slot {
     frame: Option<Frame>,
-    load: Option<Option<(&'static ModelSpec, PathBuf, Option<PathBuf>)>>,
+    load: Option<Option<(Arc<ModelSpec>, Option<PathBuf>)>>,
     stop: bool,
 }
 
@@ -124,13 +124,14 @@ impl Detect {
                                     let mut s = inner.state.lock().unwrap();
                                     *s = DetectSnapshot::empty();
                                 }
-                                Some((spec, path, cache)) => {
-                                    match Detector::load(spec, &path, cache.as_deref()) {
+                                Some((spec, cache)) => {
+                                    let id = spec.id;
+                                    match Detector::load(spec, cache.as_deref()) {
                                         Ok(d) => {
                                             let mut s = inner.state.lock().unwrap();
                                             s.status = DetectStatus::Ready;
                                             s.provider = Some(d.provider());
-                                            s.model = Some(spec.id);
+                                            s.model = Some(id);
                                             detector = Some(d);
                                         }
                                         Err(e) => {
@@ -187,7 +188,7 @@ impl Detect {
         Detect { inner, thread }
     }
 
-    pub fn load(&self, model: Option<(&'static ModelSpec, PathBuf, Option<PathBuf>)>) {
+    pub fn load(&self, model: Option<(Arc<ModelSpec>, Option<PathBuf>)>) {
         {
             let mut s = self.inner.state.lock().unwrap();
             s.status = if model.is_some() {

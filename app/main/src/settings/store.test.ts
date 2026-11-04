@@ -119,23 +119,34 @@ describe('stop on pause', () => {
   })
 })
 
-describe('gooner and chaster', () => {
+describe('censor and chaster', () => {
   it('start off, with nothing hidden and no token', () => {
     const s = migrate(null)
-    expect(s.gooner.enabled).toBe(false)
-    expect(s.gooner.lock).toBeNull()
+    expect(s.censor.enabled).toBe(false)
+    expect(s.censor.lock).toBeNull()
     expect(s.chaster.token).toBe('')
   })
 
   it('keeps a lock across a restart and drops a malformed one', () => {
-    expect(migrate({ version: 1, gooner: { enabled: true, lock: { kind: 'until', endsAt: 1234 } } }).gooner.lock).toEqual({ kind: 'until', endsAt: 1234 })
-    expect(migrate({ version: 1, gooner: { lock: { kind: 'chaster' } } }).gooner.lock).toEqual({ kind: 'chaster' })
-    expect(migrate({ version: 1, gooner: { lock: { kind: 'until' } } }).gooner.lock).toBeNull()
+    expect(migrate({ version: 1, censor: { enabled: true, lock: { kind: 'until', endsAt: 1234 } } }).censor.lock).toEqual({ kind: 'until', endsAt: 1234 })
+    expect(migrate({ version: 1, censor: { lock: { kind: 'chaster' } } }).censor.lock).toEqual({ kind: 'chaster' })
+    expect(migrate({ version: 1, censor: { lock: { kind: 'until' } } }).censor.lock).toBeNull()
+  })
+
+  it('moves a HotScreen or NudeNet pick to Nevermore and keeps a size or none', () => {
+    const detector = (d: string | null) => migrate({ version: 1, tracking: { models: { detector: d } } }).tracking.models.detector
+    expect(detector('hotscreen')).toBe('nevermore-medium')
+    expect(detector('nevermore-huge')).toBe('nevermore-huge')
+    expect(detector(null)).toBeNull()
+  })
+
+  it('reads a lock saved under the old gooner key', () => {
+    expect(migrate({ version: 1, gooner: { enabled: true, lock: { kind: 'chaster' } } }).censor).toMatchObject({ enabled: true, lock: { kind: 'chaster' } })
   })
 
   it('drops unknown kinds and falls back when none are left', () => {
-    expect(migrate({ version: 1, gooner: { kinds: ['faces', 'hands'] } }).gooner.kinds).toEqual(['faces'])
-    expect(migrate({ version: 1, gooner: { kinds: ['hands'] } }).gooner.kinds).toEqual(['genitals', 'breasts', 'buttocks'])
+    expect(migrate({ version: 1, censor: { kinds: ['faces', 'hands'] } }).censor.kinds).toEqual(['faces'])
+    expect(migrate({ version: 1, censor: { kinds: ['hands'] } }).censor.kinds).toEqual(['genitals', 'breasts', 'buttocks'])
   })
 })
 
@@ -246,5 +257,37 @@ describe('per-video tracking', () => {
   it('stores a row for the current format and drops an entry with no tracking', () => {
     expect(isEmptyPerVideo(readPerVideo({ tracking: { own: {} } }))).toBe(false)
     expect(isEmptyPerVideo(readPerVideo({ tracking: 'junk' }))).toBe(true)
+  })
+})
+
+describe('passthrough', () => {
+  it('round-trips per video, keeps a row for it and drops a malformed one', () => {
+    const passthrough = { on: false, mode: 'ai', key: 0x00b140, feather: 'distance', featherPx: 8 }
+    const video = readPerVideo(JSON.parse(JSON.stringify(readPerVideo({ passthrough }))))
+    expect(video.passthrough).toEqual(passthrough)
+    expect(isEmptyPerVideo(video)).toBe(false)
+    expect(readPerVideo({ passthrough: { mode: 'ai' } }).passthrough).toBeUndefined()
+  })
+
+  it('keeps menus over the room off on SteamVR until turned on', () => {
+    expect(migrate(null).vr.passthroughMenus).toBe(false)
+    expect(migrate({ version: 1 }).vr.passthroughMenus).toBe(false)
+    expect(migrate({ version: 1, vr: { passthroughMenus: true } }).vr.passthroughMenus).toBe(true)
+  })
+
+  it('runs Latex Passthrough for AI passthrough until Latex is picked', () => {
+    expect(migrate(null).vr.passthroughModel).toBe('people')
+    expect(migrate({ version: 1, vr: { passthroughModel: 'skin' } }).vr.passthroughModel).toBe('skin')
+    expect(migrate({ version: 1, vr: { passthroughModel: 'x' } }).vr.passthroughModel).toBe('people')
+  })
+
+  it('keeps where the grab bars moved the SteamVR panels, dropping a malformed one', () => {
+    const vr = migrate({ version: 1, vr: { panelOffsets: { screen: { yaw: 12.5, pitch: -4 }, deck: { yaw: 'x', pitch: 0 }, ring: { yaw: 1, pitch: 1 } } } }).vr
+    expect(migrate(JSON.parse(JSON.stringify({ version: 1, vr }))).vr.panelOffsets).toEqual({ screen: { yaw: 12.5, pitch: -4 } })
+  })
+
+  it('keeps how far the stick pushed a panel, and a bad distance drops only the distance', () => {
+    const panelOffsets = { screen: { yaw: 1, pitch: 2, distance: 2.5 }, deck: { yaw: 3, pitch: 4, distance: -1 } }
+    expect(migrate({ version: 1, vr: { panelOffsets } }).vr.panelOffsets).toEqual({ screen: { yaw: 1, pitch: 2, distance: 2.5 }, deck: { yaw: 3, pitch: 4 } })
   })
 })

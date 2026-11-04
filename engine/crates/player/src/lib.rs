@@ -1,7 +1,10 @@
 mod enhance;
+pub mod frame_log;
 mod frames;
 mod gl_context;
+mod matte;
 mod mpv;
+pub mod portals;
 mod render;
 mod stats;
 mod vr;
@@ -10,14 +13,15 @@ mod macos;
 #[cfg(windows)]
 mod windows;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 pub use enhance::{DlssOptions, DlssRate, EnhanceCapabilities, EnhanceOptions, EnhanceState, GuideQuality, ModelPreset, NrPreset, NrStyle, Upscaler};
-pub use frames::{Acquired, External, FrameSlot};
+pub use frames::{Acquired, External, FrameSlot, FrameTap};
+pub use matte::{Matte, MatteSource, VrCensor};
 pub use render::Half;
 pub use stats::{Percentiles, RenderSnapshot};
 pub use vr::{VrKind, VrLayout, VrStatus, VrView};
@@ -46,6 +50,69 @@ pub enum PlayerEvent {
 
 pub type EventSink = Arc<dyn Fn(PlayerEvent) + Send + Sync>;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VrKey {
+    pub mode: KeyMode,
+    pub key: u32,
+    pub feather: Feather,
+    pub feather_px: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyMode {
+    Colour,
+    Ai,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Feather {
+    Edges,
+    Distance,
+}
+
+impl VrKey {
+    pub fn parse(mode: &str, key: u32, feather: &str, feather_px: f64) -> Result<VrKey, String> {
+        let mode = match mode {
+            "colour" => KeyMode::Colour,
+            "ai" => KeyMode::Ai,
+            m => return Err(format!("unknown passthrough mode {m:?}")),
+        };
+        let feather = match feather {
+            "edges" => Feather::Edges,
+            "distance" => Feather::Distance,
+            f => return Err(format!("unknown feather {f:?}")),
+        };
+        if key > 0xff_ffff {
+            return Err(format!("key colour {key:#x} is not packed RGB"));
+        }
+        if !feather_px.is_finite() {
+            return Err("feather is not a number".into());
+        }
+        Ok(VrKey { mode, key, feather, feather_px: feather_px.clamp(0.0, 32.0) as f32 })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct VrPassthrough {
+    pub video: Option<VrKey>,
+    pub room: bool,
+    pub idle: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum VrPick {
+    Pick { hand: usize, u: f32, v: f32 },
+    Cancel { hand: usize },
+}
+
+pub(crate) struct Keying {
+    pub passthrough: VrPassthrough,
+    pub pick: Option<Option<usize>>,
+    pub picks: Vec<VrPick>,
+}
+
+pub(crate) static KEYING: Mutex<Keying> = Mutex::new(Keying { passthrough: VrPassthrough { video: None, room: false, idle: false }, pick: None, picks: Vec::new() });
+
 pub struct VideoInfo {
     pub width: u32,
     pub height: u32,
@@ -58,7 +125,7 @@ pub fn probe_video(path: &str) -> Result<VideoInfo, String> {
         mpv.set_option(key, value)?;
     }
     mpv.initialize()?;
-    load_file(&mpv, path, None)?;
+    mpv.command(&["loadfile", path])?;
     let started = std::time::Instant::now();
     loop {
         match mpv.wait_event(0.1) {
@@ -95,6 +162,7 @@ pub struct Player {
     mpv: Arc<Mpv>,
     ytdl: String,
     frames: Arc<Frames>,
+    acquired_serial: AtomicU64,
     stats: Arc<RenderStats>,
     log: Arc<Mutex<Vec<String>>>,
     tx: Option<Sender<Msg>>,
@@ -130,6 +198,7 @@ impl VrReply {
 pub struct MediaLoader {
     mpv: Arc<Mpv>,
     ytdl: String,
+    vr: Arc<Mutex<Option<VrStatus>>>,
 }
 
 impl MediaLoader {
@@ -140,7 +209,7 @@ impl MediaLoader {
     pub fn load_range(&self, path: &str, start_seconds: Option<f64>, remote: Option<&str>, end_seconds: Option<f64>) -> Result<(), String> {
         self.mpv.set_property("http-header-fields", remote.unwrap_or(""))?;
         let _ = self.mpv.set_property("ytdl", if remote.is_some() { "no" } else { &self.ytdl });
-        load_file_range(&self.mpv, path, start_seconds, end_seconds)
+        load_file_range(&self.mpv, path, start_seconds, end_seconds, in_headset(&self.vr))
     }
 
     pub fn hwdec_current(&self) -> String {
@@ -148,14 +217,9 @@ impl MediaLoader {
     }
 }
 
-fn load_file(mpv: &Mpv, path: &str, start_seconds: Option<f64>) -> Result<(), String> {
-    load_file_range(mpv, path, start_seconds, None)
-}
-
-fn load_file_range(mpv: &Mpv, path: &str, start_seconds: Option<f64>, end_seconds: Option<f64>) -> Result<(), String> {
-    let mut options = Vec::new();
-    if let Some(start) = start_seconds.filter(|s| *s > 0.0) { options.push(format!("start={start}")); }
-    if let Some(end) = end_seconds { options.push(format!("end={end}")); }
+fn load_file_range(mpv: &Mpv, path: &str, start_seconds: Option<f64>, end_seconds: Option<f64>, headset: bool) -> Result<(), String> {
+    let options = portals::loadfile_options(start_seconds, end_seconds, portals::take_keyframe_start(headset));
+    portals::loading(headset);
     if options.is_empty() { return mpv.command(&["loadfile", path]); }
     let options = options.join(",");
     if unsafe { mpv::mpv_client_api_version() } < (2 << 16 | 3) {
@@ -163,6 +227,10 @@ fn load_file_range(mpv: &Mpv, path: &str, start_seconds: Option<f64>, end_second
     } else {
         mpv.command(&["loadfile", path, "replace", "-1", &options])
     }
+}
+
+fn in_headset(vr: &Mutex<Option<VrStatus>>) -> bool {
+    vr.lock().unwrap().as_ref().is_some_and(|s| s.active)
 }
 
 fn default_hwdec() -> &'static str {
@@ -249,6 +317,7 @@ impl Player {
                                 emit(PlayerEvent::EndFile { error });
                             }
                             Event::FileLoaded => {
+                                portals::restarted(in_headset(&vr));
                                 if std::mem::take(&mut behind).tripped {
                                     let _ = mpv.set_property("framedrop", &framedrop);
                                 }
@@ -353,6 +422,7 @@ impl Player {
             mpv,
             ytdl,
             frames,
+            acquired_serial: AtomicU64::new(0),
             stats,
             log,
             tx: Some(tx),
@@ -367,11 +437,11 @@ impl Player {
     }
 
     pub fn load(&self, path: &str, start_seconds: Option<f64>) -> Result<(), String> {
-        load_file(&self.mpv, path, start_seconds)
+        load_file_range(&self.mpv, path, start_seconds, None, in_headset(&self.vr))
     }
 
     pub fn media_loader(&self) -> MediaLoader {
-        MediaLoader { mpv: self.mpv.clone(), ytdl: self.ytdl.clone() }
+        MediaLoader { mpv: self.mpv.clone(), ytdl: self.ytdl.clone(), vr: self.vr.clone() }
     }
 
     pub fn has_video(&self) -> bool {
@@ -532,8 +602,47 @@ impl Player {
         Ok(())
     }
 
+    pub fn vr_passthrough(&self, passthrough: VrPassthrough) {
+        KEYING.lock().unwrap().passthrough = passthrough;
+    }
+
+    pub fn vr_matte(&self, source: Option<Arc<dyn MatteSource>>) {
+        matte::install(source, &self.mpv);
+    }
+
+    pub fn vr_censor(&self, look: Option<VrCensor>, source: Option<Arc<dyn MatteSource>>) {
+        matte::install_censor(look, source, &self.mpv);
+    }
+
+    pub fn vr_pick(&self, hand: Option<usize>) {
+        KEYING.lock().unwrap().pick = Some(hand);
+    }
+
+    pub fn vr_legend(&self, hand: Option<usize>) {
+        vr::ASKED.lock().unwrap().legend = hand;
+    }
+
+    pub fn vr_hands(&self, models: [bool; 2], rays: [bool; 2]) {
+        let mut asked = vr::ASKED.lock().unwrap();
+        (asked.models, asked.rays) = (models, rays);
+    }
+
+    pub fn vr_picks(&self) -> Vec<VrPick> {
+        let picks = std::mem::take(&mut KEYING.lock().unwrap().picks);
+        if self.vr.lock().unwrap().is_some() { picks } else { Vec::new() }
+    }
+
     pub fn vr_status(&self) -> Option<VrStatus> {
         self.vr.lock().unwrap().clone()
+    }
+
+    pub fn vr_buzz(&self, hand: usize, buzz: bp_vr::Buzz) {
+        portals::buzzed(hand, buzz);
+        if let Some(s) = self.vr.lock().unwrap().as_mut() {
+            s.buzzes.push((hand, buzz));
+            let over = s.buzzes.len().saturating_sub(4);
+            s.buzzes.drain(..over);
+        }
     }
 
     pub fn vr_shortcuts(&self) -> Vec<bp_vr::Shortcut> {
@@ -572,7 +681,16 @@ impl Player {
     pub fn acquire(&self) -> Option<usize> {
         let a = self.frames.acquire()?;
         self.stats.acquired(a.waited);
+        self.acquired_serial.store(a.serial, Ordering::Relaxed);
         Some(a.index)
+    }
+
+    pub fn frame_serial(&self) -> u64 {
+        self.acquired_serial.load(Ordering::Relaxed)
+    }
+
+    pub fn set_frame_tap(&self, tap: Option<FrameTap>) {
+        self.frames.set_tap(tap);
     }
 
     pub fn acquire_wait(&self, timeout: Duration) -> Option<Acquired> {
@@ -695,6 +813,17 @@ mod tests {
         b.reset();
         assert!(!b.tick(at(1.5), 50.0, 1.0));
         assert!(!b.tick(at(3.5), 52.0, 1.0));
+    }
+
+    #[test]
+    fn keys_parse_the_apps_passthrough_names() {
+        let k = VrKey::parse("colour", 0x00b140, "distance", 40.0).unwrap();
+        assert_eq!(k, VrKey { mode: KeyMode::Colour, key: 0x00b140, feather: Feather::Distance, feather_px: 32.0 });
+        assert_eq!(VrKey::parse("ai", 0, "edges", 2.0).unwrap().mode, KeyMode::Ai);
+        assert!(VrKey::parse("chroma", 0, "edges", 2.0).is_err());
+        assert!(VrKey::parse("colour", 0, "soft", 2.0).is_err());
+        assert!(VrKey::parse("colour", 0x100_0000, "edges", 2.0).is_err());
+        assert!(VrKey::parse("colour", 0, "edges", f64::NAN).is_err());
     }
 
     #[test]

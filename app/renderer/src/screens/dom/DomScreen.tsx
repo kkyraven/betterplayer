@@ -1,36 +1,40 @@
 // SPDX-License-Identifier: LicenseRef-KinkyRaven-Proprietary
 // Copyright (c) 2026 KinkyRaven. All rights reserved. This file is not licensed under LICENSE.txt; no permission is granted to use, copy, modify or distribute it.
 
-import * as Popover from '@radix-ui/react-popover'
-import { ChevronsUpDown, Download, ExternalLink, Flame, Lock, Play, Plus, Search, Trash2, UserRound, Waves } from 'lucide-react'
-import { useEffect, useState } from 'react'
-import { AGENTIC_LOVER_URL, DOM_FREE_SECONDS, domAccess, type AlPersona, type AlTier, type DomProfile } from '@shared/dom'
+import { CircleAlert, Download, Lock, Play, Plus, Search, SlidersHorizontal, Trash2, UserRound } from 'lucide-react'
+import { useEffect, useState, type ReactNode } from 'react'
+import { DOM_FREE_SECONDS, type AlPersona, type DomProfile } from '@shared/dom'
 import type { MessageKey } from '@shared/i18n'
 import { SupporterOffer } from '@/components/account/SupporterOffer'
 import { Button } from '@/components/ui/Button'
 import { Modal } from '@/components/ui/Modal'
 import { Prompt } from '@/components/ui/Prompt'
 import { Segmented } from '@/components/ui/Segmented'
-import { Switch } from '@/components/ui/Switch'
-import { Select } from '@/components/ui/Select'
 import { invoke } from '@/ipc'
 import { cx } from '@/lib/cx'
-import { electron } from '@/node'
-import { isPremium, useAccount } from '@/state/account'
+import { isSubscriber, useAccount } from '@/state/account'
 import { domErrorText, useDom } from '@/state/dom'
 import { useT } from '@/state/i18n'
-import { GetStarted } from './GetStarted'
-import { ImagesTab, MemoryTab, PersonalityTab, PleasurePainPage, YouPage } from './DomTabs'
-import { OwnAiFields } from './OwnAi'
-import { Portrait } from './Portrait'
 import { AdvancedPainEditor } from './AdvancedPain'
+import { AiPage, TIER_LABEL, shortDate } from './AiPage'
+import { ImagesTab, MemoryTab, PersonalityTab, PleasurePainPage, YouPage } from './DomTabs'
+import { FirstRun } from './FirstRun'
+import { useDomNav, type SetupPage } from './nav'
+import { Trouble, ownTrouble } from './OwnAi'
+import { Portrait } from './Portrait'
+import { domBlock, serverName, type DomBlock } from './setup'
 import './dom.css'
 
 const TABS = ['personality', 'images', 'memory'] as const
 type Tab = (typeof TABS)[number]
 const TAB_LABEL: Record<Tab, MessageKey> = { personality: 'dom.tab.personality', images: 'dom.tab.images', memory: 'dom.tab.memory' }
-const TIER_LABEL: Record<AlTier, MessageKey> = { free: 'dom.tier.free', pro: 'dom.tier.pro', supporter_plus: 'dom.tier.supporterPlus', supporter_plus_plus: 'dom.tier.supporterPlusPlus' }
-const open = (url: string) => void electron.shell.openExternal(url)
+const SETUP_PAGES: ReadonlyArray<{ page: SetupPage; label: MessageKey }> = [
+  { page: 'ai', label: 'dom.ai.title' },
+  { page: 'pleasurePain', label: 'dom.tab.pleasurePain' },
+  { page: 'advancedPain', label: 'dom.pain.title' },
+]
+type View = 'dom' | 'you' | 'flow' | SetupPage
+const isSetupPage = (v: View): v is SetupPage => v === 'ai' || v === 'pleasurePain' || v === 'advancedPain'
 
 export function DomScreen() {
   const t = useT()
@@ -39,57 +43,48 @@ export function DomScreen() {
   const selectedId = useDom((s) => s.selectedId)
   const ai = useDom((s) => s.ai)
   const account = useDom((s) => s.account)
-  const premium = useAccount(isPremium)
-  const [shared, setShared] = useState<'you' | 'pleasurePain' | 'advancedPain' | null>(null)
+  const ownStatus = useDom((s) => s.ownStatus)
+  const accountChecked = useDom((s) => s.accountChecked)
+  const subscribed = useAccount(isSubscriber)
+  const [picked, setPicked] = useState<View | null>(null)
   const [importing, setImporting] = useState(false)
-  const { load, select, create } = useDom.getState()
+  const { load, select, create, checkOwn } = useDom.getState()
   useEffect(() => {
     void load()
-  }, [load, premium])
-  const access = domAccess({ ai, account }, premium)
+  }, [load, subscribed])
+  const ownActive = loaded && ai.provider === 'own'
+  useEffect(() => {
+    if (!ownActive) return
+    const check = () => void checkOwn()
+    check()
+    window.addEventListener('focus', check)
+    return () => window.removeEventListener('focus', check)
+  }, [ownActive, checkOwn])
+  if (!loaded) return null
+  const view: View = !ai.setupDone ? (picked === null || isSetupPage(picked) ? 'flow' : picked) : picked === null || picked === 'flow' ? 'dom' : picked
+  const block = domBlock(ai, account, subscribed, ownStatus)
+  const unknown = ai.setupDone && ai.provider === 'agenticlover' && !accountChecked
   const selected = doms.find((d) => d.id === selectedId) ?? null
-  const locked = access === 'freeUsed'
+  const openSetup = (page: SetupPage) => {
+    useDomNav.setState({ lastSetup: page })
+    setPicked(page)
+  }
+  const finish = () => {
+    if (doms[0]) select(doms[0].id)
+    setPicked('dom')
+  }
+  if (view === 'flow' && doms.length === 0) return <FirstRun onDone={finish} />
   return (
     <>
       <aside className="side-list dom-list">
         <h1>
           {t('screen.dom')}
-          {locked && <Lock className="dom-lock" aria-label={t('common.supporterOnly')} />}
+          {!unknown && block === 'freeUsed' && <Lock className="dom-lock" aria-label={t('common.supporterOnly')} />}
         </h1>
-        <ul>
-          <li>
-            <button type="button" className={cx('side-row', shared === 'you' && 'on')} aria-current={shared === 'you' || undefined} onClick={() => setShared('you')}>
-              <UserRound />
-              {t('dom.you')}
-            </button>
-          </li>
-          <li>
-            <button type="button" className={cx('side-row', shared === 'pleasurePain' && 'on')} aria-current={shared === 'pleasurePain' || undefined} onClick={() => setShared('pleasurePain')}>
-              <Flame />
-              {t('dom.tab.pleasurePain')}
-            </button>
-          </li>
-          <li>
-            <button type="button" className={cx('side-row', shared === 'advancedPain' && 'on')} aria-current={shared === 'advancedPain' || undefined} onClick={() => setShared('advancedPain')}>
-              <Waves />
-              {t('dom.pain.title')}
-            </button>
-          </li>
-          {doms.map((d) => (
-            <li key={d.id}>
-              <button type="button" className={cx('side-row dom-row', !shared && d.id === selectedId && 'on')} aria-current={(!shared && d.id === selectedId) || undefined} onClick={() => {
-                setShared(null)
-                select(d.id)
-              }}>
-                <Portrait dom={d} className="dom-ava" />
-                <span className="n">{d.name || t('dom.newName')}</span>
-                {d.alPersonaId && <span className="src">AL</span>}
-              </button>
-            </li>
-          ))}
+        <ul className="dom-top">
           <li>
             <button type="button" className="side-row dom-add" onClick={() => {
-              setShared(null)
+              setPicked('dom')
               void create()
             }}>
               <Plus />
@@ -105,41 +100,172 @@ export function DomScreen() {
             </li>
           )}
         </ul>
-        <AccountFoot />
+        <ul className="dom-scroll">
+          {doms.map((d) => {
+            const on = view === 'dom' && d.id === selectedId
+            return (
+              <li key={d.id}>
+                <button type="button" className={cx('side-row dom-row', on && 'on')} aria-current={on || undefined} onClick={() => {
+                  setPicked('dom')
+                  select(d.id)
+                }}>
+                  <Portrait dom={d} className="dom-ava" />
+                  <span className="n">{d.name || t('dom.newName')}</span>
+                  {d.alPersonaId && <span className="src">AL</span>}
+                </button>
+              </li>
+            )
+          })}
+        </ul>
+        <div className="dom-foot">
+          <ul>
+            <li>
+              <button type="button" className={cx('side-row', view === 'you' && 'on')} aria-current={view === 'you' || undefined} onClick={() => setPicked('you')}>
+                <UserRound />
+                {t('dom.you')}
+              </button>
+            </li>
+            <li>
+              <button type="button" className={cx('side-row dom-setup', view === 'flow' && 'on', isSetupPage(view) && 'open')} aria-current={view === 'flow' ? 'page' : undefined} onClick={() => setPicked(ai.setupDone ? useDomNav.getState().lastSetup : 'flow')}>
+                <span className="top"><SlidersHorizontal />{t('game.setup')}</span>
+                <SetupStatus />
+              </button>
+            </li>
+            {isSetupPage(view) && (
+              <li className="dom-subs">
+                <ul>
+                  {SETUP_PAGES.map(({ page, label }) => (
+                    <li key={page}>
+                      <button type="button" className={cx('side-row dom-sub-row', view === page && 'on')} aria-current={view === page ? 'page' : undefined} onClick={() => openSetup(page)}>
+                        {t(label)}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </li>
+            )}
+          </ul>
+        </div>
       </aside>
-      <div className="page dom-page">
-        {shared === 'you' ? (
-          <>
-            <div className="page-hd"><h1>{t('dom.you')}</h1></div>
-            <YouPage />
-          </>
-        ) : shared === 'pleasurePain' ? (
-          <>
-            <div className="page-hd"><h1>{t('dom.tab.pleasurePain')}</h1></div>
-            <div className="dom-body"><PleasurePainPage /></div>
-          </>
-        ) : shared === 'advancedPain' ? (
-          <>
-            <div className="page-hd"><h1>{t('dom.pain.title')}</h1></div>
-            <div className="dom-body"><AdvancedPainEditor /></div>
-          </>
-        ) : access === 'signIn' ? (
-          <GetStarted dom={selected} />
-        ) : selected ? (
-          <DomPage key={selected.id} dom={selected} locked={locked} />
-        ) : loaded ? (
-          <div className="dom-empty">
-            <Button variant="primary" onClick={() => void create()}><Plus />{t('dom.new')}</Button>
-            {account.signedIn && <Button onClick={() => setImporting(true)}><Download />{t('dom.import')}</Button>}
-          </div>
-        ) : null}
-      </div>
+      {view === 'flow' ? (
+        <FirstRun onDone={finish} />
+      ) : (
+        <div className="page dom-page">
+          {view === 'you' ? (
+            <>
+              <div className="page-hd"><h1>{t('dom.you')}</h1></div>
+              <YouPage />
+            </>
+          ) : view === 'ai' ? (
+            <AiPage />
+          ) : view === 'pleasurePain' ? (
+            <>
+              <div className="page-hd"><h1>{t('dom.tab.pleasurePain')}</h1></div>
+              <div className="dom-body"><PleasurePainPage /></div>
+            </>
+          ) : view === 'advancedPain' ? (
+            <>
+              <div className="page-hd"><h1>{t('dom.pain.title')}</h1></div>
+              <div className="dom-body"><AdvancedPainEditor /></div>
+            </>
+          ) : selected ? (
+            <DomPage key={selected.id} dom={selected} block={unknown || block === null ? null : <StartBlock block={block} onFlow={() => setPicked('flow')} onAi={() => openSetup('ai')} />} blocked={unknown || block !== null} />
+          ) : (
+            <div className="dom-picks dom-empty">
+              <EmptyPick icon={<Plus />} title={t('dom.new')} onClick={() => void create()} />
+              {account.signedIn && <EmptyPick icon={<Download />} title={t('dom.import')} onClick={() => setImporting(true)} />}
+            </div>
+          )}
+        </div>
+      )}
       {importing && <ImportDialog onClose={() => setImporting(false)} />}
     </>
   )
 }
 
-function DomPage({ dom, locked }: { dom: DomProfile; locked: boolean }) {
+function EmptyPick({ icon, title, onClick }: { icon: ReactNode; title: string; onClick: () => void }) {
+  return (
+    <button type="button" className="dom-pick" onClick={onClick}>
+      <span className="ic">{icon}</span>
+      <span className="t"><b>{title}</b></span>
+    </button>
+  )
+}
+
+function SetupStatus() {
+  const t = useT()
+  const ai = useDom((s) => s.ai)
+  const account = useDom((s) => s.account)
+  const own = useDom((s) => s.ownStatus)
+  const accountChecked = useDom((s) => s.accountChecked)
+  const subscribed = useAccount(isSubscriber)
+  const line = (text: ReactNode, right?: string, warn = false) => (
+    <span className={cx('st', warn && 'warn')}>
+      <span>{text}</span>
+      {right && <span>{right}</span>}
+    </span>
+  )
+  const meter = (share: number) => <span className="meter"><i style={{ width: `${Math.round(Math.min(1, Math.max(0, share)) * 100)}%` }} /></span>
+  if (!ai.setupDone) return line(t('dom.setup.notSetUp'), undefined, true)
+  if (ai.provider === 'own') {
+    if (own?.kind === 'unreachable') return line(`${t('vr.notRunning')} · ${serverName(ai.ownUrl)}`, undefined, true)
+    if (own?.kind === 'auth') return line(ownTrouble(t, ai.ownUrl, own).title, undefined, true)
+    if (!ai.ownModel.trim()) return line(t('dom.setup.notSetUp'), undefined, true)
+    return line(<>{t('dom.ai.own')} · <span className="mono">{ai.ownModel}</span></>)
+  }
+  if (!accountChecked) return null
+  if (!account.signedIn) return line(t('dom.signIn.button'), undefined, true)
+  if (!subscribed && account.freeSecondsLeft !== null) {
+    const left = account.freeSecondsLeft
+    return (
+      <>
+        {line(t('dom.freeLeft', { minutes: Math.ceil(left / 60) }), t('dom.freeOf', { minutes: DOM_FREE_SECONDS / 60 }), left <= 0)}
+        {meter(left / DOM_FREE_SECONDS)}
+      </>
+    )
+  }
+  return (
+    <>
+      {line(`${t(TIER_LABEL[account.tier])} · ${t('dom.tokensLeft', { percent: Math.round(account.tokensLeft * 100) })}`, account.resetsAt ? t('dom.resets', { date: shortDate(account.resetsAt) }) : undefined)}
+      {meter(account.tokensLeft)}
+    </>
+  )
+}
+
+function StartBlock({ block, onFlow, onAi }: { block: DomBlock; onFlow: () => void; onAi: () => void }) {
+  const t = useT()
+  const ai = useDom((s) => s.ai)
+  const own = useDom((s) => s.ownStatus)
+  const { setAi, checkOwn } = useDom.getState()
+  const bar = (icon: ReactNode, title: string, action: ReactNode) => (
+    <div className="dom-res warn" role="alert">
+      {icon}
+      <span className="t"><b>{title}</b></span>
+      {action}
+    </div>
+  )
+  switch (block) {
+    case 'notSetUp':
+      return bar(<SlidersHorizontal />, t('dom.setup.needed'), <Button variant="primary" onClick={onFlow}>{t('library.setup.title')}</Button>)
+    case 'signIn':
+      return bar(<CircleAlert />, t('dom.error.signedOut'), <Button onClick={onAi}>{t('dom.signIn.button')}</Button>)
+    case 'freeUsed':
+      return <SupporterOffer message={t('dom.error.freeTimeUsed')} label={t('dom.buySupporter')} action={{ label: t('dom.plan.own'), onClick: () => {
+        void setAi({ provider: 'own' })
+        onAi()
+      } }} />
+    case 'ownDown':
+      return own && own.kind !== 'ok' ? <Trouble url={ai.ownUrl} result={own} onRetry={() => void checkOwn()} warn /> : null
+    case 'ownKey':
+      return own?.kind === 'auth' ? bar(<CircleAlert />, ownTrouble(t, ai.ownUrl, own).title, <Button onClick={onAi}>{t('library.setup.title')}</Button>) : null
+    case 'ownModel':
+      return bar(<CircleAlert />, t('dom.own.pickModel'), <Button onClick={onAi}>{t('library.setup.title')}</Button>)
+    default:
+      return null
+  }
+}
+
+function DomPage({ dom, block, blocked }: { dom: DomProfile; block: ReactNode; blocked: boolean }) {
   const t = useT()
   const [tab, setTab] = useState<Tab>('personality')
   const [deleting, setDeleting] = useState(false)
@@ -153,14 +279,12 @@ function DomPage({ dom, locked }: { dom: DomProfile; locked: boolean }) {
         <Button variant="ghost" icon aria-label={t('common.delete')} title={t('common.delete')} onClick={() => setDeleting(true)}>
           <Trash2 />
         </Button>
-        <Button variant="primary" className="dom-start" disabled={locked || running} onClick={() => void start(dom.id)}>
+        <Button variant="primary" className="dom-start" disabled={blocked || running} onClick={() => void start(dom.id)}>
           <Play />
           {t('dom.start')}
         </Button>
       </div>
-      {locked && (
-        <SupporterOffer message={t('dom.freeUsed')} />
-      )}
+      {block && <div className="dom-block">{block}</div>}
       <div className="dom-tabs">
         <Segmented options={TABS.map((x) => ({ value: x, label: t(TAB_LABEL[x]) }))} value={tab} onChange={setTab} label={t('screen.dom')} />
       </div>
@@ -174,122 +298,11 @@ function DomPage({ dom, locked }: { dom: DomProfile; locked: boolean }) {
   )
 }
 
-function AccountFoot() {
-  const t = useT()
-  const ai = useDom((s) => s.ai)
-  const account = useDom((s) => s.account)
-  const premium = useAccount(isPremium)
-  const [openPop, setOpenPop] = useState(false)
-  const free = !premium && account.freeSecondsLeft !== null
-  return (
-    <div className="dom-foot">
-      <Popover.Root open={openPop} onOpenChange={setOpenPop}>
-        <Popover.Trigger asChild>
-          <button type="button" className="dom-acct">
-            {ai.provider === 'own' ? (
-              <>
-                <span className="row">
-                  <span>{t('dom.ai.own')}</span>
-                  <ChevronsUpDown />
-                </span>
-                <span className="row faint mono">{ai.ownModel || ai.ownUrl}</span>
-              </>
-            ) : (
-              <>
-                <span className="row">
-                  <span>{t('dom.poweredBy')}</span>
-                  <ChevronsUpDown />
-                </span>
-                {account.signedIn && (
-                  <>
-                    <span className="meter"><i style={{ width: `${Math.round((free ? (account.freeSecondsLeft ?? 0) / DOM_FREE_SECONDS : account.tokensLeft) * 100)}%` }} /></span>
-                    <span className="row faint">
-                      {free ? (
-                        <>
-                          <span>{t('dom.freeLeft', { minutes: Math.ceil((account.freeSecondsLeft ?? 0) / 60) })}</span>
-                          <span>{t('dom.freeOf', { minutes: DOM_FREE_SECONDS / 60 })}</span>
-                        </>
-                      ) : (
-                        <>
-                          <span>{t(TIER_LABEL[account.tier])} · {t('dom.tokensLeft', { percent: Math.round(account.tokensLeft * 100) })}</span>
-                          {account.resetsAt && <span>{t('dom.resets', { date: new Date(account.resetsAt).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) })}</span>}
-                        </>
-                      )}
-                    </span>
-                  </>
-                )}
-              </>
-            )}
-          </button>
-        </Popover.Trigger>
-        <Popover.Portal>
-          <AiPopover />
-        </Popover.Portal>
-      </Popover.Root>
-    </div>
-  )
-}
-
-function AiPopover() {
-  const t = useT()
-  const ai = useDom((s) => s.ai)
-  const account = useDom((s) => s.account)
-  const { setAi, logout } = useDom.getState()
-  return (
-    <Popover.Content className="dom-pop" side="top" align="start" alignOffset={10} sideOffset={8} collisionPadding={12} aria-label={t('dom.ai.title')}>
-      <h2>{t('dom.ai.title')}</h2>
-      <Segmented
-        options={[
-          { value: 'agenticlover', label: 'Agentic Lover' },
-          { value: 'own', label: t('dom.ai.own') },
-        ]}
-        value={ai.provider}
-        onChange={(provider) => void setAi({ provider })}
-        label={t('dom.ai.title')}
-      />
-      <div className="panel">
-        {ai.provider === 'own' ? (
-          <OwnAiFields />
-        ) : account.signedIn ? (
-          <>
-            <div className="prow">
-              <span className="lbl">{t('dom.ai.account')}</span>
-              <span className="spacer" />
-              <span className="val">{account.email}</span>
-              <button type="button" className="dom-link" onClick={() => void logout()}>{t('dom.signOut')}</button>
-            </div>
-            <div className="prow">
-              <span className="lbl">{t('dom.ai.model')}</span>
-              <span className="spacer" />
-              <Select options={[{ value: '', label: t('dom.ai.defaultModel') }, ...account.models.map((m) => ({ value: m.id, label: m.label }))]} value={ai.alModel} onChange={(alModel) => void setAi({ alModel })} label={t('dom.ai.model')} />
-            </div>
-          </>
-        ) : null}
-      </div>
-      <div className="panel">
-        <div className="prow">
-          <span className="lbl">{t('dom.ai.tagEditing')}</span>
-          <span className="spacer" />
-          <Switch checked={ai.tagEditing} onCheckedChange={(tagEditing) => void setAi({ tagEditing })} label={t('dom.ai.tagEditing')} />
-        </div>
-        <div className="prow">
-          <span className="lbl">{t('dom.ai.viewVideo')}</span>
-          <span className="spacer" />
-          <Switch checked={ai.viewVideo} onCheckedChange={(viewVideo) => void setAi({ viewVideo })} label={t('dom.ai.viewVideo')} />
-        </div>
-      </div>
-      <button type="button" className="dom-link dom-al-link" onClick={() => open(AGENTIC_LOVER_URL)}>
-        agenticlover.ai
-        <ExternalLink />
-      </button>
-    </Popover.Content>
-  )
-}
-
 function ImportDialog({ onClose }: { onClose: () => void }) {
   const t = useT()
   const doms = useDom((s) => s.doms)
   const [source, setSource] = useState<'mine' | 'directory'>('mine')
+  const [settled, setSettled] = useState(false)
   const [query, setQuery] = useState('')
   const [list, setList] = useState<AlPersona[] | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
@@ -299,7 +312,12 @@ function ImportDialog({ onClose }: { onClose: () => void }) {
     setList(null)
     const timer = window.setTimeout(() => {
       invoke('dom:personas', source, query).then(
-        (l) => live && setList(l),
+        (l) => {
+          if (!live) return
+          setSettled(true)
+          if (!settled && source === 'mine' && l.length === 0) setSource('directory')
+          else setList(l)
+        },
         (err: unknown) => live && setError(domErrorText(err)),
       )
     }, source === 'directory' ? 300 : 0)
@@ -336,22 +354,26 @@ function ImportDialog({ onClose }: { onClose: () => void }) {
           )}
         </div>
         {error && <span className="dom-err">{error}</span>}
-        <ul className="dom-import-list">
-          {list?.map((p) => (
-            <li key={p.id}>
-              {p.avatarUrl ? <img className="dom-ava" src={p.avatarUrl} alt="" /> : <Portrait dom={{ name: p.name, portrait: '' }} className="dom-ava" />}
-              <span className="t">
-                <b>{p.name}</b>
-                <span>{p.description}</span>
-              </span>
-              {source === 'mine' && imported.has(p.id) ? (
-                <span className="dom-status ok">{t('dom.import.imported')}</span>
-              ) : (
-                <Button disabled={busy !== null} onClick={() => void take(p)}>{t('common.import')}</Button>
-              )}
-            </li>
-          ))}
-        </ul>
+        {source === 'mine' && list?.length === 0 ? (
+          <div className="dom-import-empty">{t('dom.import.none')}</div>
+        ) : (
+          <ul className="dom-import-list">
+            {list?.map((p) => (
+              <li key={p.id}>
+                {p.avatarUrl ? <img className="dom-ava" src={p.avatarUrl} alt="" /> : <Portrait dom={{ name: p.name, portrait: '' }} className="dom-ava" />}
+                <span className="t">
+                  <b>{p.name}</b>
+                  <span>{p.description}</span>
+                </span>
+                {source === 'mine' && imported.has(p.id) ? (
+                  <span className="dom-status ok">{t('dom.import.imported')}</span>
+                ) : (
+                  <Button disabled={busy !== null} onClick={() => void take(p)}>{t('common.import')}</Button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     </Modal>
   )

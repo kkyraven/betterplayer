@@ -1,6 +1,7 @@
 import { t } from '../i18n'
-import type { MediaDetail, MediaIndexRow } from '@shared/library'
-import type { Projection, ProjectionKind } from '@shared/projection'
+import type { MediaDetail, MediaIndexRow, MediaMark } from '@shared/library'
+import { lensDegrees, type Projection, type ProjectionKind } from '@shared/projection'
+import { isTimed, tagMark, type SceneTag } from '../library/servers/heresphere'
 
 export interface HereSphereIndex {
   access: number
@@ -22,7 +23,7 @@ export interface HereSphereScene {
   fov: number
   lens: string
   scripts: { name: string; url: string }[]
-  tags: { name: string }[]
+  tags: { name: string; start?: number; end?: number; track?: number }[]
   media: { name: string; sources: { resolution: number; height: number; width: number; size: number; url: string }[] }[]
   writeFavorite: boolean
   writeRating: boolean
@@ -33,6 +34,7 @@ export interface HereSphereWrite {
   rating?: number
   isFavorite?: boolean
   tags?: string[]
+  marks?: MediaMark[]
 }
 
 const PROJECTIONS: Record<ProjectionKind, string> = {
@@ -79,10 +81,10 @@ export function hereSphereScene(detail: MediaDetail, projection: Projection, bas
     projection: PROJECTIONS[projection.kind],
     stereo: STEREO[projection.layout],
     isEyeSwapped: projection.swapEyes,
-    fov: projection.kind === 'fisheye' ? projection.fov : 180,
+    fov: lensDegrees(projection) ?? 180,
     lens: lens(detail.title),
     scripts,
-    tags: detail.tags.map((name) => ({ name })),
+    tags: [...detail.tags.map((name) => ({ name })), ...markTags(detail)],
     media: [
       {
         name: t('main.dialog.video'),
@@ -103,16 +105,33 @@ export function hereSphereScene(detail: MediaDetail, projection: Projection, bas
   }
 }
 
-export function readWrite(body: unknown): HereSphereWrite | null {
+function markTags(detail: MediaDetail): HereSphereScene['tags'] {
+  return (detail.marks ?? []).flatMap((m) => {
+    const tag = { name: m.name, start: m.startMs, ...(m.endMs === null ? {} : { end: m.endMs }), track: 0 }
+    return m.name.trim() && isTimed(tag, detail.durationMs) ? [tag] : []
+  })
+}
+
+const markKey = (m: MediaMark) => `${m.startMs}|${m.endMs ?? ''}|${m.name}`
+
+export function readWrite(body: unknown, row: Pick<MediaDetail, 'durationMs' | 'marks'>): HereSphereWrite | null {
   if (typeof body !== 'object' || body === null) return null
   const raw = body as Record<string, unknown>
   const write: HereSphereWrite = {}
   if (typeof raw.rating === 'number' && Number.isFinite(raw.rating)) write.rating = raw.rating
   if (typeof raw.isFavorite === 'boolean') write.isFavorite = raw.isFavorite
   if (Array.isArray(raw.tags)) {
-    write.tags = raw.tags
-      .map((t) => (typeof t === 'object' && t !== null ? (t as { name?: unknown }).name : t))
-      .filter((name): name is string => typeof name === 'string')
+    const tags = raw.tags.flatMap((t): (SceneTag & { name: string })[] => {
+      if (typeof t === 'string') return [{ name: t }]
+      if (typeof t !== 'object' || t === null) return []
+      const { name, start, end, track } = t as Record<string, unknown>
+      if (typeof name !== 'string') return []
+      const time = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
+      return [{ name, start: time(start), end: time(end), track: time(track) }]
+    })
+    const others = new Set((row.marks ?? []).filter((m) => m.source !== 'headset').map(markKey))
+    write.tags = tags.filter((t) => !isTimed(t, row.durationMs)).map((t) => t.name)
+    write.marks = tags.filter((t) => isTimed(t, row.durationMs) && t.name.trim()).map((t) => tagMark(t.name, t)).filter((m) => !others.has(markKey(m)))
   }
   return Object.keys(write).length > 0 ? write : null
 }

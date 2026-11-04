@@ -58,7 +58,7 @@ export function DetailSheet() {
   return (
     <aside className="lib-sheet" aria-label={t('library.detail.title')}>
       <div className="hero">
-        {detail?.thumb && <ThumbnailImage src={detail.thumb} alt="" draggable={false} />}
+        {detail?.thumb && <ThumbnailImage src={detail.thumb} keyed={detail.keyed} alt="" draggable={false} />}
         {detail && <div className="tl"><AxisChips axes={detail.axes} /></div>}
         <div className="hero-tr">
           {detail && <FavButton id={detail.id} favourite={detail.favourite} />}

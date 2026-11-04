@@ -1,6 +1,9 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
+pub mod skin;
 pub mod tagger;
+pub use skin::{Skin, SkinMask};
 pub use tagger::Tagger;
 
 use ort::session::{
@@ -9,91 +12,63 @@ use ort::session::{
 };
 use ort::value::TensorRef;
 
-#[derive(Clone, Copy, Debug)]
-pub struct ModelSpec {
-    pub id: &'static str,
-    pub label: &'static str,
-    pub file: &'static str,
-    pub input: u32,
-    pub classes: &'static [&'static str],
-    pub url: &'static str,
-    pub sha256: &'static str,
-    pub size_mb: u32,
-    pub licence: &'static str,
-    pub licence_url: &'static str,
-    pub source_url: &'static str,
+#[derive(Clone, Debug, PartialEq)]
+pub struct Variant {
+    pub width: u32,
+    pub height: u32,
+    pub path: PathBuf,
 }
 
-const AGPL_URL: &str = "https://www.gnu.org/licenses/agpl-3.0.txt";
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelSpec {
+    pub id: &'static str,
+    pub classes: Vec<&'static str>,
+    pub variants: Vec<Variant>,
+}
 
-pub const HOTSCREEN: ModelSpec = ModelSpec {
-    id: "hotscreen",
-    label: "HotScreen real+anime",
-    file: "hs-real-anime-y11s-640-fp32.onnx",
-    input: 640,
-    classes: &[
-        "FEMALE_FACE",
-        "MALE_FACE",
-        "FEMALE_GENITALIA_COVERED",
-        "FEMALE_GENITALIA_EXPOSED",
-        "BUTTOCKS_COVERED",
-        "BUTTOCKS_EXPOSED",
-        "FEMALE_BREAST_COVERED",
-        "FEMALE_BREAST_EXPOSED",
-        "MALE_BREAST_EXPOSED",
-        "ARMPITS_EXPOSED",
-        "BELLY_EXPOSED",
-        "MALE_GENITALIA_EXPOSED",
-        "ANUS_EXPOSED",
-        "FEET_COVERED",
-        "FEET_EXPOSED",
-        "EYE",
-    ],
-    url: "https://huggingface.co/Perfectfox256/hotscreen-detection-models/resolve/main/yolo-07-2025/hs-real-anime-y11s-640-fp32.onnx",
-    sha256: "bd2f67c628adb20ab2f1ffdd45c37015103f6fa6140e1a6a942dbbc3121a44a9",
-    size_mb: 37,
-    licence: "AGPL-3.0-only",
-    licence_url: AGPL_URL,
-    source_url: "https://huggingface.co/Perfectfox256/hotscreen-detection-models",
-};
+impl ModelSpec {
+    pub fn new(id: &str, classes: &[String], variants: Vec<Variant>) -> ModelSpec {
+        ModelSpec { id: intern(id), classes: classes.iter().map(|c| intern(&vocabulary(c))).collect(), variants }
+    }
+}
 
-pub const NUDENET: ModelSpec = ModelSpec {
-    id: "nudenet",
-    label: "NudeNet 320n",
-    file: "320n.onnx",
-    input: 320,
-    classes: &[
-        "FEMALE_GENITALIA_COVERED",
-        "FACE_FEMALE",
-        "BUTTOCKS_EXPOSED",
-        "FEMALE_BREAST_EXPOSED",
-        "FEMALE_GENITALIA_EXPOSED",
-        "MALE_BREAST_EXPOSED",
-        "ANUS_EXPOSED",
-        "FEET_EXPOSED",
-        "BELLY_COVERED",
-        "FEET_COVERED",
-        "ARMPITS_COVERED",
-        "ARMPITS_EXPOSED",
-        "FACE_MALE",
-        "BELLY_EXPOSED",
-        "MALE_GENITALIA_EXPOSED",
-        "ANUS_COVERED",
-        "FEMALE_BREAST_COVERED",
-        "BUTTOCKS_COVERED",
-    ],
-    url: "https://api.github.com/repos/notAI-tech/NudeNet/releases/assets/176831997",
-    sha256: "c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f",
-    size_mb: 12,
-    licence: "AGPL-3.0-only",
-    licence_url: "https://raw.githubusercontent.com/notAI-tech/NudeNet/bac927ae7ef3ea6b57c175e3fb36686a1115db16/LICENSE",
-    source_url: "https://github.com/notAI-tech/NudeNet",
-};
+static NAMES: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
 
-pub const MODELS: &[ModelSpec] = &[HOTSCREEN, NUDENET];
+fn intern(name: &str) -> &'static str {
+    let mut names = NAMES.lock().unwrap();
+    if let Some(n) = names.iter().find(|n| **n == name) {
+        return n;
+    }
+    let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+    names.push(leaked);
+    leaked
+}
 
-pub fn model(id: &str) -> Option<&'static ModelSpec> {
-    MODELS.iter().find(|m| m.id == id)
+pub fn vocabulary(raw: &str) -> String {
+    let up = raw.trim().to_ascii_uppercase();
+    let (part, state) = match up.rsplit_once('_') {
+        Some((p, s)) if s == "EXPOSED" || s == "COVERED" => (p, Some(s)),
+        _ => (up.as_str(), None),
+    };
+    let part = match part {
+        "PENIS" => "MALE_GENITALIA",
+        "VAGINA" => "FEMALE_GENITALIA",
+        "GENITALS" => "GENITALIA",
+        "BREAST" | "NIPPLE" | "FEMALE_NIPPLE" => "FEMALE_BREAST",
+        "MALE_NIPPLE" => "MALE_BREAST",
+        "FOOT" => "FEET",
+        p => p,
+    };
+    match state {
+        Some(s) => format!("{part}_{s}"),
+        None => part.to_string(),
+    }
+}
+
+pub fn nearest_variant(variants: &[Variant], width: usize, height: usize) -> usize {
+    let aspect = width.max(1) as f64 / height.max(1) as f64;
+    let off = |v: &Variant| ((v.width as f64 / v.height.max(1) as f64) / aspect).ln().abs();
+    (0..variants.len()).min_by(|a, b| off(&variants[*a]).total_cmp(&off(&variants[*b]))).unwrap_or(0)
 }
 
 const CONF_THRESHOLD: f32 = 0.35;
@@ -263,50 +238,79 @@ pub fn choose(dets: &[Detection], kind: Option<Kind>, floor: Option<Target>) -> 
     best.map(|(_, _, d)| d)
 }
 
+pub(crate) struct Shape {
+    pub(crate) session: Session,
+    pub(crate) input_name: String,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+}
+
+pub(crate) fn open_shapes(variants: &[Variant], cache_dir: Option<&Path>) -> Result<(Vec<Shape>, &'static str), String> {
+    if variants.is_empty() {
+        return Err("model has no files".into());
+    }
+    let mut provider = "cpu";
+    let mut shapes = Vec::with_capacity(variants.len());
+    for v in variants {
+        let (builder, p) = register_provider(session_builder()?, cache_dir)?;
+        provider = p;
+        let session = builder.commit_from_file(&v.path).map_err(|e| format!("{}: {e}", v.path.display()))?;
+        let input_name = session.inputs.first().map(|i| i.name.clone()).ok_or("model has no inputs")?;
+        shapes.push(Shape { session, input_name, width: v.width as usize, height: v.height as usize });
+    }
+    Ok((shapes, provider))
+}
+
 pub struct Detector {
-    session: Session,
-    input_name: String,
-    spec: &'static ModelSpec,
+    shapes: Vec<Shape>,
+    spec: Arc<ModelSpec>,
     provider: &'static str,
     input: Vec<f32>,
+    threshold: f32,
 }
 
 impl Detector {
-    pub fn load(spec: &'static ModelSpec, path: &Path, cache_dir: Option<&Path>) -> Result<Detector, String> {
-        let (builder, provider) = register_provider(session_builder()?, cache_dir)?;
-        let session = builder.commit_from_file(path).map_err(|e| e.to_string())?;
-        let input_name = session.inputs.first().map(|i| i.name.clone()).ok_or("model has no inputs")?;
-        Ok(Detector { session, input_name, spec, provider, input: Vec::new() })
+    pub fn load(spec: Arc<ModelSpec>, cache_dir: Option<&Path>) -> Result<Detector, String> {
+        let (shapes, provider) = open_shapes(&spec.variants, cache_dir)?;
+        Ok(Detector { shapes, spec, provider, input: Vec::new(), threshold: CONF_THRESHOLD })
     }
 
-    pub fn spec(&self) -> &'static ModelSpec {
-        self.spec
+    pub fn spec(&self) -> &Arc<ModelSpec> {
+        &self.spec
     }
 
     pub fn provider(&self) -> &'static str {
         self.provider
     }
 
+    pub fn set_threshold(&mut self, threshold: f32) {
+        self.threshold = threshold;
+    }
+
     pub fn detect(&mut self, rgb: &[u8], width: usize, height: usize) -> Result<Vec<Detection>, String> {
         if width == 0 || height == 0 || rgb.len() < width * height * 3 {
             return Err(format!("frame is {} bytes, expected {}x{}x3", rgb.len(), width, height));
         }
-        let size = self.spec.input as usize;
-        let fit = letterbox(rgb, width, height, size, &mut self.input);
-        let tensor = TensorRef::from_array_view(([1usize, 3, size, size], self.input.as_slice())).map_err(|e| e.to_string())?;
-        let outputs = self.session.run(ort::inputs![self.input_name.as_str() => tensor]).map_err(|e| e.to_string())?;
-        let (shape, raw) = outputs[0].try_extract_tensor::<f32>().map_err(|e| e.to_string())?;
-        let dims: Vec<i64> = shape.iter().copied().collect();
-        let boxes = nms(decode(raw, &dims, self.spec.classes.len(), CONF_THRESHOLD), IOU_THRESHOLD);
+        let shape = &mut self.shapes[nearest_variant(&self.spec.variants, width, height)];
+        let (sw, sh) = (shape.width, shape.height);
+        let fit = letterbox(rgb, width, height, sw, sh, &mut self.input);
+        let tensor = TensorRef::from_array_view(([1usize, 3, sh, sw], self.input.as_slice())).map_err(|e| e.to_string())?;
+        let outputs = shape.session.run(ort::inputs![shape.input_name.as_str() => tensor]).map_err(|e| e.to_string())?;
+        let (out_shape, raw) = outputs[0].try_extract_tensor::<f32>().map_err(|e| e.to_string())?;
+        let dims: Vec<i64> = out_shape.iter().copied().collect();
+        let classes = &self.spec.classes;
+        let boxes = nms(decode(raw, &dims, classes.len(), self.threshold), IOU_THRESHOLD);
         Ok(boxes
             .into_iter()
             .map(|b| {
                 let (x0, y0) = fit.unmap(b.x0, b.y0);
                 let (x1, y1) = fit.unmap(b.x1, b.y1);
+                let (x0, y0) = (x0.max(0.0), y0.max(0.0));
+                let (x1, y1) = (x1.min(width as f32), y1.min(height as f32));
                 Detection {
-                    class: self.spec.classes[b.class],
+                    class: classes[b.class],
                     confidence: b.confidence,
-                    rect: Rect { x: x0 as f64 / width as f64, y: y0 as f64 / height as f64, w: (x1 - x0) as f64 / width as f64, h: (y1 - y0) as f64 / height as f64 },
+                    rect: Rect { x: x0 as f64 / width as f64, y: y0 as f64 / height as f64, w: (x1 - x0).max(0.0) as f64 / width as f64, h: (y1 - y0).max(0.0) as f64 / height as f64 },
                 }
             })
             .collect())
@@ -357,10 +361,12 @@ fn register_provider(builder: SessionBuilder, _cache_dir: Option<&Path>) -> Resu
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Fit {
-    scale: f32,
-    pad_x: f32,
-    pad_y: f32,
+pub(crate) struct Fit {
+    pub(crate) scale: f32,
+    pub(crate) pad_x: f32,
+    pub(crate) pad_y: f32,
+    pub(crate) fit_w: usize,
+    pub(crate) fit_h: usize,
 }
 
 impl Fit {
@@ -369,22 +375,22 @@ impl Fit {
     }
 }
 
-fn letterbox(rgb: &[u8], width: usize, height: usize, size: usize, out: &mut Vec<f32>) -> Fit {
-    let scale = (size as f32 / width as f32).min(size as f32 / height as f32);
-    let out_w = ((width as f32 * scale).round() as usize).clamp(1, size);
-    let out_h = ((height as f32 * scale).round() as usize).clamp(1, size);
-    let pad_x = (size - out_w) / 2;
-    let pad_y = (size - out_h) / 2;
+pub(crate) fn letterbox(rgb: &[u8], width: usize, height: usize, out_w: usize, out_h: usize, out: &mut Vec<f32>) -> Fit {
+    let scale = (out_w as f32 / width as f32).min(out_h as f32 / height as f32);
+    let fit_w = ((width as f32 * scale).round() as usize).clamp(1, out_w);
+    let fit_h = ((height as f32 * scale).round() as usize).clamp(1, out_h);
+    let pad_x = (out_w - fit_w) / 2;
+    let pad_y = (out_h - fit_h) / 2;
     out.clear();
-    out.resize(3 * size * size, PAD);
-    let plane = size * size;
-    for oy in 0..out_h {
+    out.resize(3 * out_w * out_h, PAD);
+    let plane = out_w * out_h;
+    for oy in 0..fit_h {
         let sy = ((oy as f32 + 0.5) / scale - 0.5).clamp(0.0, (height - 1) as f32);
         let y0 = sy.floor() as usize;
         let y1 = (y0 + 1).min(height - 1);
         let fy = sy - y0 as f32;
-        let row = (pad_y + oy) * size + pad_x;
-        for ox in 0..out_w {
+        let row = (pad_y + oy) * out_w + pad_x;
+        for ox in 0..fit_w {
             let sx = ((ox as f32 + 0.5) / scale - 0.5).clamp(0.0, (width - 1) as f32);
             let x0 = sx.floor() as usize;
             let x1 = (x0 + 1).min(width - 1);
@@ -397,7 +403,7 @@ fn letterbox(rgb: &[u8], width: usize, height: usize, size: usize, out: &mut Vec
             }
         }
     }
-    Fit { scale, pad_x: pad_x as f32, pad_y: pad_y as f32 }
+    Fit { scale, pad_x: pad_x as f32, pad_y: pad_y as f32, fit_w, fit_h }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -546,7 +552,7 @@ mod tests {
             rgb[(10 * w + 40) * 3 + c] = 255;
         }
         let mut out = Vec::new();
-        let fit = letterbox(&rgb, w, h, 32, &mut out);
+        let fit = letterbox(&rgb, w, h, 32, 32, &mut out);
         assert_eq!(out.len(), 3 * 32 * 32);
         assert!((fit.scale - 0.5).abs() < 1e-6 && fit.pad_x == 0.0 && fit.pad_y == 8.0);
         assert!((out[0] - PAD).abs() < 1e-6);
@@ -577,32 +583,76 @@ mod tests {
     }
 
     #[test]
+    fn nevermore_names_map_onto_the_vocabulary() {
+        assert_eq!(vocabulary("penis_exposed"), "MALE_GENITALIA_EXPOSED");
+        assert_eq!(vocabulary("vagina_covered"), "FEMALE_GENITALIA_COVERED");
+        assert_eq!(vocabulary("genitals_exposed"), "GENITALIA_EXPOSED");
+        assert_eq!(vocabulary("nipple_exposed"), "FEMALE_BREAST_EXPOSED");
+        assert_eq!(vocabulary("foot_covered"), "FEET_COVERED");
+        assert_eq!(vocabulary("face"), "FACE");
+        assert_eq!(vocabulary("FEMALE_GENITALIA_EXPOSED"), "FEMALE_GENITALIA_EXPOSED", "NudeNet names pass through");
+        assert!(Kind::Genitals.matches(&vocabulary("genitals_exposed")) && Kind::Feet.matches(&vocabulary("foot_exposed")));
+        assert_eq!(Target::of(&vocabulary("face")), Some(Target::Face));
+        let a = ModelSpec::new("m", &["face".into()], Vec::new());
+        let b = ModelSpec::new("m", &["face".into()], Vec::new());
+        assert!(std::ptr::eq(a.classes[0], b.classes[0]), "interned once");
+    }
+
+    #[test]
+    fn the_shape_nearest_the_frame_runs_it() {
+        let v = |width, height| Variant { width, height, path: PathBuf::new() };
+        let shapes = [v(640, 640), v(640, 384)];
+        assert_eq!(nearest_variant(&shapes, 1920, 1080), 1);
+        assert_eq!(nearest_variant(&shapes, 1080, 1920), 0, "portrait takes the square");
+        assert_eq!(nearest_variant(&shapes, 1000, 1000), 0);
+        assert_eq!(nearest_variant(&shapes[..1], 1920, 1080), 0);
+    }
+
+    #[test]
+    fn letterbox_fits_a_wide_frame_into_a_wide_shape() {
+        let rgb = vec![255u8; 64 * 36 * 3];
+        let mut out = Vec::new();
+        let fit = letterbox(&rgb, 64, 36, 32, 20, &mut out);
+        assert_eq!(out.len(), 3 * 32 * 20);
+        assert_eq!((fit.fit_w, fit.fit_h), (32, 18));
+        assert_eq!(fit.pad_y, 1.0);
+    }
+
+    #[test]
     fn real_model_finds_something_in_a_frame() {
-        let Ok(dir) = std::env::var("BP_MODEL_DIR") else { return };
+        let Ok(model) = std::env::var("BP_DETECTOR") else { return };
         let Ok(frame) = std::env::var("BP_TEST_FRAME") else { return };
-        let stem = std::path::Path::new(&frame).file_stem().unwrap().to_string_lossy().to_string();
-        let dims = stem.rsplit('_').next().unwrap();
-        let (w, h) = dims.split_once('x').unwrap();
-        let (w, h): (usize, usize) = (w.parse().unwrap(), h.parse().unwrap());
-        let rgb = std::fs::read(&frame).unwrap();
-        for spec in MODELS {
-            let path = std::path::Path::new(&dir).join(spec.file);
-            if !path.exists() {
-                continue;
-            }
-            let t0 = std::time::Instant::now();
-            let mut d = Detector::load(spec, &path, None).unwrap();
-            let load = t0.elapsed();
-            let t1 = std::time::Instant::now();
-            let dets = d.detect(&rgb, w, h).unwrap();
-            let run = t1.elapsed();
-            let _ = d.detect(&rgb, w, h).unwrap();
-            let run2 = t1.elapsed() - run;
-            println!("{} on {}: load {:?}, first run {:?}, second {:?}", spec.label, d.provider(), load, run, run2);
-            for x in &dets {
-                println!("  {} {:.2} at {:.2},{:.2} {:.2}x{:.2}", x.class, x.confidence, x.rect.x, x.rect.y, x.rect.w, x.rect.h);
-            }
-            println!("  chosen: {:?}", choose(&dets, None, None).map(|c| c.class));
+        let (w, h, rgb) = read_frame(&frame);
+        let classes: Vec<String> = ["person", "face", "female_breast_exposed", "female_breast_covered", "male_breast_exposed", "male_breast_covered", "penis_exposed", "penis_covered", "vagina_exposed", "vagina_covered", "buttocks_exposed", "buttocks_covered", "foot_exposed", "foot_covered"].iter().map(|s| s.to_string()).collect();
+        let (vw, vh) = shape_of(&model);
+        let spec = Arc::new(ModelSpec::new("test", &classes, vec![Variant { width: vw, height: vh, path: model.into() }]));
+        let t0 = std::time::Instant::now();
+        let mut d = Detector::load(spec, None).unwrap();
+        let load = t0.elapsed();
+        let t1 = std::time::Instant::now();
+        let dets = d.detect(&rgb, w, h).unwrap();
+        let run = t1.elapsed();
+        let t2 = std::time::Instant::now();
+        let _ = d.detect(&rgb, w, h).unwrap();
+        println!("{} on {}: load {:?}, first run {:?}, second {:?}", vw, d.provider(), load, run, t2.elapsed());
+        for x in &dets {
+            println!("  {} {:.2} at {:.2},{:.2} {:.2}x{:.2}", x.class, x.confidence, x.rect.x, x.rect.y, x.rect.w, x.rect.h);
+        }
+        println!("  chosen: {:?}", choose(&dets, None, None).map(|c| c.class));
+    }
+
+    pub(crate) fn read_frame(frame: &str) -> (usize, usize, Vec<u8>) {
+        let stem = std::path::Path::new(frame).file_stem().unwrap().to_string_lossy().to_string();
+        let (w, h) = stem.rsplit('_').next().unwrap().split_once('x').unwrap();
+        (w.parse().unwrap(), h.parse().unwrap(), std::fs::read(frame).unwrap())
+    }
+
+    pub(crate) fn shape_of(file: &str) -> (u32, u32) {
+        let stem = std::path::Path::new(file).file_stem().unwrap().to_string_lossy().replace("_fp16", "");
+        let tag = stem.rsplit('_').next().unwrap();
+        match tag.split_once('x') {
+            Some((w, h)) => (w.parse().unwrap(), h.parse().unwrap()),
+            None => tag.parse().map(|n| (n, n)).unwrap_or((640, 640)),
         }
     }
 }

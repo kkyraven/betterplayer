@@ -64,10 +64,10 @@
           },
           "inputs": {
             "north": {
-              "output": "/actions/watch/in/recentre"
+              "output": "/actions/watch/in/volume_up"
             },
             "south": {
-              "output": "/actions/watch/in/recentre"
+              "output": "/actions/watch/in/volume_down"
             }
           }
         },
@@ -77,6 +77,9 @@
           "inputs": {
             "click": {
               "output": "/actions/watch/in/controls"
+            },
+            "position": {
+              "output": "/actions/watch/in/seek"
             }
           }
         },
@@ -95,12 +98,6 @@
             },
             "south": {
               "output": "/actions/watch/in/volume_down"
-            },
-            "west": {
-              "output": "/actions/watch/in/turn_left"
-            },
-            "east": {
-              "output": "/actions/watch/in/turn_right"
             }
           }
         },
@@ -109,7 +106,7 @@
           "mode": "button",
           "inputs": {
             "click": {
-              "output": "/actions/watch/in/point"
+              "output": "/actions/watch/in/point_left"
             }
           }
         },
@@ -118,7 +115,7 @@
           "mode": "button",
           "inputs": {
             "click": {
-              "output": "/actions/watch/in/point"
+              "output": "/actions/watch/in/point_right"
             }
           }
         }
@@ -159,6 +156,16 @@
         {
           "output": "/actions/watch/out/haptic",
           "path": "/user/hand/right/output/haptic"
+        }
+      ],
+      "poses": [
+        {
+          "output": "/actions/watch/in/aim_left",
+          "path": "/user/hand/left/pose/tip"
+        },
+        {
+          "output": "/actions/watch/in/aim_right",
+          "path": "/user/hand/right/pose/tip"
         }
       ]
     }

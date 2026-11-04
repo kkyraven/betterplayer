@@ -1,12 +1,13 @@
 import { ExternalLink } from 'lucide-react'
 import { Fragment, useState } from 'react'
-import { ACCOUNT_PORTAL_URL, SUBSCRIBE_URL, SUPPORTER_PRICE } from '@shared/account'
+import { ACCOUNT_PORTAL_URL, ITCH_URL, SUBSCRIBE_URL, SUPPORTER_PRICE, vrUnlimited } from '@shared/account'
 import { AGENTIC_LOVER_URL } from '@shared/dom'
 import type { MessageKey } from '@shared/i18n'
 import { Button } from '@/components/ui/Button'
+import { VrGogglesIcon } from '@/components/ui/VrGogglesIcon'
 import { ipcMessage } from '@/lib/errors'
 import { electron } from '@/node'
-import { checkAgenticLover, checkSupporter, useAccount } from '@/state/account'
+import { checkAgenticLover, checkSupporter, isSubscriber, useAccount } from '@/state/account'
 import { useT } from '@/state/i18n'
 
 const FEATURES: ReadonlyArray<readonly [MessageKey, MessageKey]> = [
@@ -14,6 +15,7 @@ const FEATURES: ReadonlyArray<readonly [MessageKey, MessageKey]> = [
   ['settings.support.feature.hmv', 'settings.support.feature.hmvSub'],
   ['settings.support.feature.adBlock', 'settings.support.feature.adBlockSub'],
   ['settings.support.feature.together', 'settings.support.feature.togetherSub'],
+  ['settings.support.feature.vr', 'settings.support.feature.vrSub'],
   ['settings.support.feature.denial', 'settings.support.feature.denialSub'],
   ['settings.support.feature.dlss', 'settings.support.feature.dlssSub'],
 ]
@@ -21,12 +23,12 @@ const FEATURES: ReadonlyArray<readonly [MessageKey, MessageKey]> = [
 export function SupportSettings() {
   const t = useT()
   const status = useAccount((s) => s.status)
-  const premium = status.me?.premium === true
-  const [busy, setBusy] = useState<'portal' | 'agenticLover' | null>(null)
+  const subscribed = useAccount(isSubscriber)
+  const [busy, setBusy] = useState<'portal' | 'agenticLover' | 'itch' | null>(null)
   const [message, setMessage] = useState<string | null>(null)
-  const refresh = async (from: 'portal' | 'agenticLover') => {
+  const refresh = async (from: 'portal' | 'agenticLover' | 'itch') => {
     setBusy(from)
-    setMessage(await (from === 'portal' ? checkSupporter() : checkAgenticLover()))
+    setMessage(await (from === 'portal' ? checkSupporter() : from === 'itch' ? checkSupporter(vrUnlimited) : checkAgenticLover()))
     setBusy(null)
   }
   const open = (url: string) => {
@@ -44,7 +46,7 @@ export function SupportSettings() {
         ))}
       </dl>
       <div className="ask" data-setting="become-a-supporter" tabIndex={-1}>
-        {premium ? (
+        {subscribed ? (
           <span className="price">{t('settings.support.thankYou')}</span>
         ) : (
           <span className="price">
@@ -52,7 +54,7 @@ export function SupportSettings() {
           </span>
         )}
         <span className="spacer" />
-        {premium ? (
+        {subscribed ? (
           <Button onClick={() => open(status.me?.agenticLover ? AGENTIC_LOVER_URL : ACCOUNT_PORTAL_URL)}>
             {t('settings.support.manage')}
             <ExternalLink />
@@ -74,6 +76,22 @@ export function SupportSettings() {
           </>
         )}
       </div>
+      {!vrUnlimited(status.me) && (
+        <div className="itch">
+          <VrGogglesIcon />
+          <div className="grow">
+            <strong>{t('settings.support.itch')}</strong>
+            <small>{t('settings.support.itchSub')}</small>
+          </div>
+          <Button variant="ghost" disabled={busy !== null} onClick={() => void refresh('itch')}>
+            {busy === 'itch' ? t('settings.support.checking') : t('vr.offer.purchased')}
+          </Button>
+          <Button onClick={() => open(ITCH_URL)}>
+            {t('vr.offer.itch')}
+            <ExternalLink />
+          </Button>
+        </div>
+      )}
       {message && (
         <p className="sub error" role="status">
           {message}

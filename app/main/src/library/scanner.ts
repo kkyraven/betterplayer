@@ -2,6 +2,7 @@ import { recordMetric } from './servers/diagnostics'
 import { open, readdir, stat } from 'node:fs/promises'
 import { basename, dirname, extname, join, relative, sep } from 'node:path'
 import { isVideoPath } from '@shared/ipc'
+import type { MediaMark } from '@shared/library'
 import { needsLook, readContainerFacts, readPictureFacts, resolveProjection, worthProbing, type ContainerFacts, type ProjectionKind } from '@shared/projection'
 import type { LibraryDb, MediaStamp, ScriptKey, ScriptRow } from './db'
 import { ScriptFolders } from './script-folders'
@@ -318,6 +319,7 @@ export class Scanner {
     const { file, existing, unchanged, cover } = item
     let media = { durationMs: existing?.durationMs ?? 0, width: 0, height: 0, codec: '' }
     let vr: ContainerFacts | null = null
+    let chapters: MediaMark[] | null = null
     if (!unchanged || item.facts) {
       counts.probed++
       const probed = await probe(file, this.abort.signal).catch((e: unknown) => {
@@ -325,6 +327,7 @@ export class Scanner {
         return null
       })
       vr = probed?.vr ?? null
+      chapters = probed?.chapters ?? null
       if (!unchanged) media = probed ? { durationMs: probed.durationMs, width: probed.width, height: probed.height, codec: probed.codec } : { durationMs: 0, width: 0, height: 0, codec: '' }
     }
     if (this.closed) return
@@ -362,6 +365,7 @@ export class Scanner {
         this.db.setScriptsStamp(id, item.stamp)
       }
       this.db.setCoverStamp(id, cover.stamp)
+      if (chapters) this.db.setMarks(id, 'file', chapters)
       jobs.push({
         id,
         path: file,

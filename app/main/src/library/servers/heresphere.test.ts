@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { HereSphereAdapter, mergedTags, ownTags, performersOf, sceneProjection, sceneRating, studioOf } from './heresphere'
+import { cuepointMarks, HereSphereAdapter, mergedTags, ownTags, performersOf, sceneProjection, sceneRating, studioOf } from './heresphere'
 
 const xbvr = [
   { name: 'Studio:Some Studio' },
@@ -95,6 +95,22 @@ it('round trips stash-vr scene tags without changing markers or generated metada
   expect(ownTags(stashTags)).toEqual(['vr', 'joi'])
   expect(mergedTags(stashTags, ['new'])).toEqual([...stashTags.slice(2), { name: '#:new' }])
   expect(mergedTags(stashTags.slice(2), ['new'])).toEqual([...stashTags.slice(2), { name: '#:new' }])
+})
+
+it('splits timed tags into marks, leaving whole-video tags and server metadata out', () => {
+  const tags = [
+    ...xbvr, ...stashTags,
+    { name: 'Summary:Long text', start: 0.1, end: 60_000, track: 1 },
+    { name: 'Played:3', start: 60_000, end: 120_000, track: 1 },
+    { name: 'Opening', start: 0, end: 15_000, track: 0 },
+    { name: 'Spans it all', start: 0, end: 119_800, track: 0 },
+  ]
+  expect(cuepointMarks(tags, 120_000)).toEqual([
+    { name: 'Jane Doe', startMs: 12_000, endMs: 30_000 },
+    { name: 'kiss:Marker', startMs: 1000, endMs: 2000 },
+    { name: 'Opening', startMs: 0, endMs: 15_000 },
+  ])
+  expect(ownTags(tags)).toEqual(['anal', 'pov', 'vr', 'joi'])
 })
 
 describe('writeBack', () => {

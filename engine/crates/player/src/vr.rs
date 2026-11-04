@@ -3,6 +3,7 @@ pub struct VrView {
     pub kind: VrKind,
     pub layout: VrLayout,
     pub fov: f32,
+    pub arc: f32,
     pub swap_eyes: bool,
 }
 
@@ -23,12 +24,12 @@ pub enum VrLayout {
 
 impl Default for VrView {
     fn default() -> VrView {
-        VrView { kind: VrKind::Flat, layout: VrLayout::Mono, fov: 190.0, swap_eyes: false }
+        VrView { kind: VrKind::Flat, layout: VrLayout::Mono, fov: 190.0, arc: 180.0, swap_eyes: false }
     }
 }
 
 impl VrView {
-    pub fn parse(kind: &str, layout: &str, fov: f64, swap_eyes: bool) -> Result<VrView, String> {
+    pub fn parse(kind: &str, layout: &str, fov: f64, arc: Option<f64>, swap_eyes: bool) -> Result<VrView, String> {
         let kind = match kind {
             "flat" => VrKind::Flat,
             "equirect180" => VrKind::Equirect180,
@@ -42,10 +43,11 @@ impl VrView {
             "ou" => VrLayout::Ou,
             l => return Err(format!("unknown layout {l:?}")),
         };
-        if !fov.is_finite() {
-            return Err("fov is not a number".into());
+        let arc = arc.unwrap_or(180.0);
+        if !fov.is_finite() || !arc.is_finite() {
+            return Err("fov or arc is not a number".into());
         }
-        Ok(VrView { kind, layout, fov: fov.clamp(60.0, 360.0) as f32, swap_eyes })
+        Ok(VrView { kind, layout, fov: fov.clamp(60.0, 360.0) as f32, arc: arc.clamp(60.0, 360.0) as f32, swap_eyes })
     }
 }
 
@@ -59,6 +61,11 @@ pub struct VrStatus {
     pub lost_tracking: bool,
     pub focused: bool,
     pub shortcuts: Vec<bp_vr::Shortcut>,
+    pub aim: [Option<bp_vr::Ray>; 2],
+    pub stick: Option<[f32; 2]>,
+    pub turn: f32,
+    pub dragging: bool,
+    pub buzzes: Vec<(usize, bp_vr::Buzz)>,
     pub presses: u32,
     pub refresh_hz: f32,
     pub width: u32,
@@ -76,9 +83,13 @@ pub(crate) struct Asked {
     pub turn: f32,
     pub recentred: bool,
     pub screen: f32,
+    pub legend: Option<usize>,
+    pub models: [bool; 2],
+    pub rays: [bool; 2],
 }
 
-pub(crate) static ASKED: std::sync::Mutex<Asked> = std::sync::Mutex::new(Asked { turn: 0.0, recentred: false, screen: VR_SCREEN_ARC_DEFAULT });
+pub(crate) static ASKED: std::sync::Mutex<Asked> =
+    std::sync::Mutex::new(Asked { turn: 0.0, recentred: false, screen: VR_SCREEN_ARC_DEFAULT, legend: None, models: [true; 2], rays: [false; 2] });
 
 impl VrStatus {
     pub(crate) fn push_shortcuts(&mut self, shortcuts: Vec<bp_vr::Shortcut>) {
@@ -128,12 +139,14 @@ mod tests {
 
     #[test]
     fn views_parse_the_apps_projection_names() {
-        let v = VrView::parse("fisheye", "sbs", 200.0, true).unwrap();
-        assert_eq!(v, VrView { kind: VrKind::Fisheye, layout: VrLayout::Sbs, fov: 200.0, swap_eyes: true });
-        assert_eq!(VrView::parse("equirect360", "mono", 190.0, false).unwrap().kind, VrKind::Equirect360);
-        assert!(VrView::parse("cubemap", "mono", 190.0, false).is_err());
-        assert!(VrView::parse("flat", "tb", 190.0, false).is_err());
-        assert!(VrView::parse("flat", "mono", f64::NAN, false).is_err());
+        let v = VrView::parse("fisheye", "sbs", 200.0, None, true).unwrap();
+        assert_eq!(v, VrView { kind: VrKind::Fisheye, layout: VrLayout::Sbs, fov: 200.0, arc: 180.0, swap_eyes: true });
+        assert_eq!(VrView::parse("equirect180", "sbs", 190.0, Some(200.0), false).unwrap().arc, 200.0);
+        assert_eq!(VrView::parse("equirect360", "mono", 190.0, None, false).unwrap().kind, VrKind::Equirect360);
+        assert!(VrView::parse("cubemap", "mono", 190.0, None, false).is_err());
+        assert!(VrView::parse("flat", "tb", 190.0, None, false).is_err());
+        assert!(VrView::parse("flat", "mono", f64::NAN, None, false).is_err());
+        assert!(VrView::parse("equirect180", "mono", 190.0, Some(f64::NAN), false).is_err());
     }
 
     #[test]

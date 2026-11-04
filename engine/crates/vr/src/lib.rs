@@ -1,16 +1,22 @@
 mod follow;
 mod gestures;
+mod grab;
 mod maths;
+mod panel_grab;
 mod presence;
 pub use follow::Follow;
 pub use gestures::{Action, Buzz, Gestures, Shortcut, Step};
-pub use maths::{EyeView, Pose, Recentre, eye_view, panel};
+pub use grab::{Aim, Drag, Grab};
+pub use maths::{EyeView, Offset, Pose, Ray, Recentre, eye_view, facing, gaze, hit, panel, plane_hit};
+pub use panel_grab::{BAR_TEXELS, CLOSE_TEXELS, Moved, PanelGrab, Place, Push, Reach, bar_metres, bar_pose, bar_texels, close_metres, close_pose, close_texels, moved_panel, pushed};
 pub use presence::{Presence, Signal};
 
 #[cfg(windows)]
 mod input;
 #[cfg(windows)]
 mod overlays;
+#[cfg(windows)]
+mod render_models;
 #[cfg(windows)]
 mod runtime;
 #[cfg(windows)]
@@ -21,7 +27,9 @@ mod sys;
 #[cfg(windows)]
 pub use overlays::Overlays;
 #[cfg(windows)]
-pub use scene::{Events, Eye, Frame, Scene, mirror, release_mirror};
+pub use render_models::{ControllerModels, HandModel, Mesh, Part, Texture, Vertex};
+#[cfg(windows)]
+pub use scene::{Events, Eye, Frame, FrameTiming, FrameTotals, Headset, Scene, headset, mirror, release_mirror};
 
 pub const ERROR_CODES: [&str; 11] =
     ["not-installed", "not-running", "no-headset", "other-gpu", "no-interop", "old-steamvr", "timeout", "busy", "quit", "compositor", "failed"];
@@ -90,6 +98,18 @@ impl OverlayEvent {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Controller {
+    pub kind: std::sync::Arc<str>,
+    pub model: std::sync::Arc<str>,
+    pub distance: f32,
+    pub angle: f32,
+    pub eye: [f32; 3],
+    pub ray: Ray,
+    pub head: Ray,
+    pub laser: bool,
+}
+
 #[cfg(not(windows))]
 pub struct Overlays(std::convert::Infallible);
 
@@ -110,6 +130,21 @@ impl Overlays {
     pub fn place(&mut self, _: u32, _: f32, _: f32, _: f32) -> Result<(), String> {
         match self.0 {}
     }
+    pub fn place_facing(&mut self, _: u32, _: [f32; 3]) -> Result<(), String> {
+        match self.0 {}
+    }
+    pub fn hit(&mut self, _: u32, _: &Ray) -> Result<Option<(f32, f32)>, String> {
+        match self.0 {}
+    }
+    pub fn attach(&mut self, _: u32, _: usize, _: Pose) -> Result<(), String> {
+        match self.0 {}
+    }
+    pub fn controllers(&mut self) -> [Option<Controller>; 2] {
+        match self.0 {}
+    }
+    pub fn connected(&mut self) -> bool {
+        match self.0 {}
+    }
     pub fn recentre(&mut self, _: f32) -> Result<(), String> {
         match self.0 {}
     }
@@ -119,10 +154,37 @@ impl Overlays {
     pub fn follow(&mut self, _: u32, _: bool) -> Result<(), String> {
         match self.0 {}
     }
+    pub fn grab_bar(&mut self, _: u32, _: bool, _: Moved, _: Reach) -> Result<(), String> {
+        match self.0 {}
+    }
+    pub fn offset(&mut self, _: u32) -> Result<Moved, String> {
+        match self.0 {}
+    }
+    pub fn close_button(&mut self, _: u32, _: bool) -> Result<(), String> {
+        match self.0 {}
+    }
+    pub fn grab(&mut self, _: u32) -> Result<bool, String> {
+        match self.0 {}
+    }
+    pub fn pointed(&mut self, _: u32, _: &Ray) -> Result<bool, String> {
+        match self.0 {}
+    }
+    pub fn alpha(&mut self, _: u32, _: f32) -> Result<(), String> {
+        match self.0 {}
+    }
     pub fn hide(&mut self, _: u32) -> Result<(), String> {
         match self.0 {}
     }
     pub fn poll(&mut self) -> Vec<OverlayEvent> {
+        match self.0 {}
+    }
+    pub fn pose(&mut self, _: u32) -> Result<Pose, String> {
+        match self.0 {}
+    }
+    pub fn seat(&mut self) -> Option<Recentre> {
+        match self.0 {}
+    }
+    pub fn intersect(&mut self, _: u32, _: &Ray) -> Result<Option<(f32, f32)>, String> {
         match self.0 {}
     }
     pub fn close(&mut self) {

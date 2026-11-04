@@ -18,6 +18,20 @@ const BEHIND_MS: f64 = 1500.0;
 const HOLDOFF_MS: f64 = 5000.0;
 const SEEK_MS: f64 = 10_000.0;
 const BEHIND_RUNS: u32 = 2;
+
+#[derive(Default)]
+struct Behind(u32);
+
+impl Behind {
+    fn caught_up(&mut self) {
+        self.0 = 0;
+    }
+
+    fn restart(&mut self, fell_behind: bool) -> bool {
+        self.0 = if fell_behind { self.0 + 1 } else { 0 };
+        self.0 >= BEHIND_RUNS
+    }
+}
 const RUNS_KEPT: usize = 24;
 const FRAME_WAIT: Duration = Duration::from_millis(100);
 
@@ -190,7 +204,7 @@ fn run(
     let mut last_time: Option<f64> = None;
     let mut paused = true;
     let mut restart: Option<Restart> = None;
-    let mut behind_runs = 0;
+    let mut behind = Behind::default();
     let mut cuts_seen = 0;
     let mut last_detect_ms = f64::NEG_INFINITY;
     let mut gray = Vec::new();
@@ -219,7 +233,7 @@ fn run(
             .unwrap_or((f64::INFINITY, f64::NEG_INFINITY));
         let serves = covers_ahead || (start <= pos + 1000.0 && end >= pos - BEHIND_MS);
         if covers_ahead {
-            behind_runs = 0;
+            behind.caught_up();
         }
         let held = restart.as_ref().is_some_and(|r| {
             r.at.elapsed().as_secs_f64() * 1000.0 < HOLDOFF_MS
@@ -227,14 +241,9 @@ fn run(
                 && pos >= r.target_ms - 1000.0
         });
         if !serves && !held {
-            if restart.is_some() && (pos - end).abs() < SEEK_MS {
-                behind_runs += 1;
-                if behind_runs >= BEHIND_RUNS {
-                    eprintln!("bp-core: lookahead: decoding slower than playback, stopped");
-                    return Ok(());
-                }
-            } else {
-                behind_runs = 0;
+            if behind.restart(restart.is_some() && (pos - end).abs() < SEEK_MS) {
+                eprintln!("bp-core: lookahead: decoding slower than playback, stopped");
+                return Ok(());
             }
             let from = (pos - WARMUP_MS).max(0.0);
             player.seek(from / 1000.0)?;
@@ -463,6 +472,17 @@ pub(crate) fn bgra_to_rgb(bgra: &[u8], n: usize, out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn it_stops_after_falling_behind_twice_in_a_row() {
+        let mut b = Behind::default();
+        assert!(!b.restart(true));
+        b.caught_up();
+        assert!(!b.restart(true), "caught up in between");
+        assert!(!b.restart(false), "a seek starts the count again");
+        assert!(!b.restart(true));
+        assert!(b.restart(true));
+    }
 
     #[test]
     #[cfg(target_os = "macos")]

@@ -7,7 +7,6 @@ import { join } from 'node:path'
 import { safeStorage, type BrowserWindow } from 'electron'
 import {
   SIGNED_OUT_AL,
-  defaultDomAi,
   normalizeDomAi,
   newDom,
   normalizeDom,
@@ -22,6 +21,7 @@ import {
   type DomPose,
   type DomProfile,
   type DomYou,
+  type OwnModels,
   normalizeYou,
   normalizePleasurePain,
   type PleasurePain,
@@ -33,6 +33,30 @@ import { DomDb } from './store'
 
 const withBoundaries = (persona: string, boundaries: string[]) => (boundaries.length ? `${persona.trim()}\n\nNever: ${boundaries.join('; ')}.` : persona)
 const pulledKey = (domId: string) => `memoriesPulled:${domId}`
+const ownKeyMeta = (origin: string) => `ownKey:${origin}`
+const LEGACY_OWN_KEY = 'ownKey'
+const OWN_TIMEOUT_MS = 5000
+
+function originOf(url: string): string | null {
+  try {
+    const { origin } = new URL(url)
+    return origin === 'null' ? null : origin
+  } catch {
+    return null
+  }
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname
+  } catch {
+    return ''
+  }
+}
+
+const failure = (error: unknown) => (error instanceof Error ? (error.cause instanceof Error ? error.cause.message : error.message) : String(error))
+const bodyOf = (res: Response) => res.text().then((t) => t.slice(0, 200), () => '')
+const refused = (res: Response) => res.status === 401 || res.status === 403
 
 export class Dom {
   private readonly db: DomDb
@@ -41,6 +65,7 @@ export class Dom {
   constructor(dataDir: string) {
     this.db = new DomDb(join(dataDir, 'dom.sqlite'))
     this.al = new AgenticLover(this.db)
+    this.moveLegacyKey()
   }
 
   close() {
@@ -103,29 +128,52 @@ export class Dom {
   }
 
   ai(): DomAiSettings {
+    let raw: unknown = null
     try {
-      return normalizeDomAi(JSON.parse(this.db.meta('ai') ?? '{}'))
+      raw = JSON.parse(this.db.meta('ai') ?? 'null')
     } catch {
-      return defaultDomAi()
     }
+    const ai = normalizeDomAi(raw)
+    if (typeof raw === 'object' && raw !== null && 'setupDone' in raw) return ai
+    const signedIn = this.al.signedIn || this.db.meta('alRefresh') !== null
+    const migrated = { ...ai, setupDone: signedIn || (ai.provider === 'own' && ai.ownModel !== '') }
+    this.setAi(migrated)
+    return migrated
   }
 
   setAi(ai: DomAiSettings) {
     this.db.setMeta('ai', JSON.stringify(normalizeDomAi(ai)))
+    this.moveLegacyKey(ai.ownUrl)
   }
 
-  hasKey(): boolean {
-    return this.db.meta('ownKey') !== null
+  private moveLegacyKey(url = this.ai().ownUrl) {
+    const sealed = this.db.meta(LEGACY_OWN_KEY)
+    if (sealed === null) return
+    const origin = originOf(url)
+    if (!origin) return
+    if (this.db.meta(ownKeyMeta(origin)) === null) this.db.setMeta(ownKeyMeta(origin), sealed)
+    this.db.setMeta(LEGACY_OWN_KEY, null)
   }
 
-  setKey(key: string | null) {
-    if (!key) return this.db.setMeta('ownKey', null)
+  hasKey(url: string): boolean {
+    const origin = originOf(url)
+    return origin !== null && this.db.meta(ownKeyMeta(origin)) !== null
+  }
+
+  setKey(url: string, key: string | null) {
+    const origin = originOf(url)
+    if (!key) {
+      if (origin) this.db.setMeta(ownKeyMeta(origin), null)
+      return
+    }
+    if (!origin) throw new Error(`Not a server address: ${url}`)
     if (!safeStorage.isEncryptionAvailable()) throw new Error('No keychain to keep the key in')
-    this.db.setMeta('ownKey', safeStorage.encryptString(key).toString('base64'))
+    this.db.setMeta(ownKeyMeta(origin), safeStorage.encryptString(key).toString('base64'))
   }
 
-  private key(): string | null {
-    const sealed = this.db.meta('ownKey')
+  private key(url: string): string | null {
+    const origin = originOf(url)
+    const sealed = origin && this.db.meta(ownKeyMeta(origin))
     if (!sealed) return null
     try {
       return safeStorage.decryptString(Buffer.from(sealed, 'base64'))
@@ -162,13 +210,16 @@ export class Dom {
   async chat(messages: ChatMessage[], tools: ChatTool[], freeMinutes: boolean): Promise<ChatReply> {
     const ai = this.ai()
     if (ai.provider === 'agenticlover') return this.al.chat(ai.alModel, messages, tools, freeMinutes)
-    const key = this.key()
+    const key = this.key(ai.ownUrl)
+    const body = hostOf(ai.ownUrl) === 'api.openai.com'
+      ? { model: ai.ownModel, messages, ...(tools.length ? { tools } : {}), stream: false, max_completion_tokens: 4000 }
+      : { model: ai.ownModel, messages, tools, stream: false, temperature: 0.9, max_tokens: 800 }
     let res: Response
     try {
       res = await fetch(`${ai.ownUrl.replace(/\/+$/, '')}/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}) },
-        body: JSON.stringify({ model: ai.ownModel, messages, tools, stream: false, temperature: 0.9, max_tokens: 800 }),
+        body: JSON.stringify(body),
       })
     } catch (error) {
       throw domError('network', String(error))
@@ -177,15 +228,28 @@ export class Dom {
     return replyOf((await res.json()) as Parameters<typeof replyOf>[0])
   }
 
-  async ownModels(url: string): Promise<string[]> {
+  async ownModels(url: string): Promise<OwnModels> {
+    const base = url.replace(/\/+$/, '')
+    const key = this.key(url)
+    const headers: Record<string, string> = key ? { Authorization: `Bearer ${key}` } : {}
+    const get = (path: string) => fetch(`${base}${path}`, { headers, signal: AbortSignal.timeout(OWN_TIMEOUT_MS) })
     try {
-      const key = this.key()
-      const res = await fetch(`${url.replace(/\/+$/, '')}/models`, { headers: key ? { Authorization: `Bearer ${key}` } : {}, signal: AbortSignal.timeout(5000) })
-      if (!res.ok) return []
-      const json = (await res.json()) as { data?: Array<{ id?: string }> }
-      return (json.data ?? []).flatMap((m) => (m.id ? [m.id] : []))
-    } catch {
-      return []
+      const res = await get('/models')
+      if (refused(res)) return { kind: 'auth', hasKey: key !== null, detail: await bodyOf(res) }
+      if (!res.ok) return { kind: 'error', status: res.status, detail: await bodyOf(res) }
+      const json: unknown = await res.json().catch(() => null)
+      const data = typeof json === 'object' && json !== null && 'data' in json && Array.isArray(json.data) ? json.data : null
+      if (!data) return { kind: 'error', status: res.status, detail: 'Not a model list' }
+      const models = data.flatMap((m: unknown) => (typeof m === 'object' && m !== null && 'id' in m && typeof m.id === 'string' && m.id ? [m.id] : []))
+      if (hostOf(url) === 'openrouter.ai') {
+        if (!key) return { kind: 'auth', hasKey: false, detail: '' }
+        const check = await get('/key')
+        if (refused(check)) return { kind: 'auth', hasKey: true, detail: await bodyOf(check) }
+        if (!check.ok) return { kind: 'error', status: check.status, detail: await bodyOf(check) }
+      }
+      return { kind: 'ok', models }
+    } catch (error) {
+      return { kind: 'unreachable', detail: failure(error) }
     }
   }
 

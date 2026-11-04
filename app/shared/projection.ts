@@ -10,10 +10,19 @@ export interface Projection {
   kind: ProjectionKind
   layout: Layout
   fov: number
+  arc?: number
   swapEyes: boolean
 }
 
 export const FLAT: Projection = { kind: 'flat', layout: 'mono', fov: 190, swapEyes: false }
+
+export function lensDegrees(p: Projection): number | null {
+  return p.kind === 'fisheye' ? p.fov : p.kind === 'equirect180' ? (p.arc ?? 180) : null
+}
+
+export function withLens(p: Projection, degrees: number): Projection {
+  return p.kind === 'equirect180' ? { ...p, arc: degrees } : { ...p, fov: degrees }
+}
 
 export const PROJECTION_LABELS: Record<ProjectionKind, MessageKey> = {
   flat: 'projection.flat',
@@ -34,7 +43,9 @@ export function readProjection(raw: unknown): Projection | undefined {
   const kind = PROJECTION_KINDS.find((k) => k === r.kind)
   const layout = LAYOUTS.find((l) => l === r.layout)
   if (!kind || !layout) return undefined
-  return { kind, layout, fov: typeof r.fov === 'number' ? r.fov : 190, swapEyes: r.swapEyes === true }
+  const p: Projection = { kind, layout, fov: typeof r.fov === 'number' ? r.fov : 190, swapEyes: r.swapEyes === true }
+  if (finite(r.arc) && r.arc > 0) p.arc = r.arc
+  return p
 }
 
 export const PROJECTION_SOURCES = ['user', 'metadata', 'name', 'picture', 'none'] as const
@@ -92,13 +103,14 @@ const eyeAspect = (w: number, h: number, layout: Layout) => {
   const r = ratio(w, h)
   return layout === 'sbs' ? r / 2 : layout === 'ou' ? r * 2 : r
 }
+const squareEye = (w: number, h: number, layout: Layout) => Math.abs(eyeAspect(w, h, layout) - 1) <= 0.1
 const vrShape = (w: number, h: number) => {
   const r = ratio(w, h)
   return r === 0 || near(r, 2) || near(r, 1) || near(r, 0.5) || near(r, 4)
 }
 const lookShape = (w: number, h: number) => {
   const r = ratio(w, h)
-  return w >= 1920 && r > 0 && (vrShape(w, h) || near(r, 32 / 9) || near(r, 8 / 9))
+  return w >= 1920 && r > 0 && (vrShape(w, h) || near(r, 32 / 9) || near(r, 8 / 9) || Math.abs(r / (256 / 135) - 1) <= 0.01)
 }
 
 function metaGuess(c: ContainerFacts | null | undefined): Guess | null {
@@ -178,12 +190,15 @@ function nameGuess(fileName: string, w: number, h: number): Guess | null {
 }
 
 const WRAPS = 2
+const DARK_CORNERS = 0.1
 
 function pictureGuess(p: PictureFacts | null | undefined, w: number, h: number): Guess | null {
   if (!p || p.frames < 1) return null
   const layout: Layout = p.lr >= 0.6 && p.lr - p.tb >= 0.2 ? 'sbs' : p.tb >= 0.6 && p.tb - p.lr >= 0.2 ? 'ou' : 'mono'
   if (p.wrap !== null && p.wrap <= WRAPS && near(eyeAspect(w, h, layout), 2)) return { kind: 'equirect360', layout }
-  return layout === 'mono' ? null : { layout }
+  if (layout === 'mono') return null
+  if (p.corner !== null && p.corner <= DARK_CORNERS && squareEye(w, h, layout)) return { kind: 'fisheye', layout }
+  return { layout }
 }
 
 function layoutFor(kind: ProjectionKind, w: number, h: number): Layout {
@@ -210,7 +225,7 @@ export function resolveProjection(input: DetectInput): ResolvedProjection {
   let [layout, layoutSource] = first('layout', (g) => g.weakLayout === true)
   if (layout === undefined) [layout, layoutSource] = first('layout')
   if (kindFound === undefined && (layout === 'sbs' || layout === 'ou')) {
-    kindFound = Math.abs(eyeAspect(w, h, layout) - 1) <= 0.1 ? 'equirect180' : 'flat'
+    kindFound = squareEye(w, h, layout) ? 'equirect180' : 'flat'
     kindSource = layoutSource
   }
   let kind: ProjectionKind = kindFound ?? 'flat'

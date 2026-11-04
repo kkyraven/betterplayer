@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { MediaRow } from '@shared/library'
 
 const openTvOptions = vi.hoisted(() => vi.fn())
-vi.mock('@/ipc', () => ({ invoke: vi.fn(), on: vi.fn() }))
+const invoke = vi.hoisted(() => vi.fn())
+vi.mock('@/ipc', () => ({ invoke, on: vi.fn() }))
 vi.mock('@/state/ui', () => ({ useUi: { getState: () => ({ openTvOptions }) } }))
 const { holdForOptions, playOnClick } = await import('./tvCards')
 
@@ -19,6 +20,7 @@ beforeEach(() => {
   vi.useFakeTimers()
   vi.stubGlobal('window', Object.assign(new EventTarget(), { setTimeout, clearTimeout }))
   openTvOptions.mockClear()
+  invoke.mockClear()
 })
 
 afterEach(() => {
@@ -48,14 +50,15 @@ describe('playOnClick', () => {
 describe('holdForOptions', () => {
   const press = () => holdForOptions({ button: 0, clientX: 100, clientY: 100 } as ReactPointerEvent<HTMLDivElement>, row)
 
-  it('opens the options once the press is held through a laser waver', () => {
+  it('claims the press for the headset as it goes down, and opens the options once held through a laser waver', () => {
     press()
+    expect(invoke).toHaveBeenCalledExactlyOnceWith('vr:command', { kind: 'claimPress' })
     fire('pointermove', { clientX: 110, clientY: 108 })
     vi.advanceTimersByTime(450)
     expect(openTvOptions).toHaveBeenCalledExactlyOnceWith(row)
   })
 
-  it('does nothing after a release or a move away', () => {
+  it('opens nothing after a release or a move away', () => {
     press()
     fire('pointerup')
     press()

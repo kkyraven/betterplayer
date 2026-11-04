@@ -24,6 +24,7 @@ import {
   type DomProfile,
   type DomVideo,
   type DomYou,
+  type OwnModels,
   type PleasurePain,
   defaultPleasurePain,
   emptyYou,
@@ -35,7 +36,7 @@ import { domSystemPrompt, domTools } from '@/dom/prompt'
 import { videoRange, type DomClip, type DomRange } from '@/dom/clips'
 import { saysSafeword } from '@/dom/safeword'
 import { engine } from '@/engine/client'
-import { isFree, isPremium, useAccount } from './account'
+import { isSubscriber, isUnsubscribed, useAccount } from './account'
 import { useLibrary } from './library'
 import { outputName, useDevices } from './devices'
 import { t } from './i18n'
@@ -69,7 +70,9 @@ interface DomState {
   pleasurePain: PleasurePain
   ai: DomAiSettings
   hasKey: boolean
+  ownStatus: OwnModels | null
   account: DomAccount
+  accountChecked: boolean
   accountError: string | null
   memories: DomMemory[]
   memoriesError: string | null
@@ -83,6 +86,7 @@ interface DomState {
   setPleasurePain: (pp: PleasurePain) => Promise<void>
   setAi: (patch: Partial<DomAiSettings>) => Promise<void>
   setKey: (key: string | null) => Promise<void>
+  checkOwn: () => Promise<void>
   refreshAccount: () => Promise<void>
   login: (email: string, password: string) => Promise<void>
   register: (email: string, username: string, password: string) => Promise<void>
@@ -119,6 +123,7 @@ export function domErrorCode(error: unknown): DomErrorCode | null {
 const ERROR_TEXT: Record<DomErrorCode, () => string> = {
   signedOut: () => t('dom.error.signedOut'),
   emailTaken: () => t('dom.error.emailTaken'),
+  wrongLogin: () => t('dom.signIn.wrong'),
   notSupporter: () => t('common.supporterOnly'),
   freeTimeUsed: () => t('dom.error.freeTimeUsed'),
   quota: () => t('dom.error.quota'),
@@ -131,7 +136,7 @@ export const domErrorText = (error: unknown) => ERROR_TEXT[domErrorCode(error) ?
 
 const FATAL: ReadonlySet<DomErrorCode> = new Set(['signedOut', 'notSupporter', 'freeTimeUsed', 'quota'])
 
-const onFreeMinutes = () => isFree(useAccount.getState())
+const onFreeMinutes = () => isUnsubscribed(useAccount.getState())
 
 const toVideo = (r: MediaRow): DomVideo => ({ id: r.id, title: r.title, minutes: Math.round(r.durationMs / 6000) / 10, duration_seconds: r.durationMs / 1000, tags: r.tags.slice(0, 3) })
 const query = (q: Partial<MediaQuery>): MediaQuery => ({ section: 'all', sort: 'recommended', desc: false, filters: {}, limit: 20, offset: 0, ...q })
@@ -162,6 +167,7 @@ export const useDom = create<DomState>()((set, get) => {
   let timers: number[] = []
   let heldTimer = 0
   let unsubs: Array<() => void> = []
+  let ownCheck = 0
 
   const dom = () => get().doms.find((d) => d.id === get().domId) ?? null
   const line = (l: LineInput) => set((s) => ({ lines: [...s.lines, { ...l, id: ++lineId } as DomLine] }))
@@ -573,13 +579,16 @@ export const useDom = create<DomState>()((set, get) => {
     pleasurePain: defaultPleasurePain(),
     ai: defaultDomAi(),
     hasKey: false,
+    ownStatus: null,
     account: SIGNED_OUT_AL,
+    accountChecked: false,
     accountError: null,
     memories: [],
     memoriesError: null,
 
     load: async () => {
-      const [doms, ai, hasKey, you, pleasurePain, advancedPain] = await Promise.all([invoke('dom:list'), invoke('dom:ai'), invoke('dom:hasKey'), invoke('dom:you'), invoke('dom:pleasurePain'), invoke('dom:advancedPain')])
+      const [doms, ai, you, pleasurePain, advancedPain] = await Promise.all([invoke('dom:list'), invoke('dom:ai'), invoke('dom:you'), invoke('dom:pleasurePain'), invoke('dom:advancedPain')])
+      const hasKey = await invoke('dom:hasKey', ai.ownUrl)
       set((s) => ({ doms, ai, hasKey, you, pleasurePain, advancedPain, loaded: true, selectedId: doms.some((d) => d.id === s.selectedId) ? s.selectedId : (doms[0]?.id ?? null) }))
       await get().refreshAccount()
     },
@@ -617,19 +626,33 @@ export const useDom = create<DomState>()((set, get) => {
       await invoke('dom:setPleasurePain', pleasurePain)
     },
     setAi: async (patch) => {
-      const ai = { ...get().ai, ...patch }
-      set({ ai })
+      const prev = get().ai
+      const ai = { ...prev, ...patch }
+      const moved = ai.ownUrl !== prev.ownUrl || ai.provider !== prev.provider
+      if (moved) ownCheck++
+      set(moved ? { ai, ownStatus: null } : { ai })
       await invoke('dom:setAi', ai)
+      if (patch.ownUrl !== undefined) {
+        const hasKey = await invoke('dom:hasKey', ai.ownUrl)
+        if (get().ai.ownUrl === ai.ownUrl) set({ hasKey })
+      }
     },
     setKey: async (key) => {
-      await invoke('dom:setKey', key)
+      await invoke('dom:setKey', get().ai.ownUrl, key)
       set({ hasKey: key !== null && key !== '' })
+    },
+    checkOwn: async () => {
+      const { provider, ownUrl } = get().ai
+      if (provider !== 'own') return
+      const token = ++ownCheck
+      const ownStatus = await invoke('dom:ownModels', ownUrl).catch((error: unknown): OwnModels => ({ kind: 'unreachable', detail: String(error) }))
+      if (token === ownCheck) set({ ownStatus })
     },
     refreshAccount: async () => {
       try {
-        set({ account: await invoke('dom:account', onFreeMinutes()), accountError: null })
+        set({ account: await invoke('dom:account', onFreeMinutes()), accountChecked: true, accountError: null })
       } catch (error) {
-        set({ accountError: ERROR_TEXT[domErrorCode(error) ?? 'network']() })
+        set({ accountChecked: true, accountError: ERROR_TEXT[domErrorCode(error) ?? 'network']() })
       }
     },
     login: async (email, password) => {
@@ -691,7 +714,7 @@ export const useDom = create<DomState>()((set, get) => {
     start: async (domId) => {
       const d = get().doms.find((x) => x.id === domId)
       if (!d || get().running) return
-      if (domAccess(get(), isPremium(useAccount.getState())) !== 'ok') return
+      if (domAccess(get(), isSubscriber(useAccount.getState())) !== 'ok') return
       run++
       history = []
       pending = []

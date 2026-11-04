@@ -248,6 +248,7 @@ dependencies = [
  "bp-player",
  "bp-script",
  "bp-tracking",
+ "flate2",
  "serde",
  "serde_json",
 ]
@@ -328,6 +329,7 @@ dependencies = [
  "libc",
  "libloading",
  "pkg-config",
+ "serde_json",
  "windows",
 ]
 
@@ -349,6 +351,7 @@ name = "bp-vr"
 version = "0.0.1"
 dependencies = [
  "libloading",
+ "serde_json",
  "windows",
 ]
 

@@ -116,9 +116,10 @@ pub struct Context {
     device: *mut c_void,
     release_device: ReleaseDeviceFn,
     d3d: ID3D11Device,
+    lock: Box<Mutex<()>>,
 }
 
-static GPU: Mutex<()> = Mutex::new(());
+static UNBOUND: Mutex<()> = Mutex::new(());
 
 thread_local! {
     static DEPTH: Cell<u32> = const { Cell::new(0) };
@@ -133,17 +134,21 @@ struct Handles {
     display: EGLDisplay,
     surface: EGLSurface,
     context: EGLContext,
+    lock: *const Mutex<()>,
 }
 
 pub struct Section {
     _guard: Option<MutexGuard<'static, ()>>,
+    timed: Option<(std::time::Instant, std::time::Instant, &'static std::panic::Location<'static>)>,
 }
 
 impl Gpu {
+    #[cfg(test)]
     pub fn none() -> Gpu {
         Gpu(None)
     }
 
+    #[track_caller]
     pub fn section(&self) -> Section {
         let nested = DEPTH.with(|d| {
             let n = d.get();
@@ -151,9 +156,16 @@ impl Gpu {
             n > 0
         });
         if nested {
-            return Section { _guard: None };
+            return Section { _guard: None, timed: None };
         }
-        let guard = GPU.lock().unwrap_or_else(|e| e.into_inner());
+        let at = std::panic::Location::caller();
+        let asked = crate::frame_log::on().then(std::time::Instant::now);
+        let lock: &'static Mutex<()> = match self.0 {
+            Some(h) => unsafe { &*h.lock },
+            None => &UNBOUND,
+        };
+        let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let timed = asked.map(|a| (a, std::time::Instant::now(), at));
         if let Some(h) = self.0 {
             let ok = unsafe {
                 (h.egl.make_current)(h.display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
@@ -164,13 +176,16 @@ impl Gpu {
                 eprintln!("bp-player: {}", h.egl.err("eglMakeCurrent on section entry"));
             }
         }
-        Section { _guard: Some(guard) }
+        Section { _guard: Some(guard), timed }
     }
 }
 
 impl Drop for Section {
     fn drop(&mut self) {
         DEPTH.with(|d| d.set(d.get() - 1));
+        if let Some((asked, taken, at)) = self.timed {
+            crate::frame_log::section(asked, taken, at);
+        }
     }
 }
 
@@ -211,7 +226,7 @@ impl Context {
         let d3d = d3d.ok_or("D3D11CreateDevice returned no device")?;
         let device = unsafe { create_device(EGL_D3D11_DEVICE_ANGLE, d3d.as_raw(), ptr::null()) };
         if device.is_null() { return Err(egl.err("eglCreateDeviceANGLE")); }
-        let mut c = Context { egl, display: ptr::null_mut(), surface: ptr::null_mut(),
+        let mut c = Context { lock: Box::new(Mutex::new(())), egl, display: ptr::null_mut(), surface: ptr::null_mut(),
             context: ptr::null_mut(), device, release_device, d3d };
         let display = unsafe { get_platform_display(EGL_PLATFORM_DEVICE_EXT, device, ptr::null()) };
         if display.is_null() {
@@ -263,7 +278,7 @@ impl Context {
     }
 
     pub fn gpu(&self) -> Gpu {
-        Gpu(Some(Handles { egl: self.egl, display: self.display, surface: self.surface, context: self.context }))
+        Gpu(Some(Handles { egl: self.egl, display: self.display, surface: self.surface, context: self.context, lock: &*self.lock }))
     }
 
     pub fn make_current(&self) -> Result<(), String> {

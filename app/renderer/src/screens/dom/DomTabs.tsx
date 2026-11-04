@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-KinkyRaven-Proprietary
 // Copyright (c) 2026 KinkyRaven. All rights reserved. This file is not licensed under LICENSE.txt; no permission is granted to use, copy, modify or distribute it.
 
-import { Camera, Check, Download, Plus, RefreshCw, Upload, X } from 'lucide-react'
+import { Cable, Camera, Check, Download, Plus, RefreshCw, Upload, X } from 'lucide-react'
 import { useEffect, useState, type ChangeEvent } from 'react'
 import { AXES } from '@shared/axes'
 import { DOM_LEVEL_MAX, DOM_MEMORY_KINDS, DOM_POINTS, DOM_SPANS, LORA_WEIGHT_MAX, pointAt, spanAt, type DomLora, type DomMemoryKind, type DomPoint, type DomProfile, type DomSpan, type ImageProvider, type ImageSend, type PleasurePain } from '@shared/dom'
@@ -15,8 +15,10 @@ import { Slider } from '@/components/ui/Slider'
 import { Switch } from '@/components/ui/Switch'
 import { applyLevel, releaseLevel } from '@/dom/level'
 import { invoke } from '@/ipc'
+import { useDevices } from '@/state/devices'
 import { domErrorText, useDom } from '@/state/dom'
 import { useT } from '@/state/i18n'
+import { useUi } from '@/state/ui'
 import { ChipField } from './ChipField'
 import { Portrait } from './Portrait'
 
@@ -109,6 +111,8 @@ export function PleasurePainPage() {
   const t = useT()
   const pp = useDom((s) => s.pleasurePain)
   const running = useDom((s) => s.running)
+  const outputs = useDevices((s) => s.outputs.length)
+  const connected = useDevices((s) => Object.values(s.states).some((st) => st.status === 'connected'))
   const [test, setTest] = useState<number | null>(null)
   const shown = test ?? 8
   const setPp = (next: PleasurePain) => void useDom.getState().setPleasurePain(next)
@@ -123,6 +127,15 @@ export function PleasurePainPage() {
   }, [])
   return (
     <>
+      {!connected && (
+        <div className="panel">
+          <div className="prow">
+            <span className="lbl dom-warn">{t(outputs ? 'devices.status.notConnected' : 'app.titleBar.noDevices')}</span>
+            <span className="spacer" />
+            <Button onClick={() => useUi.getState().setScreen('devices')}><Cable />{t('app.titleBar.devices')}</Button>
+          </div>
+        </div>
+      )}
       <div className="panel">
         <div className="prow">
           <span>

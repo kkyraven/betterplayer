@@ -61,8 +61,22 @@ it('loads browser media directly while keeping page identity, position and speed
   expect(mocks.invoke).toHaveBeenCalledWith('library:played', handoff.pageUrl)
   expect(mocks.addRecent).toHaveBeenCalledWith(handoff.pageUrl)
   expect(mocks.start).toHaveBeenCalledExactlyOnceWith('player')
-  expect(mocks.setBasePlaybackRate).toHaveBeenCalledWith(1.5)
-  expect(mocks.setBasePlaybackRate.mock.invocationCallOrder[0]).toBeGreaterThan(mocks.start.mock.invocationCallOrder[0]!)
+  expect(mocks.setBasePlaybackRate).toHaveBeenLastCalledWith(1.5)
+  expect(mocks.setBasePlaybackRate.mock.invocationCallOrder.at(-1)).toBeGreaterThan(mocks.start.mock.invocationCallOrder[0]!)
+})
+
+it('opens each new video at the last chosen speed, which a peer or hand-off speed does not replace', async () => {
+  const stored = new Map<string, string>()
+  vi.stubGlobal('localStorage', { getItem: (k: string) => stored.get(k) ?? null, setItem: (k: string, v: string) => void stored.set(k, v) })
+  player.getState().chooseRate(1.25)
+  player.getState().setRate(2)
+  await open()
+  await player.getState().open('/next.mp4')
+  expect(mocks.setBasePlaybackRate).toHaveBeenLastCalledWith(1.25)
+  vi.resetModules()
+  player = (await import('./player')).usePlayer
+  await player.getState().open('/after-restart.mp4')
+  expect(mocks.setBasePlaybackRate).toHaveBeenLastCalledWith(1.25)
 })
 
 it('falls back to page extraction without browser headers when direct loading rejects', async () => {
