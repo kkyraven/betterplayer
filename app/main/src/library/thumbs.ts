@@ -50,7 +50,18 @@ export function viewFilter(view: View | null, width: number): string {
   const height = 2 * Math.round((width * 9) / 16 / 2)
   const vDegrees = ((2 * Math.atan(Math.tan((VR_VIEW_DEGREES * Math.PI) / 360) * (9 / 16))) * 180) / Math.PI
   const lens = p.kind === 'fisheye' ? `:ih_fov=${p.fov}:iv_fov=${p.fov}` : ''
-  return `${eye}v360=input=${V360_INPUT[p.kind]}${lens}:output=flat:h_fov=${VR_VIEW_DEGREES}:v_fov=${vDegrees.toFixed(2)}:w=${width}:h=${height}:interp=lanczos`
+  return `${eye}${shrinkEye(view, width)}v360=input=${V360_INPUT[p.kind]}${lens}:output=flat:h_fov=${VR_VIEW_DEGREES}:v_fov=${vDegrees.toFixed(2)}:w=${width}:h=${height}:interp=cubic`
+}
+
+function shrinkEye(view: View, width: number): string {
+  const p = view.projection
+  const perDegree = (2 * width) / VR_VIEW_DEGREES
+  const [across, down] = p.kind === 'fisheye' ? [p.fov, p.fov] : [p.kind === 'equirect360' ? 360 : 180, 180]
+  const eyeW = p.layout === 'sbs' ? Math.floor(view.width / 2) : view.width
+  const eyeH = p.layout === 'ou' ? Math.floor(view.height / 2) : view.height
+  const w = Math.min(eyeW, 2 * Math.round((across * perDegree) / 2))
+  const h = Math.min(eyeH, 2 * Math.round((down * perDegree) / 2))
+  return w > 0 && h > 0 && (w < eyeW || h < eyeH) ? `scale=${w}:${h}:flags=bilinear,` : ''
 }
 
 export function viewScale(view: View, width: number): number {

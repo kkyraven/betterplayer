@@ -161,6 +161,17 @@ it('shows half-width 3D at its full shape', () => {
   expect(viewFilter(half, 640)).toBe('crop=iw/2:ih:0:0,scale=640:360:flags=lanczos')
 })
 
+it('scales a large VR eye down before turning it flat', () => {
+  const eye = (projection: Partial<Projection>, width: number, height: number): View => ({ projection: { kind: 'equirect180', layout: 'sbs', fov: 190, swapEyes: false, ...projection }, width, height })
+  const flat = (w: number, h: number) => `v360=input=hequirect:output=flat:h_fov=100:v_fov=67.67:w=${w}:h=${h}:interp=cubic`
+  expect(viewFilter(eye({}, 8192, 4096), 640)).toBe(`crop=iw/2:ih:0:0,scale=2304:2304:flags=bilinear,${flat(640, 360)}`)
+  expect(viewFilter(eye({}, 8192, 4096), 960)).toBe(`crop=iw/2:ih:0:0,scale=3456:3456:flags=bilinear,${flat(960, 540)}`)
+  expect(viewFilter(eye({}, 3840, 1920), 640)).toBe(`crop=iw/2:ih:0:0,${flat(640, 360)}`)
+  expect(viewFilter(eye({ kind: 'equirect360', layout: 'ou' }, 8192, 8192), 640)).toMatch(/^crop=iw:ih\/2:0:0,scale=4608:2304:flags=bilinear,v360=input=equirect:/)
+  expect(viewFilter(eye({ kind: 'fisheye', layout: 'mono' }, 4096, 4096), 640)).toMatch(/^scale=2432:2432:flags=bilinear,v360=input=fisheye:ih_fov=190:iv_fov=190:/)
+  expect(viewFilter(eye({}, 0, 0), 640)).toBe(`crop=iw/2:ih:0:0,${flat(640, 360)}`)
+})
+
 describe('portal stills', () => {
   const vr = (projection: Partial<Projection>): View => ({ projection: { kind: 'equirect180', layout: 'sbs', fov: 190, swapEyes: false, ...projection }, width: 8192, height: 4096 })
 
