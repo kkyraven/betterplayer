@@ -57,6 +57,9 @@ const float FILL_FAR_TO = 0.06;
 // The Pick's reticle: a ring this many eye pixels round where the controller aims.
 const float RETICLE = 14.0;
 uniform sampler2D video;
+// The share of the video texture right of and below the picture, which fills its top left: the
+// texture is kept for later pictures (`video_size`). 0 when the picture fills it.
+uniform vec2 spare;
 uniform vec2 size;
 uniform vec4 tangents;
 uniform mat3 rot;
@@ -91,6 +94,14 @@ vec2 eyeOf(vec2 t) {
   else if (stereo == 2) t.y = t.y * 0.5 + float(side) * 0.5;
   return t;
 }
+// The picture's size in texels.
+vec2 picture() {
+  return vec2(textureSize(video, 0)) * (1.0 - spare);
+}
+// `eyeOf(t)` in the video texture.
+vec2 onVideo(vec2 t) {
+  return eyeOf(t) * (1.0 - spare);
+}
 // One eye's share of the texture, which scales its footprint too.
 vec2 share() {
   return stereo == 1 ? vec2(0.5, 1.0) : stereo == 2 ? vec2(1.0, 0.5) : vec2(1.0);
@@ -100,10 +111,11 @@ vec3 sampleAt(vec2 t, vec2 dx, vec2 dy) {
   vec2 s = share();
   // On the axis the eyes split, stay a footprint (at least half a texel) inside this eye, so
   // neither the filter nor a mip texel across the split reaches the other eye.
-  vec2 texel = 1.0 / (vec2(textureSize(video, 0)) * s);
+  vec2 texel = 1.0 / (picture() * s);
   vec2 inset = step(s, vec2(0.5)) * min(max(abs(dx) + abs(dy), 0.5 * texel), 0.5);
-  vec2 at = eyeOf(clamp(t, inset, 1.0 - inset));
-  return textureGrad(video, at, dx * s * SHARPEN, dy * s * SHARPEN).rgb;
+  vec2 at = onVideo(clamp(t, inset, 1.0 - inset));
+  vec2 k = s * (1.0 - spare) * SHARPEN;
+  return textureGrad(video, at, dx * k, dy * k).rgb;
 }
 // BT.601 full range, as `ycbcr` in passthrough.ts.
 vec3 ycc(vec3 c) {
@@ -150,17 +162,17 @@ float hits(vec3 c, float from, float to) {
 // the backdrop, open on a side, does not. Pure backdrop all round stops at once, and opposite rays
 // go in turn to find an open side soon.
 float enclosed(vec2 t) {
-  vec2 eye = vec2(textureSize(video, 0)) * share();
+  vec2 eye = picture() * share();
   vec2 reach = FILL * eye.x / eye;
   float lod = log2(FILL * eye.x / 4.0);
-  vec3 d = abs(textureLod(video, eyeOf(t), lod + 3.0).rgb - keyColour);
+  vec3 d = abs(textureLod(video, onVideo(t), lod + 3.0).rgb - keyColour);
   if (max(d.r, max(d.g, d.b)) < GREY_FROM) return 0.0;
   float least = 1.0;
   for (int i = 0; i < 8 && least > 0.0; i++) {
     float a = float(i / 2) * PI * 0.25 + float(i % 2) * PI;
     vec2 ray = reach * vec2(cos(a), sin(a));
-    float most = hits(textureLod(video, eyeOf(clamp(t + ray * 0.375, 0.0, 1.0)), lod).rgb, FILL_NEAR_FROM, FILL_NEAR_TO);
-    if (most < 1.0) most = max(most, hits(textureLod(video, eyeOf(clamp(t + ray * 0.875, 0.0, 1.0)), lod).rgb, FILL_FAR_FROM, FILL_FAR_TO));
+    float most = hits(textureLod(video, onVideo(clamp(t + ray * 0.375, 0.0, 1.0)), lod).rgb, FILL_NEAR_FROM, FILL_NEAR_TO);
+    if (most < 1.0) most = max(most, hits(textureLod(video, onVideo(clamp(t + ray * 0.875, 0.0, 1.0)), lod).rgb, FILL_FAR_FROM, FILL_FAR_TO));
     least = min(least, most);
   }
   return least;
@@ -177,7 +189,7 @@ float keyAlpha(vec2 t, vec2 dx, vec2 dy, vec3 c, out float own) {
   // colour does not show, and Colour distance none past the first where the colour shows all but whole or not at
   // all and that tap agrees.
   if (featherPx > 0.0 && (feather == 1 || own > NEAR)) {
-    vec2 r = featherPx / (vec2(textureSize(video, 0)) * share());
+    vec2 r = featherPx / (picture() * share());
     float s = shows(sampleAt(t + r * vec2(1.0, 0.0), dx, dy), keyColour);
     float sum = own + s;
     float least = s;
@@ -209,8 +221,8 @@ float maskAt(vec2 t) {
 float maskAlpha(vec2 t) {
   float sum = maskAt(t);
   if (featherPx > 0.0) {
-    // In this eye's 0 to 1, that is featherPx / textureSize(video, 0) of the frame.
-    vec2 reach = featherPx / (vec2(textureSize(video, 0)) * share());
+    // In this eye's 0 to 1, that is featherPx / picture() of the frame.
+    vec2 reach = featherPx / (picture() * share());
     for (int i = 0; i < 8; i++) {
       float a = float(i) * PI * 0.25;
       sum += maskAt(t + reach * vec2(cos(a), sin(a)));
@@ -221,18 +233,18 @@ float maskAlpha(vec2 t) {
 }
 // Beta Censoring's cover at `t` in this eye, as `hidden` in app/renderer/src/components/player/stage.ts.
 vec3 hidden(vec2 t) {
-  vec2 eye = vec2(textureSize(video, 0)) * share();
+  vec2 eye = picture() * share();
   if (censorMode == 2) {
     float across = mix(64.0, 14.0, censorLevel);
     vec2 grid = vec2(across, across * eye.y / eye.x);
-    return textureLod(video, eyeOf((floor(t * grid) + 0.5) / grid), log2(eye.x / across)).rgb;
+    return textureLod(video, onVideo((floor(t * grid) + 0.5) / grid), log2(eye.x / across)).rgb;
   }
   float lod = log2(eye.x / mix(160.0, 24.0, censorLevel));
   vec2 px = exp2(lod) / eye;
-  vec3 sum = textureLod(video, eyeOf(t), lod).rgb * 2.0;
+  vec3 sum = textureLod(video, onVideo(t), lod).rgb * 2.0;
   for (int i = 0; i < 4; i++) {
     vec2 o = i < 2 ? vec2(px.x * float(i * 2 - 1), 0.0) : vec2(0.0, px.y * float(i * 2 - 5));
-    sum += textureLod(video, eyeOf(clamp(t + o, 0.0, 1.0)), lod).rgb;
+    sum += textureLod(video, onVideo(clamp(t + o, 0.0, 1.0)), lod).rgb;
   }
   return sum / 6.0;
 }
@@ -418,6 +430,7 @@ struct Program {
     vao: u32,
     gpu: Gpu,
     video: i32,
+    spare: i32,
     size: i32,
     tangents: i32,
     rot: i32,
@@ -476,6 +489,7 @@ impl Program {
                 vao,
                 gpu,
                 video: at("video"),
+                spare: at("spare"),
                 size: at("size"),
                 tangents: at("tangents"),
                 rot: at("rot"),
@@ -621,6 +635,9 @@ struct Renderer {
     rays: [bool; 2],
     inbox: Inbox,
     video: Option<Video>,
+    large: Option<Video>,
+    picture: (u32, u32),
+    largest: (u32, u32),
     anisotropy: f32,
     view: VrView,
     passthrough: VrPassthrough,
@@ -702,6 +719,9 @@ impl Renderer {
             rays: [false; 2],
             inbox: Inbox::new(handoff),
             video: None,
+            large: None,
+            picture: (0, 0),
+            largest: (0, 0),
             anisotropy,
             view,
             passthrough,
@@ -739,25 +759,40 @@ impl Renderer {
     }
 
     fn take_video(&mut self, angle: &Context) {
-        let (video, gpu, anisotropy) = (&mut self.video, self.gpu, self.anisotropy);
+        let (video, large, picture, largest, gpu, anisotropy) = (&mut self.video, &mut self.large, &mut self.picture, &mut self.largest, self.gpu, self.anisotropy);
         let mut failed = None;
         let taken = self.inbox.take(angle, |(w, h), from| {
-            if video.as_ref().is_none_or(|v| (v.w, v.h) != (w, h)) {
-                *video = None;
-                match Video::new(w, h, anisotropy, gpu) {
-                    Ok(v) => *video = Some(v),
-                    Err(e) => {
-                        failed = Some(e);
-                        return;
+            let (tw, th) = video_size(video.as_ref().map(|v| (v.w, v.h)), *largest, (w, h));
+            *largest = (largest.0.max(w), largest.1.max(h));
+            if video.as_ref().is_none_or(|v| (v.w, v.h) != (tw, th)) {
+                let old = video.take();
+                if large.as_ref().is_some_and(|l| (l.w, l.h) == (tw, th)) {
+                    *video = large.take();
+                } else if large.as_ref().is_some_and(|l| l.w <= tw && l.h <= th) {
+                    *large = None;
+                }
+                let old = old.filter(|o| o.w >= tw && o.h >= th && large.is_none());
+                if video.is_none() {
+                    match Video::new(tw, th, anisotropy, gpu) {
+                        Ok(v) => *video = Some(v),
+                        Err(e) => {
+                            failed = Some(e);
+                            return;
+                        }
                     }
+                }
+                if old.is_some() {
+                    *large = old;
                 }
             }
             let Some(v) = video.as_ref() else { return };
+            *picture = (w, h);
             unsafe {
                 gl::Disable(gl::SCISSOR_TEST);
                 gl::BindFramebuffer(gl::READ_FRAMEBUFFER, from);
                 gl::BindFramebuffer(gl::DRAW_FRAMEBUFFER, v.fbo);
                 gl::BlitFramebuffer(0, 0, w as i32, h as i32, 0, 0, w as i32, h as i32, gl::COLOR_BUFFER_BIT, gl::NEAREST);
+                pad_edges((w, h), (v.w, v.h));
                 gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
             }
         });
@@ -860,6 +895,8 @@ impl Renderer {
             gl::BindTexture(gl::TEXTURE_2D, self.video.as_ref().map_or(0, |v| v.tex));
             gl::BindSampler(0, 0);
             gl::Uniform1i(p.video, 0);
+            let spare = self.video.as_ref().map_or((0.0, 0.0), |v| (1.0 - self.picture.0 as f32 / v.w as f32, 1.0 - self.picture.1 as f32 / v.h as f32));
+            gl::Uniform2f(p.spare, spare.0, spare.1);
             gl::Uniform2f(p.size, w as f32, h as f32);
             gl::Uniform1i(p.mode, mode);
             gl::Uniform1f(p.hfov, hfov);
@@ -1010,7 +1047,8 @@ impl Renderer {
     }
 
     fn flat(&self) -> (f32, f32) {
-        let aspect = self.video.as_ref().map_or(1.0, |v| flat_aspect(self.view.layout, v.w as f32, v.h as f32));
+        let (w, h) = self.picture;
+        let aspect = self.video.as_ref().map_or(1.0, |_| flat_aspect(self.view.layout, w as f32, h as f32));
         flat_screen(self.screen, aspect)
     }
 
@@ -1344,6 +1382,35 @@ fn flat_screen(arc_deg: f32, aspect: f32) -> (f32, f32) {
     if aspect < 16.0 / 9.0 { (height * aspect, height) } else { (width, width / aspect) }
 }
 
+fn video_size(kept: Option<(u32, u32)>, largest: (u32, u32), (w, h): (u32, u32)) -> (u32, u32) {
+    let fills = |(tw, th): (u32, u32)| w as u64 * h as u64 * 4 >= tw as u64 * th as u64 * 3;
+    let big = (largest.0.max(w), largest.1.max(h));
+    match kept {
+        Some((tw, th)) if w <= tw && h <= th && fills((tw, th)) => (tw, th),
+        _ if fills(big) => big,
+        _ => (w, h),
+    }
+}
+
+const PAD: u32 = 1024;
+
+unsafe fn pad_edges((w, h): (u32, u32), texture: (u32, u32)) {
+    let (r, b) = (texture.0.min(w + PAD) as i32, texture.1.min(h + PAD) as i32);
+    let (w, h) = (w as i32, h as i32);
+    let blit = |from: [i32; 4], to: [i32; 4]| unsafe {
+        gl::BlitFramebuffer(from[0], from[1], from[2], from[3], to[0], to[1], to[2], to[3], gl::COLOR_BUFFER_BIT, gl::NEAREST);
+    };
+    if r > w {
+        blit([w - 1, 0, w, h], [w, 0, r, h]);
+    }
+    if b > h {
+        blit([0, h - 1, w, h], [0, h, w, b]);
+    }
+    if r > w && b > h {
+        blit([w - 1, h - 1, w, h], [w, h, r, b]);
+    }
+}
+
 unsafe fn max_anisotropy() -> f32 {
     let mut count = 0;
     unsafe { gl::GetIntegerv(gl::NUM_EXTENSIONS, &mut count) };
@@ -1393,6 +1460,19 @@ mod tests {
     }
 
     #[test]
+    fn the_headset_keeps_its_video_texture_between_8k_files() {
+        let (mut kept, mut largest, mut made) = (None, (0, 0), Vec::new());
+        for (w, h) in [(8192, 4096), (7680, 4320), (7680, 3840), (8192, 4096), (5800, 2900), (7680, 3840), (6144, 3072), (8192, 4096)] {
+            let size = video_size(kept, largest, (w, h));
+            if kept != Some(size) {
+                made.push(size);
+            }
+            (kept, largest) = (Some(size), (largest.0.max(w), largest.1.max(h)));
+        }
+        assert_eq!(made, [(8192, 4096), (8192, 4320), (5800, 2900), (8192, 4320), (6144, 3072), (8192, 4320)]);
+    }
+
+    #[test]
     fn the_screen_spans_its_arc_and_a_narrow_picture_fits_its_height() {
         let near = |(a, b): (f32, f32), (c, d): (f32, f32)| (a - c).abs() < 1e-4 && (b - d).abs() < 1e-4;
         let arc = |deg: f32| 3.0 * deg.to_radians();
@@ -1431,6 +1511,99 @@ mod tests {
         }
         for (name, at) in super::super::portals::PortalUniforms::of(p.id).all() {
             assert!(at >= 0, "{name} is not a live uniform");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires ANGLE: libEGL.dll and libGLESv2.dll on the path"]
+    fn a_picture_in_a_larger_texture_draws_as_on_its_own() {
+        const N: i32 = 64;
+        let (w, h) = (256u32, 128u32);
+        let gl_context = GlContext::new().unwrap();
+        gl::load_with(|name| gl_context.get_proc_address(&CString::new(name).unwrap()) as *const _);
+        let gpu = gl_context.gpu();
+        let _gpu = gpu.section();
+        let p = Program::new(gpu).unwrap();
+        let mut stage = super::super::portals::Stage::new(gpu, p.id);
+        let rgba = |w: u32, h: u32, px: &[u8]| unsafe {
+            let (mut tex, mut fbo) = (0, 0);
+            gl::GenTextures(1, &mut tex);
+            gl::BindTexture(gl::TEXTURE_2D, tex);
+            gl::TexStorage2D(gl::TEXTURE_2D, 1, gl::RGBA8, w as i32, h as i32);
+            if !px.is_empty() {
+                gl::TexSubImage2D(gl::TEXTURE_2D, 0, 0, 0, w as i32, h as i32, gl::RGBA, gl::UNSIGNED_BYTE, px.as_ptr().cast());
+            }
+            gl::GenFramebuffers(1, &mut fbo);
+            gl::BindFramebuffer(gl::FRAMEBUFFER, fbo);
+            gl::FramebufferTexture2D(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, gl::TEXTURE_2D, tex, 0);
+            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+            (tex, fbo)
+        };
+        let noise: Vec<u8> = (0..w * h).flat_map(|i| [0u32, 1, 2].map(|c| ((i.wrapping_mul(2654435761) >> (8 * c + 3)) & 0xff) as u8).into_iter().chain([255])).collect();
+        let (_, picture) = rgba(w, h, &noise);
+        let (_, eye) = rgba(N as u32, N as u32, &[]);
+        let anisotropy = unsafe { max_anisotropy() };
+        let alone = Video::new(w, h, anisotropy, gpu).unwrap();
+        let larger = Video::new(w + 128, h + 128, anisotropy, gpu).unwrap();
+        unsafe {
+            gl::BindFramebuffer(gl::FRAMEBUFFER, larger.fbo);
+            gl::ClearColor(1.0, 0.0, 1.0, 1.0);
+            gl::Clear(gl::COLOR_BUFFER_BIT);
+            for v in [&alone, &larger] {
+                gl::BindFramebuffer(gl::READ_FRAMEBUFFER, picture);
+                gl::BindFramebuffer(gl::DRAW_FRAMEBUFFER, v.fbo);
+                gl::BlitFramebuffer(0, 0, w as i32, h as i32, 0, 0, w as i32, h as i32, gl::COLOR_BUFFER_BIT, gl::NEAREST);
+                pad_edges((w, h), (v.w, v.h));
+                gl::BindTexture(gl::TEXTURE_2D, v.tex);
+                gl::GenerateMipmap(gl::TEXTURE_2D);
+            }
+            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+        }
+        let draw = |v: &Video, stage: &mut super::super::portals::Stage, down: bool, censor: bool| -> Vec<u8> {
+            let (s, c) = 80f32.to_radians().sin_cos();
+            let rot = if down { [1.0, 0.0, 0.0, 0.0, c, s, 0.0, -s, c] } else { [c, 0.0, -s, 0.0, 1.0, 0.0, s, 0.0, c] };
+            let mut px = vec![0u8; (N * N * 4) as usize];
+            unsafe {
+                gl::UseProgram(p.id);
+                gl::BindVertexArray(p.vao);
+                gl::ActiveTexture(gl::TEXTURE0);
+                gl::BindTexture(gl::TEXTURE_2D, v.tex);
+                gl::Uniform1i(p.video, 0);
+                gl::Uniform2f(p.spare, 1.0 - w as f32 / v.w as f32, 1.0 - h as f32 / v.h as f32);
+                gl::Uniform2f(p.size, N as f32, N as f32);
+                gl::Uniform4f(p.tangents, -1.0, 1.0, 1.0, -1.0);
+                gl::UniformMatrix3fv(p.rot, 1, gl::FALSE, rot.as_ptr());
+                gl::Uniform3f(p.eye_pos, 0.0, 0.0, 0.0);
+                gl::Uniform1i(p.mode, 2);
+                gl::Uniform1f(p.hfov, std::f32::consts::PI);
+                gl::Uniform1i(p.stereo, 1);
+                gl::Uniform1i(p.side, 1);
+                gl::Uniform1f(p.pixel, 2.0 / N as f32);
+                gl::Uniform1i(p.keying, 0);
+                gl::Uniform1i(p.mask, 1);
+                gl::Uniform1i(p.censor, 2);
+                gl::Uniform1i(p.censor_mode, if censor { 2 } else { 0 });
+                gl::Uniform1f(p.censor_level, 1.0);
+                gl::Uniform1i(p.censor_whole, 1);
+                gl::Uniform1i(p.pass_room, 0);
+                gl::Uniform3f(p.reticle, 0.0, 0.0, 0.0);
+                gl::Viewport(0, 0, N, N);
+                stage.bind(&Pose::IDENTITY);
+                stage.eye(&Pose::IDENTITY, &Pose::IDENTITY);
+                gl::BindFramebuffer(gl::FRAMEBUFFER, eye);
+                gl::DrawArrays(gl::TRIANGLES, 0, 3);
+                stage.done();
+                gl::ReadPixels(0, 0, N, N, gl::RGBA, gl::UNSIGNED_BYTE, px.as_mut_ptr().cast());
+                gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+            }
+            assert_eq!(take_gl_error(), None);
+            px
+        };
+        for (down, censor) in [(false, false), (true, false), (false, true), (true, true)] {
+            let (a, b) = (draw(&alone, &mut stage, down, censor), draw(&larger, &mut stage, down, censor));
+            let worst = a.iter().zip(&b).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
+            assert!(worst <= 2, "down {down}, censored {censor}: a texel differs by {worst}");
+            assert!(a.chunks(4).any(|p| p[0] > 40 || p[1] > 40 || p[2] > 40), "down {down}, censored {censor}: no picture");
         }
     }
 }

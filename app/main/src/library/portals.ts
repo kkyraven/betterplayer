@@ -45,7 +45,7 @@ export interface PortalDeps {
 
 export type PortalStill = { file: string; type: string; info: PortalStillInfo } | { blank: true }
 
-const CONCURRENCY = 2
+const CONCURRENCY = 4
 const FAILURE_MS = 10 * 60_000
 const CACHE_BYTES = 512 * 1024 * 1024
 const POSTER_COVER_WIDTH = 960

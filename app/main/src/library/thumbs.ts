@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { rename, unlink } from 'node:fs/promises'
+import { availableParallelism } from 'node:os'
 import { join } from 'node:path'
 import { flatEye, type Projection } from '@shared/projection'
 import { VR_PORTAL } from '@shared/portals'
@@ -132,7 +133,7 @@ export class ThumbQueue {
     if (state === 'failed' || (state === 'ready' && existsSync(out) && stamp?.views[kind] === key)) return
     const temp = `${out}.${randomUUID()}.jpg`
     try {
-      await runTool('ffmpeg', kind === 'thumb' ? posterArgs(job, view, temp) : stripArgs(job, view, temp), kind === 'thumb' ? 60_000 : 180_000)
+      await (kind === 'thumb' ? makePoster(job, view, temp) : makeStrip(job, view, temp))
       await rename(temp, out)
       this.db.setThumbState(job.id, kind, 'ready', key)
       this.hooks.done(job.id)
@@ -149,27 +150,60 @@ const secondsArg = (ms: number) => (ms / 1000).toFixed(3)
 
 const BASE_ARGS = ['-y', '-v', 'error', '-max_error_rate', '1']
 
-function posterArgs(job: Job, view: View | null, out: string): string[] {
-  const input = job.cover ? ['-i', job.cover] : ['-ss', secondsArg(job.durationMs * 0.2), '-i', job.path]
-  return [...BASE_ARGS, ...input, '-frames:v', '1', '-vf', viewFilter(job.cover ? null : view, 960), '-q:v', '2', out]
+const POSTER_KEY_MS = 5000
+
+export function posterArgs(job: Pick<Job, 'path' | 'durationMs' | 'cover'>, view: View | null, out: string, exact = false): string[] {
+  if (job.cover) return [...BASE_ARGS, '-i', job.cover, '-frames:v', '1', '-vf', viewFilter(null, 960), '-q:v', '2', out]
+  const at = secondsArg(job.durationMs * 0.2)
+  const seek = exact ? ['-ss', at] : ['-copyts', '-start_at_zero', '-thread_type', 'slice', '-flags', 'low_delay', '-ss', at, '-noaccurate_seek']
+  const print = exact ? '' : 'metadata=mode=add:key=bp:value=1,metadata=mode=print:file=-,'
+  return [...BASE_ARGS, ...seek, '-i', job.path, '-frames:v', '1', '-vf', `${print}${viewFilter(view, 960)}`, '-q:v', '2', out]
+}
+
+export async function makePoster(job: Pick<Job, 'path' | 'durationMs' | 'cover'>, view: View | null, out: string): Promise<void> {
+  const printed = await runTool('ffmpeg', posterArgs(job, view, out), 60_000)
+  if (job.cover) return
+  const time = portalTime(printed)
+  if (time === null || job.durationMs * 0.2 - time > POSTER_KEY_MS) await runTool('ffmpeg', posterArgs(job, view, out, true), 60_000)
 }
 
 const STRIP_END_MARGIN_MS = 1000
 
 const STRIP_INPUT_ARGS = ['-skip_frame', 'nokey', '-noaccurate_seek', '-threads', '2']
 
-function stripArgs(job: Job, view: View | null, out: string): string[] {
+const STRIP_RUNS = Math.max(1, Math.min(5, Math.floor(availableParallelism() / 2 / CONCURRENCY)))
+
+function stripArgs(job: Pick<Job, 'path' | 'durationMs'>, view: View | null, out: string, from = 0, to = STRIP_FRAMES): string[] {
   const args = [...BASE_ARGS]
   const filters: string[] = []
   const span = Math.max(0, job.durationMs - STRIP_END_MARGIN_MS)
-  for (let i = 0; i < STRIP_FRAMES; i++) {
+  for (let i = from; i < to; i++) {
     args.push(...STRIP_INPUT_ARGS, '-ss', secondsArg((span * (i + 0.5)) / STRIP_FRAMES), '-i', job.path)
-    filters.push(`[${i}:v]${viewFilter(view, 640)}[s${i}]`)
+    filters.push(`[${i - from}:v]${viewFilter(view, 640)}[s${i - from}]`)
   }
-  const inputs = Array.from({ length: STRIP_FRAMES }, (_, i) => `[s${i}]`).join('')
-  filters.push(`${inputs}hstack=inputs=${STRIP_FRAMES}`)
-  args.push('-filter_complex', filters.join(';'), '-frames:v', '1', '-q:v', '2', out)
+  const n = to - from
+  filters.push(n > 1 ? `${Array.from({ length: n }, (_, i) => `[s${i}]`).join('')}hstack=inputs=${n}` : '[s0]null')
+  const write = out.endsWith('.nut') ? ['-an', '-fps_mode', 'passthrough', '-c:v', 'rawvideo'] : ['-q:v', '2']
+  args.push('-filter_complex', filters.join(';'), '-frames:v', '1', ...write, out)
   return args
+}
+
+export async function makeStrip(job: Pick<Job, 'path' | 'durationMs'>, view: View | null, out: string, runs = STRIP_RUNS): Promise<void> {
+  const size = Math.ceil(STRIP_FRAMES / runs)
+  if (size >= STRIP_FRAMES) {
+    await runTool('ffmpeg', stripArgs(job, view, out), 180_000)
+    return
+  }
+  const shares = Array.from({ length: Math.ceil(STRIP_FRAMES / size) }, (_, i) => ({ from: i * size, to: Math.min(STRIP_FRAMES, (i + 1) * size), file: `${out}.${i}.nut` }))
+  try {
+    const made = await Promise.allSettled(shares.map((s) => runTool('ffmpeg', stripArgs(job, view, s.file, s.from, s.to), 180_000)))
+    const failed = made.find((r) => r.status === 'rejected')
+    if (failed) throw failed.reason
+    const stack = `${shares.map((_, i) => `[${i}:v]`).join('')}hstack=inputs=${shares.length}`
+    await runTool('ffmpeg', [...BASE_ARGS, ...shares.flatMap((s) => ['-i', s.file]), '-filter_complex', stack, '-frames:v', '1', '-q:v', '2', out], 60_000)
+  } finally {
+    await Promise.allSettled(shares.map((s) => unlink(s.file)))
+  }
 }
 
 export type PortalCover = QuestCensor | 'unknown' | null

@@ -2,10 +2,10 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { LibraryDb } from './db'
 import { FLAT, type Projection } from '@shared/projection'
-import { ThumbQueue, coverFilter, mpvColour, portalArgs, portalFilter, viewFilter, viewKey, type View } from './thumbs'
+import { ThumbQueue, coverFilter, makePoster, makeStrip, mpvColour, portalArgs, portalFilter, posterArgs, viewFilter, viewKey, type View } from './thumbs'
 import { runTool } from './tools'
 
 it('refreshes older local previews without hiding them or invalidating server images', async () => {
@@ -109,6 +109,32 @@ it('makes a VR poster from one eye, flat, and remakes it when the projection cha
     rmSync(dir, { recursive: true, force: true })
   }
 }, 20_000)
+
+describe('frames from a clip with a keyframe every 10 s', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bp-thumb-gop-'))
+  const path = join(dir, 'gop.mp4')
+  const image = (name: string) => join(dir, name)
+  beforeAll(() => runTool('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=128x64:rate=10:duration=30', '-c:v', 'mpeg4', '-g', '100', '-q:v', '5', path], 30_000))
+  afterAll(() => rmSync(dir, { recursive: true, force: true }))
+
+  it('makes the same strip in several runs as in one', async () => {
+    const vr: View = { projection: { kind: 'equirect180', layout: 'sbs', fov: 180, swapEyes: false }, width: 128, height: 64 }
+    await makeStrip({ path, durationMs: 30_000 }, vr, image('one.jpg'), 1)
+    await makeStrip({ path, durationMs: 30_000 }, vr, image('four.jpg'), 4)
+    expect(readFileSync(image('four.jpg'))).toEqual(readFileSync(image('one.jpg')))
+    expect(readdirSync(dir).filter((n) => n.endsWith('.nut'))).toEqual([])
+  }, 30_000)
+
+  it('takes the keyframe for a poster unless it is over 5 s before 20 percent', async () => {
+    const poster = async (durationMs: number, name: string) => {
+      await makePoster({ path, durationMs, cover: null }, null, image(`${name}.jpg`))
+      await runTool('ffmpeg', posterArgs({ path, durationMs, cover: null }, null, image(`${name}-exact.jpg`), true), 10_000)
+      return readFileSync(image(`${name}.jpg`)).equals(readFileSync(image(`${name}-exact.jpg`)))
+    }
+    expect(await poster(20_000, 'near')).toBe(false)
+    expect(await poster(30_000, 'far')).toBe(true)
+  }, 30_000)
+})
 
 it('shows half-width 3D at its full shape', () => {
   const half: View = { projection: { ...FLAT, layout: 'sbs' }, width: 1920, height: 1080 }
