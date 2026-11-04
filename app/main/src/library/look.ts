@@ -167,7 +167,7 @@ export async function lookAtStrip(strip: string, signal?: AbortSignal): Promise<
 
 export async function lookAtFile(path: string, durationMs: number, signal?: AbortSignal): Promise<PictureFacts> {
   const seek = ((durationMs * 0.4) / 1000).toFixed(3)
-  const args = ['-v', 'error', '-skip_frame', 'nokey', '-noaccurate_seek', '-threads', '2', '-ss', seek, '-i', path, '-frames:v', '1', '-vf', `scale=${LOOK_WIDTH}:-2:flags=area,format=gray`, '-f', 'rawvideo', '-']
+  const args = ['-v', 'error', '-skip_frame', 'nokey', '-noaccurate_seek', '-thread_type', 'slice', '-flags', 'low_delay', '-ss', seek, '-i', path, '-frames:v', '1', '-vf', `scale=${LOOK_WIDTH}:-2:flags=area,format=gray`, '-f', 'rawvideo', '-']
   const gray = await runToolBytes('ffmpeg', args, 30_000, signal)
   const fh = Math.floor(gray.length / LOOK_WIDTH)
   if (fh < 4) throw new Error(`${path} gave no frame to look at`)

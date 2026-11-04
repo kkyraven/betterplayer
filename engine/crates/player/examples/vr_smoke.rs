@@ -103,7 +103,10 @@ mod smoke {
                 continue;
             }
             focus = (focus.0 + s.focused as u64, focus.1 + 1);
-            let (_, first, _) = *measured.get_or_insert_with(|| (now, s.frames, player.stats().frames));
+            let (_, first, _) = *measured.get_or_insert_with(|| {
+                bp_player::frame_log::json(bp_player::portals::now_ms());
+                (now, s.frames, player.stats().frames)
+            });
             if s.frames > last.0 && s.frames > first {
                 let step = now.duration_since(last.1).as_secs_f64() * 1000.0 / (s.frames - last.0) as f64;
                 frame_ms.extend(std::iter::repeat_n(step, (s.frames - last.0) as usize));
@@ -114,6 +117,7 @@ mod smoke {
             window_frames += taken as u64;
         }
         let ended = (Instant::now(), last.0, player.stats());
+        let log: serde_json::Value = serde_json::from_str(&bp_player::frame_log::json(bp_player::portals::now_ms() - (seconds - settle.as_secs_f64()) * 1000.0)).map_err(|e| e.to_string())?;
         let window_shot = window.and_then(|(w, h)| {
             let a = player.acquire_wait(Duration::from_millis(500))?;
             let slot = player.slot(a.index);
@@ -149,6 +153,27 @@ mod smoke {
                 at(1.0),
                 budget * 1.5,
                 focus.0 as f64 * 100.0 / focus.1.max(1) as f64,
+            );
+            let column = |key: &str, i: usize| {
+                let mut v: Vec<f64> = log[key].as_array().into_iter().flatten().filter_map(|r| r[i].as_f64()).collect();
+                v.sort_by(f64::total_cmp);
+                v
+            };
+            let q = |v: &[f64], p: f64| v.get(((v.len().max(1) - 1) as f64 * p).round() as usize).copied().unwrap_or(0.0);
+            let (cpu, gpu) = (column("drawn", 1), column("shown", 6));
+            println!(
+                "headset thread: cpu ms p50 {:.2} p95 {:.2} p99 {:.2} max {:.2}; gpu ms p50 {:.2} p95 {:.2} p99 {:.2} max {:.2}, {} over 5.5 and {} over 11.1 ({} frames)",
+                q(&cpu, 0.5),
+                q(&cpu, 0.95),
+                q(&cpu, 0.99),
+                q(&cpu, 1.0),
+                q(&gpu, 0.5),
+                q(&gpu, 0.95),
+                q(&gpu, 0.99),
+                q(&gpu, 1.0),
+                gpu.iter().filter(|&&ms| ms > 5.5).count(),
+                gpu.iter().filter(|&&ms| ms > 11.1).count(),
+                gpu.len(),
             );
             match window {
                 Some((w, h)) => println!(

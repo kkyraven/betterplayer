@@ -5,8 +5,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { LibraryDb } from './db'
 import { FLAT, type Projection } from '@shared/projection'
-import { ThumbQueue, coverFilter, makePoster, makeStrip, mpvColour, portalArgs, portalFilter, posterArgs, viewFilter, viewKey, type View } from './thumbs'
-import { runTool } from './tools'
+import { STRIP_FRAMES, ThumbQueue, coverFilter, makePoster, makeStrip, mpvColour, portalArgs, portalFilter, posterArgs, viewFilter, viewKey, type View } from './thumbs'
+import { runTool, runToolBytes } from './tools'
 
 it('refreshes older local previews without hiding them or invalidating server images', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'bp-thumb-quality-'))
@@ -133,6 +133,26 @@ describe('frames from a clip with a keyframe every 10 s', () => {
     }
     expect(await poster(20_000, 'near')).toBe(false)
     expect(await poster(30_000, 'far')).toBe(true)
+    expect(posterArgs({ path, durationMs: 20_000, cover: null, codec: 'hevc' }, null, image('p.jpg'))).toContain('-skip_frame')
+    expect(posterArgs({ path, durationMs: 20_000, cover: null, codec: 'hevc' }, null, image('p.jpg'), true)).not.toContain('-skip_frame')
+    expect(posterArgs({ path, durationMs: 20_000, cover: null, codec: 'h264' }, null, image('p.jpg'))).not.toContain('-skip_frame')
+  }, 30_000)
+})
+
+describe('a strip from an open-GOP H.264 clip', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bp-thumb-open-gop-'))
+  const clip = (name: string, gop: string) => runTool('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=s=64x64:r=25:d=31,format=yuv420p,geq=lum=16+7*T:cb=128:cr=128', '-c:v', 'libx264', '-x264-params', `keyint=50:min-keyint=50:scenecut=0${gop}`, join(dir, name)], 30_000)
+  beforeAll(() => Promise.all([clip('open.mp4', ':open-gop=1'), clip('closed.mp4', '')]), 30_000)
+  afterAll(() => rmSync(dir, { recursive: true, force: true }))
+  const tiles = async (name: string) => {
+    await makeStrip({ path: join(dir, `${name}.mp4`), durationMs: 31_000, codec: 'h264' }, { projection: FLAT, width: 64, height: 64 }, join(dir, `${name}.jpg`))
+    return [...(await runToolBytes('ffmpeg', ['-v', 'error', '-i', join(dir, `${name}.jpg`), '-vf', `scale=${STRIP_FRAMES}:1:flags=area`, '-f', 'rawvideo', '-pix_fmt', 'gray', '-'], 10_000))]
+  }
+
+  it('takes the same keyframes as a closed-GOP clip', async () => {
+    const [open, closed] = await Promise.all([tiles('open'), tiles('closed')])
+    expect(open).toHaveLength(STRIP_FRAMES)
+    open.forEach((v, i) => expect(Math.abs(v - (closed[i] ?? Infinity))).toBeLessThan(4))
   }, 30_000)
 })
 

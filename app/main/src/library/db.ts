@@ -493,6 +493,7 @@ export interface MediaStamp {
   projection: string
   width: number
   height: number
+  codec: string
   vrProbe: string
   vrLook: string
   views: ImageViews
@@ -745,7 +746,7 @@ export class LibraryDb {
   }
 
   stamp(path: string): MediaStamp | null {
-    const row = this.stmt('SELECT id, size, mtime, duration_ms, thumb_ready, strip_ready, thumb_quality, strip_quality, remote_key, tags_ready, scripts_stamp, cover_stamp, remote_stamp, projection, width, height, vr_probe, vr_look, thumb_view, strip_view FROM media WHERE path = ?').get(path)
+    const row = this.stmt('SELECT id, size, mtime, duration_ms, thumb_ready, strip_ready, thumb_quality, strip_quality, remote_key, tags_ready, scripts_stamp, cover_stamp, remote_stamp, projection, width, height, codec, vr_probe, vr_look, thumb_view, strip_view FROM media WHERE path = ?').get(path)
     if (!row) return null
     return {
       id: num(row, 'id'),
@@ -761,6 +762,7 @@ export class LibraryDb {
       projection: text(row, 'projection'),
       width: num(row, 'width'),
       height: num(row, 'height'),
+      codec: text(row, 'codec'),
       vrProbe: text(row, 'vr_probe'),
       vrLook: text(row, 'vr_look'),
       views: { thumb: text(row, 'thumb_view'), strip: text(row, 'strip_view') },

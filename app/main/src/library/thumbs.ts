@@ -133,7 +133,8 @@ export class ThumbQueue {
     if (state === 'failed' || (state === 'ready' && existsSync(out) && stamp?.views[kind] === key)) return
     const temp = `${out}.${randomUUID()}.jpg`
     try {
-      await (kind === 'thumb' ? makePoster(job, view, temp) : makeStrip(job, view, temp))
+      const source = { ...job, codec: stamp?.codec }
+      await (kind === 'thumb' ? makePoster(source, view, temp) : makeStrip(source, view, temp))
       await rename(temp, out)
       this.db.setThumbState(job.id, kind, 'ready', key)
       this.hooks.done(job.id)
@@ -150,17 +151,23 @@ const secondsArg = (ms: number) => (ms / 1000).toFixed(3)
 
 const BASE_ARGS = ['-y', '-v', 'error', '-max_error_rate', '1']
 
+const KEY_ONLY = new Set(['hevc', 'av1', 'vp9'])
+const keyOnly = (codec: string | undefined) => codec !== undefined && KEY_ONLY.has(codec)
+
+type Source = Pick<Job, 'path' | 'durationMs'> & { codec?: string }
+
 const POSTER_KEY_MS = 5000
 
-export function posterArgs(job: Pick<Job, 'path' | 'durationMs' | 'cover'>, view: View | null, out: string, exact = false): string[] {
+export function posterArgs(job: Source & Pick<Job, 'cover'>, view: View | null, out: string, exact = false): string[] {
   if (job.cover) return [...BASE_ARGS, '-i', job.cover, '-frames:v', '1', '-vf', viewFilter(null, 960), '-q:v', '2', out]
   const at = secondsArg(job.durationMs * 0.2)
-  const seek = exact ? ['-ss', at] : ['-copyts', '-start_at_zero', '-thread_type', 'slice', '-flags', 'low_delay', '-ss', at, '-noaccurate_seek']
+  const skip = keyOnly(job.codec) ? ['-skip_frame', 'nokey'] : []
+  const seek = exact ? ['-ss', at] : ['-copyts', '-start_at_zero', ...skip, '-thread_type', 'slice', '-flags', 'low_delay', '-ss', at, '-noaccurate_seek']
   const print = exact ? '' : 'metadata=mode=add:key=bp:value=1,metadata=mode=print:file=-,'
   return [...BASE_ARGS, ...seek, '-i', job.path, '-frames:v', '1', '-vf', `${print}${viewFilter(view, 960)}`, '-q:v', '2', out]
 }
 
-export async function makePoster(job: Pick<Job, 'path' | 'durationMs' | 'cover'>, view: View | null, out: string): Promise<void> {
+export async function makePoster(job: Source & Pick<Job, 'cover'>, view: View | null, out: string): Promise<void> {
   const printed = await runTool('ffmpeg', posterArgs(job, view, out), 60_000)
   if (job.cover) return
   const time = portalTime(printed)
@@ -169,17 +176,19 @@ export async function makePoster(job: Pick<Job, 'path' | 'durationMs' | 'cover'>
 
 const STRIP_END_MARGIN_MS = 1000
 
-const STRIP_INPUT_ARGS = ['-skip_frame', 'nokey', '-noaccurate_seek', '-threads', '2']
+const KEY_INPUT = ['-skip_frame', 'nokey', '-flags', 'low_delay', '-noaccurate_seek', '-threads', '2']
+const FIRST_INPUT = ['-thread_type', 'slice', '-flags', 'low_delay', '-noaccurate_seek', '-threads', '2']
 
 const STRIP_RUNS = Math.max(1, Math.min(5, Math.floor(availableParallelism() / 2 / CONCURRENCY)))
 
-function stripArgs(job: Pick<Job, 'path' | 'durationMs'>, view: View | null, out: string, from = 0, to = STRIP_FRAMES): string[] {
+function stripArgs(job: Source, view: View | null, out: string, from = 0, to = STRIP_FRAMES): string[] {
   const args = [...BASE_ARGS]
   const filters: string[] = []
   const span = Math.max(0, job.durationMs - STRIP_END_MARGIN_MS)
+  const keys = keyOnly(job.codec)
   for (let i = from; i < to; i++) {
-    args.push(...STRIP_INPUT_ARGS, '-ss', secondsArg((span * (i + 0.5)) / STRIP_FRAMES), '-i', job.path)
-    filters.push(`[${i - from}:v]${viewFilter(view, 640)}[s${i - from}]`)
+    args.push(...(keys ? KEY_INPUT : FIRST_INPUT), '-ss', secondsArg((span * (i + 0.5)) / STRIP_FRAMES), '-i', job.path)
+    filters.push(`[${i - from}:v]${keys ? '' : 'setpts=N,'}${viewFilter(view, 640)}[s${i - from}]`)
   }
   const n = to - from
   filters.push(n > 1 ? `${Array.from({ length: n }, (_, i) => `[s${i}]`).join('')}hstack=inputs=${n}` : '[s0]null')
@@ -188,7 +197,7 @@ function stripArgs(job: Pick<Job, 'path' | 'durationMs'>, view: View | null, out
   return args
 }
 
-export async function makeStrip(job: Pick<Job, 'path' | 'durationMs'>, view: View | null, out: string, runs = STRIP_RUNS): Promise<void> {
+export async function makeStrip(job: Source, view: View | null, out: string, runs = STRIP_RUNS): Promise<void> {
   const size = Math.ceil(STRIP_FRAMES / runs)
   if (size >= STRIP_FRAMES) {
     await runTool('ffmpeg', stripArgs(job, view, out), 180_000)
@@ -252,12 +261,10 @@ export function portalTime(printed: string): number | null {
   return m ? Math.round(Number(m[1]) * 1e6) / 1e3 : null
 }
 
-const KEY_ONLY = new Set(['hevc', 'av1', 'vp9'])
-
 export function portalArgs(path: string, view: View, width: 1024 | 2048, ms: number | null, durationMs: number, cover: PortalCover, out: string, colour?: Colour, codec?: string): string[] {
   const filter = portalFilter(view, width, cover, colour) ?? `scale=${width}:-2:flags=lanczos`
   const at = ms ?? durationMs * 0.2
-  const skip = codec !== undefined && KEY_ONLY.has(codec) ? ['-skip_frame', 'nokey'] : []
+  const skip = keyOnly(codec) ? ['-skip_frame', 'nokey'] : []
   return [
     ...BASE_ARGS, '-copyts', '-start_at_zero', ...skip, '-thread_type', 'slice', '-flags', 'low_delay', '-ss', secondsArg(Math.max(0, at)), '-noaccurate_seek', '-i', path,
     '-frames:v', '1', '-vf', `metadata=mode=add:key=bp:value=1,metadata=mode=print:file=-,${filter}`, '-q:v', '3', out,
