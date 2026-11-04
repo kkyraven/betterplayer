@@ -22,6 +22,20 @@ describe('QuestPairing', () => {
     expect(again.headsets()).toEqual([{ id: 'h1', name: 'Quest 3', host: null, looking: false, paired: true }])
   })
 
+  it('nudges a paired headset at its last IPv4 address only while it is not heard, across restarts', () => {
+    const file = join(dir, 'pairing.json')
+    const first = new QuestPairing(file)
+    const requestId = first.request({ id: 'h1', name: 'Quest 3', pin: '0420' }, '192.168.1.24', () => {})
+    first.pin(requestId!, '0420')
+    first.heard({ id: 'h1', name: 'Quest 3', v: QUEST_PROTOCOL }, '192.168.1.66', 23554)
+    expect(first.quietHosts(Date.now() + 60_000)).toEqual([])
+    first.used({ id: 'h1', name: 'Quest 3' }, '192.168.1.24')
+    expect(first.quietHosts()).toEqual([])
+    expect(first.quietHosts(Date.now() + 60_000)).toEqual(['192.168.1.24'])
+    first.used({ id: 'h1', name: 'Quest 3' }, 'fe80::1')
+    expect(new QuestPairing(file).quietHosts()).toEqual(['192.168.1.24'])
+  })
+
   it('names the side to update for a headset on another protocol', () => {
     expect(readProbe('{"id":"h1","name":"Quest 3"}')).toEqual({ id: 'h1', name: 'Quest 3', v: 2 })
     const pairing = new QuestPairing()

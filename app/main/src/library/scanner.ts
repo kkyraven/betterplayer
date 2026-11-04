@@ -2,6 +2,7 @@ import { recordMetric } from './servers/diagnostics'
 import { open, readdir, stat } from 'node:fs/promises'
 import { basename, dirname, extname, join, relative, sep } from 'node:path'
 import { isVideoPath } from '@shared/ipc'
+import { isAlphaName } from '@shared/passthrough'
 import type { MediaMark } from '@shared/library'
 import { needsLook, readContainerFacts, readPictureFacts, resolveProjection, worthProbing, type ContainerFacts, type ProjectionKind } from '@shared/projection'
 import type { LibraryDb, MediaStamp, ScriptKey, ScriptRow } from './db'
@@ -405,7 +406,7 @@ export class Scanner {
           if (!excluded.has(relative(root, full).split(sep).join('/'))) stack.push(full)
         }
         else if (isScriptOrZip(name) || isImage(name)) siblings.push(name)
-        else if (isVideoPath(name)) {
+        else if (isVideoPath(name) && !isAlphaName(name)) {
           const isFile = entry.isFile() || (entry.isSymbolicLink() && (await stat(full).catch(() => null))?.isFile() === true)
           if (!isFile) continue
           if (extname(name).toLowerCase() === '.ts' && (await isSourceText(full))) continue

@@ -56,7 +56,7 @@ pub use bp_hero::{
 };
 pub use bp_model::{MODELS as AI_MODELS, ModelKind, ModelSpec as AiModelSpec, TOO_SLOW_MS};
 pub use censor::{CensorModels, CensorRun, CensorStatus};
-pub use matte::{EyeLayout, Maker as MatteMaker, MatteSetup, MatteState, MatteStatus};
+pub use matte::{EyeLayout, Maker as MatteMaker, MatteMakeStatus, MatteSetup, MatteState, MatteStatus};
 pub use detect::{DetectSnapshot, DetectStatus, Found, Verdict};
 pub use generate::{GenerateProgress, GenerateStatus, Generation};
 pub use hero::{ColourRule, Flourish, HeroSnapshot, MusicOptions as HeroMusicOptions, MusicRule as HeroMusicRule};
@@ -68,7 +68,7 @@ pub use range::{
 
 pub use bp_axes::{Provider, SmartLimit};
 pub use bp_devices::{RampConfig, RampProgress};
-pub use bp_player::{External, RenderSnapshot, VrCensor};
+pub use bp_player::{External, Matte, RenderSnapshot, VrCensor};
 pub use bp_script::{Bookmark, Chapter, Interpolation};
 use bp_tracking::CutDetector;
 pub use bp_tracking::{
@@ -567,6 +567,7 @@ pub struct Engine {
     follow: Mutex<Option<Follow>>,
     censor: Mutex<Option<censor::Censor>>,
     matte: Mutex<Option<matte::MatteTrack>>,
+    matte_make: Mutex<Option<matte::MatteMake>>,
     censor_track: Mutex<Option<matte::MatteTrack>>,
     hz: u32,
     next_output: u32,
@@ -677,6 +678,7 @@ impl Engine {
             follow: Mutex::new(None),
             censor: Mutex::new(None),
             matte: Mutex::new(None),
+            matte_make: Mutex::new(None),
             censor_track: Mutex::new(None),
             hz: opts.hz,
             next_output: 1,
@@ -1224,6 +1226,28 @@ impl Engine {
 
     pub fn matte_status(&self) -> Option<MatteStatus> {
         self.matte.lock().unwrap().as_ref().map(|m| m.status())
+    }
+
+    pub fn matte_grid(&self) -> Option<(u64, Arc<Matte>)> {
+        self.matte.lock().unwrap().as_ref()?.grid()
+    }
+
+    pub fn matte_make(&self, setup: MatteSetup) {
+        let mut slot = self.matte_make.lock().unwrap();
+        if slot.as_ref().is_some_and(|m| m.setup == setup && m.going()) {
+            return;
+        }
+        *slot = None;
+        let hwdec = Some(self.player.hwdec_current()).filter(|h| !h.is_empty());
+        *slot = Some(matte::MatteMake::start(setup, hwdec));
+    }
+
+    pub fn matte_make_stop(&self) {
+        *self.matte_make.lock().unwrap() = None;
+    }
+
+    pub fn matte_make_status(&self) -> Option<MatteMakeStatus> {
+        self.matte_make.lock().unwrap().as_ref().map(|m| m.status())
     }
 
     pub fn frame_serial(&self) -> u64 {
@@ -2015,6 +2039,7 @@ impl Engine {
             t.stop();
         }
         self.matte_stop();
+        self.matte_make_stop();
         self.censor_track(None, None);
         self.shared.stop.store(true, Ordering::Relaxed);
         if let Some(t) = self.tick.take() {

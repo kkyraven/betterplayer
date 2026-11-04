@@ -121,7 +121,7 @@ export class Library {
   private readonly passthroughs: Passthrough
   private readonly keyedPosters: KeyedPosters
   readonly portals: PortalStills
-  private passthroughModel: () => boolean = () => false
+  private alphaOf: (path: string) => string | null = () => null
   private readonly jobs: JobSink
   private readonly scanner: Scanner
   private readonly scriptScanner: ScriptScanner
@@ -149,7 +149,7 @@ export class Library {
     this.passthroughs = new Passthrough(this.db, {
       projection: async (path) => (await this.projection(path)).projection,
       headers: (path) => this.serverHeaders(path),
-      modelReady: () => this.passthroughModel(),
+      alpha: (path) => this.alphaOf(path),
     })
     this.keyedPosters = new KeyedPosters(options.dataDir)
     this.portals = new PortalStills(join(options.dataDir, 'portals'), { source: (id) => this.portalSource(id), poster: (id) => this.poster(id) })
@@ -730,8 +730,8 @@ export class Library {
     if (thumb || strip) this.thumbs.enqueue({ id, path: row.path, durationMs: row.durationMs, cover: null, thumb, strip })
   }
 
-  setPassthroughModel(ready: () => boolean) {
-    this.passthroughModel = ready
+  setAlphaFinder(find: (path: string) => string | null) {
+    this.alphaOf = find
   }
 
   passthrough(path: string, saved: PassthroughSettings | undefined, waitMs?: number): Promise<ResolvedPassthrough> {

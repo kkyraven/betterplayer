@@ -51,7 +51,7 @@ describe('PortalStills', () => {
     const { mod, stills } = await setup()
     mod.setPortalCensor(null)
     const first = await stills.still(1, 1024, 25_000)
-    expect(first).toMatchObject({ type: 'image/jpeg', info: { kind: 'equirect', halfDeg: [36, 27], arcDeg: 180, ms: 20_000, censor: 'off' } })
+    expect(first).toMatchObject({ type: 'image/jpeg', info: { kind: 'equirect', halfDeg: [90, 90], arcDeg: 180, ms: 20_000, censor: 'off' } })
     await stills.still(1, 1024, 25_000)
     expect(calls).toHaveLength(1)
     const changes: (() => void)[] = [
@@ -87,7 +87,7 @@ describe('PortalStills', () => {
     if (look) mod.setPortalCensor(look)
     const covered = await stills.still(1, 1024, null)
     expect(covered).toMatchObject({ info: { kind: 'equirect', censor: look ? expect.stringMatching(/^[0-9a-f]{10}$/) : 'unknown' } })
-    expect(calls[0]!.join(' ')).toMatch(look ? /scale=16:-2:flags=area,scale=1024:768:flags=neighbor/ : /scale=10:-2:flags=area,scale=1024:768:flags=bicubic/)
+    expect(calls[0]!.join(' ')).toMatch(look ? /scale=4:-2:flags=area,scale=1024:1024:flags=neighbor/ : /scale=3:-2:flags=area,scale=1024:1024:flags=bicubic/)
     const flat = await stills.still(2, 1024, null)
     expect(flat).toMatchObject({ info: { kind: 'poster' } })
     expect(flat && 'file' in flat && flat.file).not.toBe(join(dir, 'poster.jpg'))
@@ -114,6 +114,32 @@ describe('PortalStills', () => {
     const still = await stills.still(1, 1024, null)
     expect(still).toMatchObject({ info: { censor: mod.censorKey() } })
     expect(mod.censorKey()).not.toBe('off')
+  })
+
+  it('probes a file once per mtime, and again after a failed probe', async () => {
+    const mod = await load()
+    mod.setPortalCensor(null)
+    const probes: string[] = []
+    let answer = (): Promise<string> => Promise.resolve('{"streams":[{"codec_name":"hevc","color_space":"bt2020nc","color_range":"tv"}]}')
+    const stills = new mod.PortalStills(join(dir, 'portals'), {
+      source: (id) => rows[id] ?? null,
+      poster: async () => ({ file: join(dir, 'poster.jpg'), type: 'image/jpeg' }),
+      ffmpeg: (args) => ffmpeg(args),
+      ffprobe: (args) => (probes.push(args[args.length - 1]!), answer()),
+    })
+    await stills.still(1, 1024, null)
+    await stills.still(1, 2048, null)
+    expect(probes).toHaveLength(1)
+    expect(calls[1]!.join(' ')).toContain('in_color_matrix=bt2020')
+    expect(calls[1]).toContain('-skip_frame')
+    rows[1] = { ...rows[1]!, mtimeMs: 2 }
+    answer = () => Promise.reject(new Error('ffprobe exited with 1'))
+    await stills.still(1, 1024, null)
+    expect(calls[2]!.join(' ')).toContain('in_color_matrix=bt601')
+    expect(calls[2]).not.toContain('-skip_frame')
+    answer = () => Promise.resolve('{}')
+    await stills.still(1, 2048, null)
+    expect(probes).toHaveLength(3)
   })
 
   it('makes a still with an unreadable .json again', async () => {
@@ -148,7 +174,7 @@ describe('servePortalThumb', () => {
     const local = { active: false, thumb: async () => new Response(null, { status: 500 }) }
     const res = await mod.servePortalThumb({ portals: stills }, local, 'thumb://portal/1?w=1024&ms=25000')
     expect(res.status).toBe(200)
-    expect(Object.fromEntries(res.headers)).toMatchObject({ 'cache-control': 'no-store', 'x-portal-kind': 'equirect', 'x-portal-half': '36,27', 'x-portal-ms': '20000.000', 'x-portal-censor': 'off' })
+    expect(Object.fromEntries(res.headers)).toMatchObject({ 'cache-control': 'no-store', 'x-portal-kind': 'equirect', 'x-portal-half': '90,90', 'x-portal-ms': '20000.000', 'x-portal-censor': 'off' })
     expect((await mod.servePortalThumb({ portals: stills }, local, 'thumb://portal/1?w=512')).status).toBe(404)
     mod.setPortalCensor(LOOK)
     const blank = await mod.servePortalThumb({ portals: stills }, local, 'thumb://portal/3?w=1024')

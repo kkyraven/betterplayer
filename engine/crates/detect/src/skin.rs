@@ -50,6 +50,13 @@ impl Skin {
         self.run(rgb, width, height, false)
     }
 
+    pub fn segment_soft_with(&mut self, rgb: &[u8], width: usize, height: usize, prev: &mut Vec<f32>) -> Result<SkinMask, String> {
+        std::mem::swap(&mut self.prev, prev);
+        let mask = self.run(rgb, width, height, false);
+        std::mem::swap(&mut self.prev, prev);
+        mask
+    }
+
     fn run(&mut self, rgb: &[u8], width: usize, height: usize, solid: bool) -> Result<SkinMask, String> {
         if width == 0 || height == 0 || rgb.len() < width * height * 3 {
             return Err(format!("frame is {} bytes, expected {}x{}x3", rgb.len(), width, height));

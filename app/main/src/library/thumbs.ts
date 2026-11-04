@@ -186,6 +186,8 @@ export function coverFilter(cover: QuestCensor | 'unknown', w: number, h: number
   return `scale=${Math.max(2, Math.round(cells * share))}:-2:flags=area,scale=${w}:${h}:flags=${pixels ? 'neighbor' : 'bicubic'}`
 }
 
+export const SHELF_COVER_SHARE = VR_PORTAL.portal.w / VR_PORTAL.radius / (VR_PORTAL.portal.field * Math.PI)
+
 export interface Colour {
   matrix: 'bt601' | 'bt709' | 'bt2020'
   range: 'tv' | 'pc'
@@ -204,17 +206,11 @@ export function portalFilter(view: View, width: 1024 | 2048, cover: PortalCover,
   if (p.kind === 'flat') return null
   const second = p.swapEyes ? 1 : 0
   const eye = p.layout === 'sbs' ? `crop=iw/2:ih:${second ? 'iw/2' : '0'}:0,` : p.layout === 'ou' ? `crop=iw:ih/2:0:${second ? 'ih/2' : '0'},` : ''
-  const arc = portalArc(p)
-  const [halfH, halfV] = VR_PORTAL.stills.shelfHalfDeg
-  const shelf = width === 1024
-  const [w, h] = shelf ? [1024, 768] : p.kind === 'equirect360' ? [2048, 1024] : [2048, 2048]
-  const fisheye = p.kind === 'fisheye' ? `v360=input=fisheye:ih_fov=${p.fov}:iv_fov=${p.fov}:output=hequirect:w=${shelf ? 2560 : 2048}:h=${shelf ? 2560 : 2048}:interp=lanczos,` : ''
+  const [w, h] = [width, p.kind === 'equirect360' ? width / 2 : width]
+  const fisheye = p.kind === 'fisheye' ? `v360=input=fisheye:ih_fov=${p.fov}:iv_fov=${p.fov}:output=hequirect:w=${w}:h=${h}:interp=lanczos,` : ''
   const convert = colour ? `${colourArgs(colour)},format=yuvj420p` : ''
-  const picture = shelf
-    ? `crop=iw*${2 * halfH}/${arc}:ih*${2 * halfV}/180,scale=${w}:${h}:flags=lanczos${convert}`
-    : `scale=${w}:${h}:flags=lanczos${convert}`
-  const covered = cover === null ? '' : `,${coverFilter(cover, w, h, shelf ? (2 * halfH) / arc : 1)}`
-  return `${eye}${fisheye}${picture}${covered}`
+  const covered = cover === null ? '' : `,${coverFilter(cover, w, h, width === 1024 ? SHELF_COVER_SHARE : 1)}`
+  return `${eye}${fisheye}scale=${w}:${h}:flags=lanczos${convert}${covered}`
 }
 
 export function portalTime(printed: string): number | null {
@@ -222,11 +218,14 @@ export function portalTime(printed: string): number | null {
   return m ? Math.round(Number(m[1]) * 1e6) / 1e3 : null
 }
 
-export function portalArgs(path: string, view: View, width: 1024 | 2048, ms: number | null, durationMs: number, cover: PortalCover, out: string, colour?: Colour): string[] {
+const KEY_ONLY = new Set(['hevc', 'av1', 'vp9'])
+
+export function portalArgs(path: string, view: View, width: 1024 | 2048, ms: number | null, durationMs: number, cover: PortalCover, out: string, colour?: Colour, codec?: string): string[] {
   const filter = portalFilter(view, width, cover, colour) ?? `scale=${width}:-2:flags=lanczos`
   const at = ms ?? durationMs * 0.2
+  const skip = codec !== undefined && KEY_ONLY.has(codec) ? ['-skip_frame', 'nokey'] : []
   return [
-    ...BASE_ARGS, '-copyts', '-start_at_zero', '-ss', secondsArg(Math.max(0, at)), '-noaccurate_seek', '-i', path,
+    ...BASE_ARGS, '-copyts', '-start_at_zero', ...skip, '-thread_type', 'slice', '-flags', 'low_delay', '-ss', secondsArg(Math.max(0, at)), '-noaccurate_seek', '-i', path,
     '-frames:v', '1', '-vf', `metadata=mode=add:key=bp:value=1,metadata=mode=print:file=-,${filter}`, '-q:v', '3', out,
   ]
 }

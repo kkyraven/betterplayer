@@ -6,7 +6,7 @@ const DEG = Math.PI / 180
 export const VR_PORTAL = {
   radius: 1.5,
   ppm: 1200,
-  portal: { w: 0.36, h: 0.225, corner: 0.0135, lift: 0.1, grow: 0.05, gap: 0.065 },
+  portal: { w: 0.36, h: 0.225, corner: 0.0135, lift: 0.1, grow: 0.21, gap: 0.065, field: 0.7, hoverField: 0.8, bowl: 0.18 },
   returnPicture: { w: 0.104, h: 0.065, corner: 0.008, lift: 0.04, grow: 0.03 },
   returnButton: { padLeft: 0.012, gap: 0.014, padRight: 0.022, padHeight: 0.022, radius: 0.02, rightMargin: 0.035 },
   el: { label1: 9.35, ret: 10.4, row1: 2.5, label2: -6.85, row2: -13.7, strip: -24.1, hint: -26.6 },
@@ -28,12 +28,12 @@ export const VR_PORTAL = {
   pill: { w: 0.2, h: 0.0533, texels: [240, 64], windowY: 1332 },
   slideMinDeg: 3,
   resultsDz: 0.15,
-  aperture: { full180: [105, 105], full360: [200, 105], growPow: 1.6, corner: 0.55, cornerK: 0.7, feather: 0.22, featherK: 0.8, rimVr: 0.14, rimFlat: 0.05, rimK: 0.35 },
+  aperture: { full180: [105, 105], full360: [200, 105], growPow: 1.6, corner: 0.55, cornerK: 0.7, feather: 0.22, featherK: 0.8, rimVr: 0.14, rimFlat: 0.05, rimK: 0.35, bowlK: 0.4 },
   ring: { gap: 0.005, width: 0.0045, flash: 0.002 },
   dim: { video: 0.32, room: 0.5, keyboard: 0.1, fix: 0.3, words: 0.28, offline: 0.35, locked: 0.4 },
   loading: { drop: 0.3, distance: 1.4 },
   screen: { radius: 3, corner: 0.03 },
-  stills: { shelfWidth: 1024, diveWidth: 2048, shelfHalfDeg: [36, 27] },
+  stills: { shelfWidth: 1024, diveWidth: 2048 },
   rows: { limit: 24, results: 40, visible: 4 },
   maxPortals: 16,
 } as const
@@ -168,18 +168,59 @@ export function rbox(x: number, y: number, bx: number, by: number, r: number): n
   return Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - r
 }
 
-export function worldTurn(azDeg: number, elDeg: number): { yaw: number; pitch: number } {
-  return { yaw: azDeg * DEG, pitch: (elDeg - diveElDeg) * DEG }
+export const windowHover = (s: number, size: PortalSize) => (size.grow > 0 ? clamp01((s - 1) / size.grow) : 0)
+
+export const halfField = (hover: number) => (lerp(VR_PORTAL.portal.field, VR_PORTAL.portal.hoverField, hover) * Math.PI) / 2
+
+export const bowlDepth = (hover: number) => (VR_PORTAL.portal.bowl / (VR_PORTAL.portal.w / 2)) * (1 - 0.5 * hover)
+
+export function windowRay(v: Vec3, yaw: number, pitch: number): Vec3 {
+  const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch)
+  const f1 = v[0] * sy - v[2] * cy
+  return [v[0] * cy + v[2] * sy, v[1] * cp - f1 * sp, v[1] * sp + f1 * cp]
 }
 
-export function turnedAngles(v: Vec3, turn: { yaw: number; pitch: number }): [number, number] {
-  const cy = Math.cos(turn.yaw), sy = Math.sin(turn.yaw)
-  const x1 = v[0] * cy + v[2] * sy
-  const f1 = v[0] * sy - v[2] * cy
-  const cp = Math.cos(turn.pitch), sp = Math.sin(turn.pitch)
-  const y2 = v[1] * cp - f1 * sp
-  const f2 = v[1] * sp + f1 * cp
-  return [Math.atan2(x1, f2), Math.asin(Math.min(1, Math.max(-1, y2)))]
+export function fromWindow(w: Vec3, yaw: number, pitch: number): Vec3 {
+  const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch)
+  const f1 = w[2] * cp - w[1] * sp
+  return [w[0] * cy + f1 * sy, w[1] * cp + w[2] * sp, w[0] * sy - f1 * cy]
+}
+
+export const windowAngles = (w: Vec3): [number, number] => [Math.atan2(w[0], w[2]), Math.asin(Math.min(1, Math.max(-1, w[1])))]
+
+export function bowlAngles(x: number, y: number, lv: Vec3, aspect: number, hover: number): [number, number, number] {
+  const ax: Vec3 = [1.42, 1.42 * aspect, Math.max(bowlDepth(hover), 1e-3)]
+  const p: Vec3 = [x / ax[0], y / ax[1], 0]
+  const d: Vec3 = [lv[0] / ax[0], lv[1] / ax[1], lv[2] / ax[2]]
+  const a = d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
+  const b = p[0] * d[0] + p[1] * d[1]
+  const c = p[0] * p[0] + p[1] * p[1] - 1
+  const t = (-b + Math.sqrt(Math.max(b * b - a * c, 0))) / a
+  const q: Vec3 = [x + lv[0] * t, y + lv[1] * t, lv[2] * t]
+  const n: Vec3 = [q[0] / (ax[0] * ax[0]), q[1] / (ax[1] * ax[1]), q[2] / (ax[2] * ax[2])]
+  const fh = halfField(hover)
+  return [q[0] * fh, q[1] * fh, lerp(0.5, 1, smooth((n[2] / Math.hypot(...n) - 0.15) / 0.75))]
+}
+
+export function windowPicture(o: Vec3, v: Vec3, p: PortalPose, size: PortalSize): [number, number, number] | null {
+  const hit = portalHit(o, v, p, size)
+  if (!hit) return null
+  const half = size.w / 2
+  return bowlAngles(hit.x / half, hit.y / half, windowRay(v, p.az, p.el), size.h / size.w, windowHover(p.s, size))
+}
+
+export function diveAngles(o: Vec3, v: Vec3, ap: NonNullable<DiveFrame['aperture']>, aspect: number): [number, number, number] {
+  const w = windowRay(v, ap.az, ap.el)
+  const [qx, qy] = windowAngles(w)
+  const a = qx * ap.scale, e = qy * ap.scale
+  const u = fromWindow([Math.cos(e) * Math.sin(a), Math.sin(e), Math.cos(e) * Math.cos(a)], ap.az, ap.el)
+  const [fx, fy] = windowAngles(windowRay(u, ap.az * (1 - ap.k), ap.el * (1 - ap.k)))
+  if (ap.bowl <= 0) return [fx, fy, 1]
+  const ob = o[0] * v[0] + o[1] * v[1] + o[2] * v[2]
+  const t = -ob + Math.sqrt(Math.max(ob * ob - (o[0] * o[0] + o[1] * o[1] + o[2] * o[2] - ap.rp * ap.rp), 0))
+  const [dx, dy] = windowAngles(windowRay([o[0] + v[0] * t, o[1] + v[1] * t, o[2] + v[2] * t].map((c) => c / ap.rp) as Vec3, ap.az, ap.el))
+  const [bx, by, shade] = bowlAngles(dx / ap.hw, (dy / ap.hh) * aspect, w, aspect, ap.hover)
+  return [lerp(fx, bx, ap.bowl), lerp(fy, by, ap.bowl), lerp(1, shade, ap.bowl)]
 }
 
 export function stillUv(az: number, el: number, hh: number, hv: number): [number, number] | null {
@@ -188,11 +229,11 @@ export function stillUv(az: number, el: number, hh: number, hv: number): [number
 }
 
 export type DiveKind = 'vr' | 'flat' | 'back' | 'flatBack'
-export interface ApertureFrom { az: number; el: number; hw: number; hh: number; rr: number; rp: number }
+export interface ApertureFrom { az: number; el: number; hw: number; hh: number; rr: number; rp: number; hover: number }
 
 export function portalAngles(azRad: number, y: number, r: number, s: number, size: PortalSize): ApertureFrom {
   const d = Math.hypot(r, y)
-  return { az: azRad, el: Math.atan2(y, r), hw: (size.w * s) / 2 / d, hh: (size.h * s) / 2 / d, rr: (size.corner * s) / d, rp: d }
+  return { az: azRad, el: Math.atan2(y, r), hw: (size.w * s) / 2 / d, hh: (size.h * s) / 2 / d, rr: (size.corner * s) / d, rp: d, hover: windowHover(s, size) }
 }
 
 export interface TilePose { a: number; y: number; r: number; w: number; h: number; crop: number; bend: number; tilt: number; rad: number }
@@ -229,7 +270,7 @@ export function elapsed(t: Transition, nowMs: number): number {
 export function growEnd(spec: DiveSpec): number {
   const M = VR_PORTAL.ms
   if (spec.kind === 'vr') return spec.slideMs + M.grow
-  if (spec.kind === 'back') return M.grow
+  if (spec.kind === 'back') return M.live + M.grow
   return M.flat
 }
 
@@ -240,8 +281,9 @@ export interface DiveFrame {
   flash: number
   sliding: boolean
   portal: { az: number; y: number; r: number; s: number; hover: number; op: number } | null
-  aperture: { az: number; el: number; hw: number; hh: number; rr: number; feather: number; rim: number; rp: number } | null
+  aperture: { az: number; el: number; hw: number; hh: number; rr: number; feather: number; rim: number; rp: number; scale: number; bowl: number; k: number; hover: number } | null
   inB: number; outB: number; outA: number
+  outLive: number
   tile: TilePose | null
   live: number
   loading: number
@@ -266,6 +308,10 @@ function aperture(from: ApertureFrom, full: 180 | 360, k: number): NonNullable<D
     feather: A.feather * hh * smooth(k / A.featherK),
     rim: A.rimVr * (1 - smooth(k / A.rimK)),
     rp: from.rp,
+    scale: (halfField(from.hover) / from.hw) ** (1 - k),
+    bowl: 1 - smooth(k / A.bowlK),
+    k,
+    hover: from.hover,
   }
 }
 
@@ -275,21 +321,23 @@ export function diveFrame(t: Transition, nowMs: number, dim: number): DiveFrame 
   const raw = elapsed(t, nowMs)
   const forward = s.kind === 'vr' || s.kind === 'flat'
   const end = growEnd(s)
-  const tReady = !forward || s.same ? 0 : t.held || t.liveAtMs === null ? Infinity : Math.max(end + M.liveAfterEnd, t.liveAtMs - s.startMs)
-  const total = !forward || s.same ? end : tReady + M.live
+  const fades = forward && (!s.same || s.kind === 'vr')
+  const tReady = !fades ? 0 : t.held ? Infinity : s.same ? end : t.liveAtMs === null ? Infinity : Math.max(end + M.liveAfterEnd, t.liveAtMs - s.startMs)
+  const total = fades ? tReady + M.live : end
   const e = Math.min(Math.max(raw, 0), total)
   const done = !reversed && raw >= total
   const undone = reversed && raw <= 0
   const frame: DiveFrame = {
     e, libF: 1, textF: 1, flash: 0, sliding: false, portal: null, aperture: null,
-    inB: 1, outB: 1, outA: 1, tile: null, live: 1, loading: 0, done, undone,
+    inB: 1, outB: 1, outA: 1, outLive: 1, tile: null, live: 1, loading: 0, done, undone,
   }
 
   if (forward) {
     const eMax = reversed ? (t.reversedFromE ?? e) : e
     frame.flash = 1 - smooth(eMax / M.flash)
     frame.textF = 1 - smooth(e / M.textFade)
-    frame.live = s.same ? 1 : t.held ? 0 : smooth((e - tReady) / M.live)
+    frame.live = fades ? smooth((e - tReady) / M.live) : 1
+    frame.outLive = s.same ? 1 : frame.live
     frame.loading = !s.same && !t.held && tReady > end + M.grace
       ? smooth((e - end - M.grace) / M.loadingFade) * (1 - smooth((e - tReady) / M.loadingFade))
       : 0
@@ -312,13 +360,14 @@ export function diveFrame(t: Transition, nowMs: number, dim: number): DiveFrame 
     frame.libF = 1 - smooth(e / M.fade)
     if (s.tile && s.screen) frame.tile = lerpPose(s.tile, s.screen, ease('out', e / M.flat))
   } else if (s.kind === 'back') {
-    const k = (1 - clamp01(e / M.grow)) ** A.growPow
+    frame.live = 1 - smooth(e / M.live)
+    const k = (1 - clamp01((e - M.live) / M.grow)) ** A.growPow
     frame.aperture = aperture(s.from, s.full, k)
     frame.outB = lerp(1, dim, smooth((0.8 - k) / 0.45))
     frame.libF = smooth((e - M.backLibDelay) / M.backLib)
     frame.textF = frame.libF
     const f = s.from
-    frame.portal = { az: f.az / DEG, y: f.rp * Math.sin(f.el), r: f.rp * Math.cos(f.el), s: 1, hover: 0, op: e >= M.grow ? 1 : 0 }
+    frame.portal = { az: f.az / DEG, y: f.rp * Math.sin(f.el), r: f.rp * Math.cos(f.el), s: 1, hover: 0, op: e >= end ? 1 : 0 }
   } else {
     frame.libF = smooth((e - M.backLibDelay) / M.backLib)
     frame.textF = frame.libF
@@ -455,7 +504,6 @@ export interface PortalSceneItem {
   row: number
   mediaId: number | null
   stillMs: number | null
-  live: boolean
   lift: Keyframe
   shade: Keyframe
   enter: Keyframe

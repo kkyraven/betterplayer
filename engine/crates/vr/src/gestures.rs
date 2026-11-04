@@ -24,10 +24,14 @@ pub enum Shortcut {
     PointRight,
     ReleaseLeft,
     ReleaseRight,
+    GripLeft,
+    GripRight,
+    GripReleaseLeft,
+    GripReleaseRight,
 }
 
 impl Shortcut {
-    pub const ALL: [Shortcut; 12] = [
+    pub const ALL: [Shortcut; 16] = [
         Shortcut::PlayPause,
         Shortcut::SeekBack,
         Shortcut::SeekForward,
@@ -40,6 +44,10 @@ impl Shortcut {
         Shortcut::PointRight,
         Shortcut::ReleaseLeft,
         Shortcut::ReleaseRight,
+        Shortcut::GripLeft,
+        Shortcut::GripRight,
+        Shortcut::GripReleaseLeft,
+        Shortcut::GripReleaseRight,
     ];
 
     pub fn name(self) -> &'static str {
@@ -56,6 +64,10 @@ impl Shortcut {
             Shortcut::PointRight => "pointRight",
             Shortcut::ReleaseLeft => "releaseLeft",
             Shortcut::ReleaseRight => "releaseRight",
+            Shortcut::GripLeft => "gripLeft",
+            Shortcut::GripRight => "gripRight",
+            Shortcut::GripReleaseLeft => "gripReleaseLeft",
+            Shortcut::GripReleaseRight => "gripReleaseRight",
         }
     }
 }
@@ -67,6 +79,8 @@ pub enum Action {
     Controls,
     PointLeft,
     PointRight,
+    GripLeft,
+    GripRight,
     SeekBack,
     SeekForward,
     VolumeUp,
@@ -75,12 +89,14 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 10] = [
+    pub const ALL: [Action; 12] = [
         Action::PlayPause,
         Action::Back,
         Action::Controls,
         Action::PointLeft,
         Action::PointRight,
+        Action::GripLeft,
+        Action::GripRight,
         Action::SeekBack,
         Action::SeekForward,
         Action::VolumeUp,
@@ -95,6 +111,8 @@ impl Action {
             Action::Controls => c"/actions/watch/in/controls",
             Action::PointLeft => c"/actions/watch/in/point_left",
             Action::PointRight => c"/actions/watch/in/point_right",
+            Action::GripLeft => c"/actions/watch/in/grip_left",
+            Action::GripRight => c"/actions/watch/in/grip_right",
             Action::SeekBack => c"/actions/watch/in/seek_back",
             Action::SeekForward => c"/actions/watch/in/seek_forward",
             Action::VolumeUp => c"/actions/watch/in/volume_up",
@@ -118,6 +136,8 @@ impl Action {
         match self {
             Action::PointLeft => Some((Shortcut::PointLeft, Shortcut::ReleaseLeft)),
             Action::PointRight => Some((Shortcut::PointRight, Shortcut::ReleaseRight)),
+            Action::GripLeft => Some((Shortcut::GripLeft, Shortcut::GripReleaseLeft)),
+            Action::GripRight => Some((Shortcut::GripRight, Shortcut::GripReleaseRight)),
             _ => None,
         }
     }
@@ -366,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn each_trigger_fires_on_press_and_on_release() {
+    fn each_trigger_and_grip_fires_on_press_and_on_release() {
         let t = Instant::now();
         let mut g = ready(t);
         assert_eq!(fired(&mut g, t, 0, &[Action::PointRight]), [Shortcut::PointRight]);
@@ -374,6 +394,8 @@ mod tests {
         assert_eq!(fired(&mut g, t, 2100, &[]), [Shortcut::ReleaseRight], "a long hold still releases");
         assert_eq!(fired(&mut g, t, 2200, &[Action::PointLeft]), [Shortcut::PointLeft]);
         assert_eq!(fired(&mut g, t, 2250, &[]), [Shortcut::ReleaseLeft]);
+        assert_eq!(fired(&mut g, t, 2260, &[Action::GripRight]), [Shortcut::GripRight], "a grip as a trigger");
+        assert_eq!(fired(&mut g, t, 2270, &[]), [Shortcut::GripReleaseRight]);
         assert_eq!(fired(&mut g, t, 2300, &[Action::PointLeft]), [Shortcut::PointLeft]);
         assert_eq!(g.step(at(t, 2400), [None; N], None).shortcuts, [Shortcut::ReleaseLeft]);
         assert_eq!(g.step(at(t, 2500), [None; N], None).shortcuts, NONE);

@@ -35,6 +35,9 @@ mod smoke {
         if args.first().map(String::as_str) == Some("portals") {
             return portals(&args[1..]);
         }
+        if args.first().map(String::as_str) == Some("dive") {
+            return dive(&args[1..]);
+        }
         let [file, kind, layout, fov, seconds, out, flags @ ..] = args.as_slice() else {
             return Err("usage: vr_smoke <file> <kind> <layout> <fov> <seconds> <out> [swap] [window=WxH] [screen=DEG] [turn=DEG]".into());
         };
@@ -245,7 +248,7 @@ mod smoke {
     }
 
     pub fn portals(args: &[String]) -> Result<(), String> {
-        use bp_player::portals::{self as p, Dive, DiveKind, ItemKind, Keyframe, PORTAL, PortalBand, PortalItem, PortalScene, ROWS_BAND, STRIP_BAND, StillInfo};
+        use bp_player::portals::{self as p, Dive, DiveKind};
         let [file, out, flags @ ..] = args else {
             return Err("usage: vr_smoke portals <file> <out> [layout=sbs]".into());
         };
@@ -259,53 +262,7 @@ mod smoke {
         player.vr_view(VrView::parse("equirect180", layout, 190.0, None, false)?)?;
         player.vr_start().wait()?;
         player.vr_recentre(false)?;
-        wait_for(|| p::last_head().is_some(), 10, "the head was never tracked")?;
-        sleep(Duration::from_millis(300));
-        let head = p::last_head().ok_or("no head")?;
-        let seat = bp_vr::Recentre::from_head(&head);
-
-        let band = |spec: &p::BandSpec, which: p::Band| {
-            let l = p::band_layout(spec);
-            PortalBand { band: which, pose: bp_vr::panel(&seat, l.distance as f32, l.drop as f32, l.pitch as f32), metres: l.metres, curvature: l.curvature, width: l.width, height: l.height }
-        };
-        let mut items = Vec::new();
-        for (row, (name, el)) in [("top", 2.5), ("bottom", -13.7)].into_iter().enumerate() {
-            for i in 0..4 {
-                let az = (i as f64 - 1.5) * p::step_deg();
-                let (x, y) = p::band_texel(&ROWS_BAND, az, el);
-                items.push(PortalItem {
-                    key: format!("{name}-{i}"),
-                    x,
-                    y,
-                    size: PORTAL,
-                    row: row as i32,
-                    kind: ItemKind::Still,
-                    slot: Some((row * 4 + i) as u32),
-                    lift: Keyframe::still(if name == "top" && i == 1 { 1.0 } else { 0.0 }),
-                    shade: Keyframe::still(1.0),
-                    enter: Keyframe::still(1.0),
-                    dz: 0.0,
-                    op: 1.0,
-                });
-            }
-        }
-        let scene = PortalScene {
-            rev: 1,
-            seat,
-            bands: vec![band(&ROWS_BAND, p::Band::Rows), band(&STRIP_BAND, p::Band::Strip)],
-            items,
-            scroll: vec![Keyframe::still(0.0); 3],
-            shown: Keyframe::still(1.0),
-            fade: Keyframe::still(1.0),
-            dim: 0.32,
-        };
-        player.vr_portals(scene)?;
-        let shelf = || StillInfo { equirect: true, half_h_deg: 36.0, half_v_deg: 27.0, width: 1024, height: 768, key: None };
-        for slot in 0..8 {
-            player.vr_still(slot, &grid(1024, 768, 72.0, 54.0, slot), shelf())?;
-        }
-        player.vr_still(16, &grid(2048, 2048, 180.0, 180.0, 1), StillInfo { equirect: true, half_h_deg: 90.0, half_v_deg: 90.0, width: 2048, height: 2048, key: Some("top-1".into()) })?;
-        sleep(Duration::from_millis(500));
+        shelf(&player)?;
 
         let frames = |seconds: f64, upload: bool| -> Result<Vec<f64>, String> {
             let mut ms = Vec::new();
@@ -314,7 +271,7 @@ mod smoke {
             let mut slot = 0;
             while start.elapsed().as_secs_f64() < seconds {
                 if upload {
-                    player.vr_still(slot % 8, &grid(1024, 768, 72.0, 54.0, slot % 8), shelf())?;
+                    player.vr_still(slot % 8, &grid(1024, 1024, 180.0, 180.0, slot % 8), shelf_still())?;
                     slot += 1;
                 }
                 sleep(Duration::from_millis(1));
@@ -406,6 +363,176 @@ mod smoke {
             Some(s) if s.active && s.frames > 0 => Err(format!("the dive never went live: {status:?}")),
             s => Err(format!("the headset did not get frames: {s:?}")),
         }
+    }
+
+    pub fn dive(args: &[String]) -> Result<(), String> {
+        use bp_player::portals::{self as p, Dive, DiveKind};
+        let rounds: usize = args.iter().find_map(|a| a.strip_prefix("rounds=")).map_or(Ok(3), str::parse).map_err(|_| "rounds=N")?;
+        let verbose = args.iter().any(|a| a == "log");
+        let other = args.iter().any(|a| a == "other");
+        let extra: Vec<(String, String)> = args.iter().filter_map(|a| a.strip_prefix("mpv=")?.split_once('=')).map(|(k, v)| (k.into(), v.into())).collect();
+        let args: Vec<&String> = args.iter().filter(|a| !a.starts_with("rounds=") && !a.starts_with("mpv=") && a.as_str() != "log" && a.as_str() != "other").collect();
+        let [out, first, files @ ..] = args.as_slice() else {
+            return Err("usage: vr_smoke dive <out.json> <first> <file>... [rounds=N]".into());
+        };
+        if files.is_empty() {
+            return Err("no file to dive into".into());
+        }
+        let view = |file: &str| if file.contains("_360") { VrView::parse("equirect360", "mono", 190.0, None, false) } else { VrView::parse("equirect180", "sbs", 190.0, None, false) };
+        let mut mpv_options = vec![("keepaspect".into(), "no".into())];
+        mpv_options.extend(extra);
+
+        let player = Player::new(64, 64, PlayerOptions { mpv_options, verbose, ..PlayerOptions::default() }, None)?;
+        player.set_presenting(false)?;
+        player.load(first, None)?;
+        wait_for(|| player.has_video(), 15, &format!("{first} showed no picture"))?;
+        player.play()?;
+        player.vr_view(view(first)?)?;
+        player.vr_start().wait()?;
+        player.vr_recentre(false)?;
+        bp_player::frame_log::json(p::now_ms());
+        shelf(&player)?;
+        let refresh = player.vr_status().map_or(90.0, |s| s.refresh_hz as f64);
+        let period = 1000.0 / refresh;
+        println!("headset at {refresh:.0} Hz: a frame is late past {:.1} ms", period * 1.5);
+        sleep(Duration::from_secs(1));
+        let second = if other {
+            let second = Player::new(64, 64, PlayerOptions { mpv_options: vec![("keepaspect".into(), "no".into())], ..PlayerOptions::default() }, None)?;
+            second.set_presenting(false)?;
+            Some(second)
+        } else {
+            None
+        };
+        sleep(Duration::from_millis(500));
+        let began = p::now_ms();
+        let az = (1.0 - 1.5) * p::step_deg();
+        let dist = az.hypot(2.5 - p::dive_el_deg());
+        let slide = if dist < p::SLIDE_MIN_DEG { 0.0 } else { p::ms::SLIDE_BASE + p::ms::SLIDE_PER_DEG * dist };
+        let mut summary: Vec<(String, Vec<(f64, usize, u64)>)> = files.iter().map(|f| (f.to_string(), Vec::new())).collect();
+        for round in 0..rounds {
+            for (i, file) in files.iter().enumerate() {
+                let _ = player.take_log();
+                let press = p::now_ms();
+                if let Some(second) = &second {
+                    second.load(file, Some(1.0))?;
+                    second.play()?;
+                } else {
+                    player.vr_dive(Dive { kind: DiveKind::Vr, key: "top-1".into(), start_ms: press, slide_ms: slide, same: false, full: 180, screen_deg: 50.0, aspect: 16.0 / 9.0 })?;
+                    player.vr_keyframe_start(true);
+                    player.load(file, Some(1.0))?;
+                    player.play()?;
+                    player.vr_view(view(file)?)?;
+                }
+                if verbose {
+                    while p::now_ms() < press + 3000.0 {
+                        for line in player.take_log() {
+                            println!("  {:7.1} {}", p::now_ms() - press, line.trim_end());
+                        }
+                        sleep(Duration::from_millis(1));
+                    }
+                } else {
+                    sleep(Duration::from_millis(3000));
+                }
+                let status = player.vr_portal_status();
+                let log: serde_json::Value = serde_json::from_str(&bp_player::frame_log::json(press)).map_err(|e| e.to_string())?;
+                let rows = |key: &str| log[key].as_array().cloned().unwrap_or_default();
+                let num = |row: &serde_json::Value, i: usize| row[i].as_f64().unwrap_or(0.0);
+                let until = press + 3000.0;
+                let drawn: Vec<_> = rows("drawn").into_iter().filter(|r| num(r, 0) <= until).collect();
+                let gaps: Vec<f64> = drawn.iter().skip(1).map(|r| num(r, 5)).collect();
+                let longest = gaps.iter().copied().fold(0.0, f64::max);
+                let late = gaps.iter().filter(|&&g| g > period * 1.5).count();
+                let cpu = drawn.iter().map(|r| num(r, 1)).fold(0.0, f64::max);
+                let shown: Vec<_> = rows("shown").into_iter().filter(|r| num(r, 0) <= until).collect();
+                let dropped: u64 = shown.iter().map(|r| num(r, 4) as u64).sum();
+                let repeated = shown.iter().filter(|r| num(r, 2) > 1.0).count() as u64;
+                let mut held: Vec<_> = rows("held").into_iter().filter(|r| num(r, 0) <= until).collect();
+                held.sort_by(|a, b| num(b, 2).total_cmp(&num(a, 2)));
+                let held: Vec<String> = held.iter().take(4).map(|r| format!("{:.1} ms at +{:.0} (waited {:.1}) {}", num(r, 2), num(r, 0) - press, num(r, 1), r[3].as_str().unwrap_or(""))).collect();
+                let live = status.live_at_ms.map_or("never".into(), |at| format!("{:.0} ms", at - press));
+                println!(
+                    "round {round} {}: longest gap {longest:.1} ms, {late} late of {} frames, longest cpu {cpu:.1} ms; compositor {dropped} dropped, {repeated} shown again; live after {live}; held: {}",
+                    file.rsplit(['/', '\\']).next().unwrap_or(file),
+                    drawn.len(),
+                    if held.is_empty() { "none".into() } else { held.join(", ") },
+                );
+                summary[i].1.push((longest, late, dropped + repeated));
+            }
+        }
+        for (file, dives) in &summary {
+            let mut longest: Vec<f64> = dives.iter().map(|d| d.0).collect();
+            longest.sort_by(f64::total_cmp);
+            let late: usize = dives.iter().map(|d| d.1).sum();
+            let missed: u64 = dives.iter().map(|d| d.2).sum();
+            println!(
+                "{}: {} dives, longest gap median {:.1} max {:.1} ms; late frames {:.1} a dive; compositor misses {:.1} a dive",
+                file.rsplit(['/', '\\']).next().unwrap_or(file),
+                dives.len(),
+                longest[longest.len() / 2],
+                longest.last().copied().unwrap_or(0.0),
+                late as f64 / dives.len() as f64,
+                missed as f64 / dives.len() as f64,
+            );
+        }
+        std::fs::write(out, bp_player::frame_log::json(began)).map_err(|e| e.to_string())?;
+        println!("wrote {out}");
+        let _ = player.vr_stop().wait();
+        Ok(())
+    }
+
+    fn shelf_still() -> bp_player::portals::StillInfo {
+        bp_player::portals::StillInfo { equirect: true, half_h_deg: 90.0, half_v_deg: 90.0, width: 1024, height: 1024, key: None }
+    }
+
+    fn shelf(player: &Player) -> Result<(), String> {
+        use bp_player::portals::{self as p, ItemKind, Keyframe, PORTAL, PortalBand, PortalItem, PortalScene, ROWS_BAND, STRIP_BAND, StillInfo};
+        wait_for(|| p::last_head().is_some(), 10, "the head was never tracked")?;
+        sleep(Duration::from_millis(300));
+        let head = p::last_head().ok_or("no head")?;
+        let seat = bp_vr::Recentre::from_head(&head);
+
+        let band = |spec: &p::BandSpec, which: p::Band| {
+            let l = p::band_layout(spec);
+            PortalBand { band: which, pose: bp_vr::panel(&seat, l.distance as f32, l.drop as f32, l.pitch as f32), metres: l.metres, curvature: l.curvature, width: l.width, height: l.height }
+        };
+        let mut items = Vec::new();
+        for (row, (name, el)) in [("top", 2.5), ("bottom", -13.7)].into_iter().enumerate() {
+            for i in 0..4 {
+                let az = (i as f64 - 1.5) * p::step_deg();
+                let (x, y) = p::band_texel(&ROWS_BAND, az, el);
+                items.push(PortalItem {
+                    key: format!("{name}-{i}"),
+                    x,
+                    y,
+                    size: PORTAL,
+                    row: row as i32,
+                    kind: ItemKind::Still,
+                    slot: Some((row * 4 + i) as u32),
+                    lift: Keyframe::still(if name == "top" && i == 1 { 1.0 } else { 0.0 }),
+                    shade: Keyframe::still(1.0),
+                    enter: Keyframe::still(1.0),
+                    dz: 0.0,
+                    op: 1.0,
+                });
+            }
+        }
+        let scene = PortalScene {
+            rev: 1,
+            seat,
+            bands: vec![band(&ROWS_BAND, p::Band::Rows), band(&STRIP_BAND, p::Band::Strip)],
+            items,
+            scroll: vec![Keyframe::still(0.0); 3],
+            shown: Keyframe::still(1.0),
+            fade: Keyframe::still(1.0),
+            dim: 0.32,
+        };
+        player.vr_portals(scene)?;
+        for slot in 0..8 {
+            player.vr_still(slot, &grid(1024, 1024, 180.0, 180.0, slot), shelf_still())?;
+        }
+        player.vr_still(16, &grid(2048, 2048, 180.0, 180.0, 1), StillInfo { equirect: true, half_h_deg: 90.0, half_v_deg: 90.0, width: 2048, height: 2048, key: Some("top-1".into()) })?;
+        sleep(Duration::from_millis(500));
+        Ok(())
     }
 
     fn wait_for(ok: impl Fn() -> bool, seconds: u64, what: &str) -> Result<(), String> {

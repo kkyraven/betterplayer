@@ -107,7 +107,12 @@ pub(crate) struct Headset(std::convert::Infallible);
 
 #[cfg(not(windows))]
 impl Headset {
-    pub fn start(_: &crate::gl_context::GlContext, _: VrView, _: std::sync::Arc<std::sync::Mutex<Option<VrStatus>>>) -> Result<Headset, String> {
+    pub fn start(
+        _: &crate::gl_context::GlContext,
+        _: VrView,
+        _: std::sync::Arc<std::sync::Mutex<Option<VrStatus>>>,
+        _: std::sync::mpsc::Sender<crate::render::Msg>,
+    ) -> Result<Headset, String> {
         Err("not-installed: SteamVR needs Windows".into())
     }
     pub fn view(&mut self, _: VrView) {
@@ -116,16 +121,10 @@ impl Headset {
     pub fn recentre(&mut self, _: bool) {
         match self.0 {}
     }
-    pub fn draw_video(&mut self, _: *mut crate::mpv::mpv_render_context, _: (u32, u32)) -> bool {
+    pub fn draw_video(&mut self, _: *mut crate::mpv::mpv_render_context, _: (u32, u32), _: bool) -> bool {
         match self.0 {}
     }
-    pub fn copy_video(&self, _: u32, _: u32, _: u32) -> bool {
-        match self.0 {}
-    }
-    pub fn overdue(&self) -> bool {
-        match self.0 {}
-    }
-    pub fn frame(&mut self) {
+    pub fn copy_video(&mut self, _: u32, _: u32, _: u32) -> bool {
         match self.0 {}
     }
     pub fn ended(&self) -> bool {

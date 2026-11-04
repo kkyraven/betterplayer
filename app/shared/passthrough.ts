@@ -61,7 +61,18 @@ export interface ResolvedPassthrough {
   candidates: number[]
   aiReady: boolean
   maskDir?: string
+  alpha?: string
 }
+
+export const ALPHA_SUFFIX = '_XALPHA'
+
+export interface AlphaFile {
+  path: string
+  bytes: number
+  beside: boolean
+}
+
+export const isAlphaName = (name: string) => /_XALPHA\.\w+$/i.test(name)
 
 export const PASSTHROUGH_MODELS = ['people', 'skin'] as const
 export type PassthroughModel = (typeof PASSTHROUGH_MODELS)[number]
@@ -222,7 +233,7 @@ export function resolvePassthrough(saved: PassthroughSettings | undefined, name:
   const nameOn = saved === undefined && /passthrough/i.test(name)
   const settings = saved ?? { ...PASSTHROUGH_DEFAULTS, on: nameOn }
   const autoColour = auto ? (auto.key ?? auto.candidates[0] ?? null) : null
-  const wanted = settings.mode ?? (auto !== null && auto.key === null ? 'ai' : 'colour')
+  const wanted = settings.mode ?? (aiReady ? 'ai' : 'colour')
   return {
     settings,
     on: settings.on,

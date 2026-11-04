@@ -25,6 +25,7 @@ export interface HereSphereScene {
   scripts: { name: string; url: string }[]
   tags: { name: string; start?: number; end?: number; track?: number }[]
   media: { name: string; sources: { resolution: number; height: number; width: number; size: number; url: string }[] }[]
+  alphaExternal?: string
   writeFavorite: boolean
   writeRating: boolean
   writeTags: boolean
@@ -64,7 +65,7 @@ export function hereSphereIndex(sections: { name: string; rows: MediaIndexRow[] 
   }
 }
 
-export function hereSphereScene(detail: MediaDetail, projection: Projection, base: string): HereSphereScene {
+export function hereSphereScene(detail: MediaDetail, projection: Projection, base: string, alpha = false): HereSphereScene {
   const scripts = detail.scripts
     .filter((s) => s.container === 'sibling')
     .sort((a, b) => Number(b.axis === 'L0') - Number(a.axis === 'L0'))
@@ -99,6 +100,7 @@ export function hereSphereScene(detail: MediaDetail, projection: Projection, bas
         ],
       },
     ],
+    ...(alpha ? { alphaExternal: `${base}/alpha/${detail.id}` } : {}),
     writeFavorite: true,
     writeRating: true,
     writeTags: true,

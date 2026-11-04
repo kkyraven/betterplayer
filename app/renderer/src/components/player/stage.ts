@@ -1,3 +1,17 @@
+import {
+  KEY_FILL,
+  KEY_FILL_FAR_FROM,
+  KEY_FILL_FAR_TO,
+  KEY_FILL_NEAR_FROM,
+  KEY_FILL_NEAR_TO,
+  KEY_GREY_FROM,
+  KEY_GREY_TO,
+  KEY_SOFT_FROM,
+  KEY_SOFT_TO,
+  KEY_SPILL,
+  eyeRect,
+  type FeatherKind,
+} from '@shared/passthrough'
 import { flatEye, lensDegrees, type Projection } from '@shared/projection'
 import * as client from '@/engine/client'
 import { side } from '@/engine/side'
@@ -14,6 +28,19 @@ const TRACK_MIN_INTERVAL_MS = 1000 / 30
 const CENSOR_WAIT_MS = 100
 const CENSOR_CATCH_UP_MS = 34
 const RESIZE_SETTLE_MS = 120
+const MATTE_POLL_MS = 250
+
+export type StageKeying =
+  | { kind: 'colour'; key: number; feather: FeatherKind; featherPx: number }
+  | { kind: 'mask'; featherPx: number }
+
+function sameKeying(a: StageKeying | null, b: StageKeying | null): boolean {
+  if (a === null || b === null) return a === b
+  if (a.kind === 'mask' || b.kind === 'mask') return a.kind === b.kind && a.featherPx === b.featherPx
+  return a.key === b.key && a.feather === b.feather && a.featherPx === b.featherPx
+}
+
+const glf = (n: number) => (Number.isInteger(n) ? n.toFixed(1) : String(n))
 
 function tracksFrames(): boolean {
   const tracking = useTracking.getState()
@@ -48,8 +75,31 @@ uniform int maskMode;
 uniform float maskLevel;
 uniform int boxCount;
 uniform vec4 boxes[MAX_BOXES];
+// 1 keys keyColour out, 2 keys by the AI mask (matte); 0 keys nothing.
+uniform int keying;
+uniform vec3 keyColour;
+// 0 Edges, 1 Colour distance.
+uniform int feather;
+uniform float featherPx;
+// Source pixels across the eye shown, and that eye's rectangle in 0 to 1 of the whole frame.
+uniform vec2 eyeSrc;
+uniform vec4 eyeRect;
+uniform sampler2D matte;
 in vec2 uv;
 out vec4 o;
+// Alpha this near 0 or 1 draws as 0 or 1: under half a step of 8 bits.
+const float NEAR = 0.5 / 255.0;
+// KEY_* in app/shared/passthrough.ts.
+const float SOFT_FROM = ${glf(KEY_SOFT_FROM)};
+const float SOFT_TO = ${glf(KEY_SOFT_TO)};
+const float GREY_FROM = ${glf(KEY_GREY_FROM)};
+const float GREY_TO = ${glf(KEY_GREY_TO)};
+const float SPILL = ${glf(KEY_SPILL)};
+const float FILL = ${glf(KEY_FILL)};
+const float FILL_NEAR_FROM = ${glf(KEY_FILL_NEAR_FROM)};
+const float FILL_NEAR_TO = ${glf(KEY_FILL_NEAR_TO)};
+const float FILL_FAR_FROM = ${glf(KEY_FILL_FAR_FROM)};
+const float FILL_FAR_TO = ${glf(KEY_FILL_FAR_TO)};
 float masked(vec2 t) {
   float feather = maskMode == 1 ? 0.015 : 0.0;
   float m = skinOn == 1 ? smoothstep(0.35, 0.65, texture(skin, t).r) : 0.0;
@@ -75,21 +125,144 @@ vec4 hidden(sampler2D s, vec2 t) {
     + textureLod(s, t + vec2(0.0, px.y), lod) + textureLod(s, t - vec2(0.0, px.y), lod);
   return sum / 6.0;
 }
-vec4 pickFrom(sampler2D s, vec2 t) {
-  vec4 c = texture(s, t);
-  if (maskMode != 0 && (boxCount > 0 || skinOn == 1)) {
-    float m = masked(t);
-    if (m > 0.0) c = mix(c, hidden(s, t), m);
-  }
+vec4 rgba(vec4 c) {
   return bgra == 1 ? c.bgra : c;
-}
-vec4 pick(vec2 t) {
-  return split == 1 && uv.x >= 0.5 ? pickFrom(tex2, t) : pickFrom(tex, t);
 }
 vec2 eyeOf(vec2 t) {
   if (eyes == 1) t.x = t.x * 0.5 + float(eye) * 0.5;
   else if (eyes == 2) t.y = t.y * 0.5 + float(eye) * 0.5;
   return t;
+}
+// The eye's share of the texture: all of it when frames hold only the eye shown.
+vec2 share() {
+  return eyes == 1 ? vec2(0.5, 1.0) : eyes == 2 ? vec2(1.0, 0.5) : vec2(1.0);
+}
+// The picture at t in the eye, kept inside it, at mip level lod.
+vec3 at(sampler2D s, vec2 t, float lod) {
+  return rgba(textureLod(s, eyeOf(clamp(t, 0.0, 1.0)), lod)).rgb;
+}
+// BT.601 full range, as ycbcr in passthrough.ts.
+vec3 ycc(vec3 c) {
+  return vec3(dot(c, vec3(0.299, 0.587, 0.114)), 0.5 + dot(c, vec3(-0.168736, -0.331264, 0.5)), 0.5 + dot(c, vec3(0.5, -0.418688, -0.081312)));
+}
+// BT.601 full range back to RGB.
+vec3 rgb(vec3 y) {
+  return y.x + vec3(1.402 * (y.z - 0.5), -0.344136 * (y.y - 0.5) - 0.714136 * (y.z - 0.5), 1.772 * (y.y - 0.5));
+}
+// How much of colour c shows over key, 0 to 1. A saturated key fades by chroma distance, whole
+// at SOFT_TO of the key's own chroma; a black, white or grey key by the largest channel difference.
+float shows(vec3 c, vec3 key) {
+  vec2 k = ycc(key).yz;
+  float sat = distance(k, vec2(0.5));
+  float chroma = clamp((distance(ycc(c).yz, k) - SOFT_FROM) / max(SOFT_TO * sat - SOFT_FROM, 0.001), 0.0, 1.0);
+  vec3 d = abs(c - key);
+  float grey = clamp((max(d.r, max(d.g, d.b)) - GREY_FROM) / (GREY_TO - GREY_FROM), 0.0, 1.0);
+  return mix(grey, chroma, smoothstep(0.05, 0.15, sat));
+}
+// Colour c as the picture's own where a of it shows: the key's share taken out, then the key's
+// hue (spill) kept only past SPILL of the chroma across it. A grey key has no hue to take.
+vec3 unkeyed(vec3 c, vec3 key, float a) {
+  if (a <= 0.0) return c;
+  vec3 y = ycc(clamp((c - (1.0 - a) * key) / a, 0.0, 1.0));
+  vec2 k = ycc(key).yz - 0.5;
+  float sat = length(k);
+  vec2 along = k / max(sat, 0.001);
+  vec2 v = y.yz - 0.5;
+  float spill = max(dot(v, along) - abs(dot(v, vec2(along.y, -along.x))) * SPILL, 0.0);
+  y.yz -= along * spill * smoothstep(0.05, 0.15, sat);
+  return clamp(rgb(y), 0.0, 1.0);
+}
+// How much c, a mip level's mean, hits the picture over a black, white or grey key.
+float hits(vec3 c, float from, float to) {
+  vec3 d = abs(c - keyColour);
+  return smoothstep(from, to, max(d.r, max(d.g, d.b)));
+}
+// How much the picture encloses t, for a black, white or grey key: of 8 rays FILL of the eye's
+// width long, the least by the more its 2 taps hit the picture. As enclosed in vr.rs.
+float enclosed(sampler2D s, vec2 t) {
+  vec2 eyePx = vec2(textureSize(s, 0)) * share();
+  vec2 reach = FILL * eyePx.x / eyePx;
+  float lod = log2(FILL * eyePx.x / 4.0);
+  vec3 d = abs(at(s, t, lod + 3.0) - keyColour);
+  if (max(d.r, max(d.g, d.b)) < GREY_FROM) return 0.0;
+  float least = 1.0;
+  for (int i = 0; i < 8 && least > 0.0; i++) {
+    float a = float(i / 2) * PI * 0.25 + float(i % 2) * PI;
+    vec2 ray = reach * vec2(cos(a), sin(a));
+    float most = hits(at(s, t + ray * 0.375, lod), FILL_NEAR_FROM, FILL_NEAR_TO);
+    if (most < 1.0) most = max(most, hits(at(s, t + ray * 0.875, lod), FILL_FAR_FROM, FILL_FAR_TO));
+    least = min(least, most);
+  }
+  return least;
+}
+// How much of the picture shows at t, whose colour is c; own is how much c alone shows. Edges
+// takes the lesser of that and its taps' mean; Colour distance shows whole where every tap shows,
+// hides where none do, and follows the colour between. As keyAlpha in vr.rs.
+float keyAlpha(sampler2D s, vec2 t, vec3 c, out float own) {
+  own = shows(c, keyColour);
+  float k = own;
+  if (featherPx > 0.0 && (feather == 1 || own > NEAR)) {
+    vec2 r = featherPx / eyeSrc;
+    float v = shows(at(s, t + r * vec2(1.0, 0.0), 0.0), keyColour);
+    float sum = own + v;
+    float least = v;
+    float most = v;
+    bool settled = feather == 1 && (v >= 0.5 ? own >= 1.0 - NEAR : own <= NEAR);
+    if (!settled) {
+      for (int i = 1; i < 8; i++) {
+        float a = float(i) * PI * 0.25;
+        v = shows(at(s, t + r * vec2(cos(a), sin(a)), 0.0), keyColour);
+        sum += v;
+        least = min(least, v);
+        most = max(most, v);
+      }
+    }
+    k = feather == 0 ? min(own, sum / 9.0) : settled ? own : least > 0.5 ? 1.0 : most < 0.5 ? 0.0 : own;
+  }
+  float grey = 1.0 - smoothstep(0.05, 0.15, length(ycc(keyColour).yz - 0.5));
+  if (grey > 0.0 && k < 1.0) k = max(k, grey * enclosed(s, t));
+  return k;
+}
+// The AI mask at t in the eye, half a cell inside the eye's cells so the other eye's never blend in.
+float matteAt(vec2 t) {
+  vec2 inset = 0.5 / vec2(textureSize(matte, 0));
+  vec2 f = eyeRect.xy + clamp(t, 0.0, 1.0) * eyeRect.zw;
+  return texture(matte, clamp(f, eyeRect.xy + inset, eyeRect.xy + eyeRect.zw - inset)).r;
+}
+// The AI mask softened by the same taps as Edges, as maskAlpha in vr.rs.
+float matteAlpha(vec2 t) {
+  float sum = matteAt(t);
+  if (featherPx > 0.0) {
+    vec2 r = featherPx / eyeSrc;
+    for (int i = 0; i < 8; i++) {
+      float a = float(i) * PI * 0.25;
+      sum += matteAt(t + r * vec2(cos(a), sin(a)));
+    }
+    sum /= 9.0;
+  }
+  return smoothstep(0.35, 0.65, sum);
+}
+// The picture at t in the eye: keyed, censored, then over black by how much of it shows.
+vec3 pickFrom(sampler2D s, vec2 t) {
+  vec2 tt = eyeOf(t);
+  vec3 c = rgba(texture(s, tt)).rgb;
+  float a = 1.0;
+  if (keying == 1) {
+    float own;
+    a = keyAlpha(s, t, c, own);
+    // Unmixed by the larger, so a filled hole keeps its own colour and an eroded edge loses none.
+    c = unkeyed(c, keyColour, max(own, a));
+  } else if (keying == 2) {
+    a = matteAlpha(t);
+  }
+  if (maskMode != 0 && (boxCount > 0 || skinOn == 1)) {
+    float m = masked(tt);
+    if (m > 0.0) c = mix(c, rgba(hidden(s, tt)).rgb, m);
+  }
+  return c * a;
+}
+vec4 pick(vec2 t) {
+  return vec4(split == 1 && uv.x >= 0.5 ? pickFrom(tex2, t) : pickFrom(tex, t), 1.0);
 }
 void main() {
   float outA = outSize.x / outSize.y;
@@ -100,7 +273,7 @@ void main() {
     if (s > 1.005) t.y *= s; else if (s < 0.995) t.x /= s;
     t += 0.5;
     if (t.x < 0.0 || t.x > 1.0 || t.y < 0.0 || t.y > 1.0) { o = vec4(0.0, 0.0, 0.0, 1.0); return; }
-    o = pick(eyeOf(t));
+    o = pick(t);
     return;
   }
   float tanV = tan(look.z * 0.5);
@@ -123,7 +296,7 @@ void main() {
     float phi = atan(d.y, d.x);
     t = vec2(0.5 + r * cos(phi), 0.5 - r * sin(phi));
   }
-  o = pick(eyeOf(t));
+  o = pick(t);
 }`
 
 function compile(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader {
@@ -146,7 +319,7 @@ const DEFAULT_LOOK: Look = { yaw: 0, pitch: 0, fov: (90 * Math.PI) / 180 }
 class Stage {
   readonly canvas = document.createElement('canvas')
   private readonly gl: WebGL2RenderingContext
-  private uniforms!: Record<'mode' | 'hfov' | 'eyes' | 'eye' | 'outSize' | 'eyeSize' | 'look' | 'maskMode' | 'maskLevel' | 'boxCount' | 'boxes' | 'split' | 'skinOn', WebGLUniformLocation | null>
+  private uniforms!: Record<'mode' | 'hfov' | 'eyes' | 'eye' | 'outSize' | 'eyeSize' | 'look' | 'maskMode' | 'maskLevel' | 'boxCount' | 'boxes' | 'split' | 'skinOn' | 'keying' | 'keyColour' | 'feather' | 'featherPx' | 'eyeSrc' | 'eyeRect', WebGLUniformLocation | null>
   private lost = false
   private tex: WebGLTexture | null = null
   private tex2: WebGLTexture | null = null
@@ -176,6 +349,10 @@ class Stage {
   private pending: { serial: number; first: number; since: number } | null = null
   private mips = false
   private mips2 = false
+  private keying: StageKeying | null = stageKeying
+  private matteTex: WebGLTexture | null = null
+  private matteIndex = -1
+  private matteAskedAt = 0
 
   constructor() {
     const { canvas } = this
@@ -189,6 +366,8 @@ class Stage {
       this.lost = true
     })
     canvas.addEventListener('webglcontextrestored', () => {
+      this.matteTex = null
+      this.matteIndex = -1
       this.initGl()
       this.tex = null
       this.tex2 = null
@@ -250,10 +429,83 @@ class Stage {
     gl.uniform1i(u('tex'), 0)
     gl.uniform1i(u('tex2'), 1)
     gl.uniform1i(u('skin'), 2)
+    gl.uniform1i(u('matte'), 3)
     gl.uniform1i(u('bgra'), client.engine.bgra() ? 1 : 0)
     gl.uniform1i(u('split'), this.split ? 1 : 0)
-    this.uniforms = { mode: u('mode'), hfov: u('hfov'), eyes: u('eyes'), eye: u('eye'), outSize: u('outSize'), eyeSize: u('eyeSize'), look: u('look'), maskMode: u('maskMode'), maskLevel: u('maskLevel'), boxCount: u('boxCount'), boxes: u('boxes'), split: u('split'), skinOn: u('skinOn') }
+    this.uniforms = { mode: u('mode'), hfov: u('hfov'), eyes: u('eyes'), eye: u('eye'), outSize: u('outSize'), eyeSize: u('eyeSize'), look: u('look'), maskMode: u('maskMode'), maskLevel: u('maskLevel'), boxCount: u('boxCount'), boxes: u('boxes'), split: u('split'), skinOn: u('skinOn'), keying: u('keying'), keyColour: u('keyColour'), feather: u('feather'), featherPx: u('featherPx'), eyeSrc: u('eyeSrc'), eyeRect: u('eyeRect') }
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4)
+    this.applyKeying()
+  }
+
+  setKeying(k: StageKeying | null) {
+    if (sameKeying(k, this.keying)) return
+    const mipped = this.mipped
+    this.keying = k
+    if (k?.kind !== 'mask') this.matteIndex = -1
+    if (this.mipped !== mipped) {
+      this.setFilters()
+      this.mips = false
+      this.mips2 = false
+    }
+    this.applyKeying()
+    this.dirty = true
+  }
+
+  private applyKeying() {
+    const { gl, uniforms: u, keying: k } = this
+    gl.uniform1i(u.keying, k?.kind === 'colour' ? 1 : k?.kind === 'mask' && this.matteIndex >= 0 ? 2 : 0)
+    gl.uniform1f(u.featherPx, k?.featherPx ?? 0)
+    if (k?.kind !== 'colour') return
+    gl.uniform3f(u.keyColour, ((k.key >> 16) & 0xff) / 255, ((k.key >> 8) & 0xff) / 255, (k.key & 0xff) / 255)
+    gl.uniform1i(u.feather, k.feather === 'distance' ? 1 : 0)
+  }
+
+  private readMatte(now: number): boolean {
+    this.matteAskedAt = now
+    const grid = typeof client.engine.matteGrid === 'function' ? client.engine.matteGrid() : null
+    if (!grid || grid.cover.length < grid.w * grid.h) {
+      if (this.matteIndex < 0) return false
+      this.matteIndex = -1
+      this.applyKeying()
+      return true
+    }
+    if (grid.index === this.matteIndex) return false
+    const { gl } = this
+    gl.activeTexture(gl.TEXTURE3)
+    if (!this.matteTex) {
+      this.matteTex = gl.createTexture()
+      gl.bindTexture(gl.TEXTURE_2D, this.matteTex)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    } else {
+      gl.bindTexture(gl.TEXTURE_2D, this.matteTex)
+    }
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, grid.w, grid.h, 0, gl.RED, gl.UNSIGNED_BYTE, grid.cover)
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4)
+    gl.activeTexture(gl.TEXTURE0)
+    const first = this.matteIndex < 0
+    this.matteIndex = grid.index
+    if (first) this.applyKeying()
+    return true
+  }
+
+  private get mipped() {
+    return this.maskOn || this.keying?.kind === 'colour'
+  }
+
+  private setFilters() {
+    const { gl } = this
+    const filter = this.mipped ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR
+    gl.bindTexture(gl.TEXTURE_2D, this.tex)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter)
+    if (this.tex2) {
+      gl.activeTexture(gl.TEXTURE1)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter)
+      gl.activeTexture(gl.TEXTURE0)
+    }
   }
 
   attach(slot: HTMLElement) {
@@ -334,7 +586,7 @@ class Stage {
     this.tex2 = gl.createTexture()
     gl.bindTexture(gl.TEXTURE_2D, this.tex2)
     gl.texStorage2D(gl.TEXTURE_2D, Math.floor(Math.log2(Math.max(this.texW, this.texH))) + 1, gl.RGBA8, this.texW, this.texH)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, this.maskOn ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, this.mipped ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
@@ -378,7 +630,7 @@ class Stage {
     this.tex = gl.createTexture()
     gl.bindTexture(gl.TEXTURE_2D, this.tex)
     gl.texStorage2D(gl.TEXTURE_2D, Math.floor(Math.log2(Math.max(this.texW, this.texH))) + 1, gl.RGBA8, this.texW, this.texH)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, this.maskOn ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, this.mipped ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
@@ -398,12 +650,7 @@ class Stage {
       this.maskVersion = -1
       gl.uniform1i(u.maskMode, 0)
       if (!mask) this.uploadSkin(null)
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, this.maskOn ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR)
-      if (this.tex2) {
-        gl.activeTexture(gl.TEXTURE1)
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, this.maskOn ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR)
-        gl.activeTexture(gl.TEXTURE0)
-      }
+      this.setFilters()
       changed = true
     }
     if (mask && mask.version !== this.maskVersion) {
@@ -415,11 +662,11 @@ class Stage {
       if (mask.skin !== this.skinData) this.uploadSkin(mask.skin)
       changed = true
     }
-    if (mask && !this.mips && this.hasFrame) {
+    if (this.mipped && !this.mips && this.hasFrame) {
       gl.generateMipmap(gl.TEXTURE_2D)
       this.mips = true
     }
-    if (mask && !this.mips2 && this.tex2) {
+    if (this.mipped && !this.mips2 && this.tex2) {
       gl.activeTexture(gl.TEXTURE1)
       gl.generateMipmap(gl.TEXTURE_2D)
       gl.activeTexture(gl.TEXTURE0)
@@ -466,6 +713,9 @@ class Stage {
     gl.uniform2f(u.outSize, this.canvas.width, this.canvas.height)
     const shown = flatEye(p, client.engine.videoWidth() || 16, client.engine.videoHeight() || 9)
     gl.uniform2f(u.eyeSize, shown.width, shown.height)
+    const r = eyeRect(p)
+    gl.uniform2f(u.eyeSrc, (client.engine.videoWidth() || this.fitted.w || this.texW) * r.w, (client.engine.videoHeight() || this.fitted.h || this.texH) * r.h)
+    gl.uniform4f(u.eyeRect, r.x, r.y, r.w, r.h)
     gl.uniform3f(u.look, l.yaw, l.pitch, l.fov)
     gl.drawArrays(gl.TRIANGLES, 0, 3)
   }
@@ -491,6 +741,7 @@ class Stage {
         this.dirty = true
       }
       const mask = censorMask()
+      if (this.keying?.kind === 'mask' && ((buffer && buffer.length === bytes) || now - this.matteAskedAt >= MATTE_POLL_MS) && this.readMatte(now)) this.dirty = true
       if (buffer && buffer.length === bytes) {
         const { gl } = this
         gl.bindTexture(gl.TEXTURE_2D, this.tex)
@@ -550,6 +801,12 @@ class Stage {
 }
 
 let stage: Stage | null = null
+let stageKeying: StageKeying | null = null
+
+export function setStageKeying(k: StageKeying | null): void {
+  stageKeying = k
+  stage?.setKeying(k)
+}
 
 export function videoStage(): Stage {
   stage ??= new Stage()

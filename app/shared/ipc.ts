@@ -18,7 +18,7 @@ import type { PortalDevOp, PortalToPanel, PortalToScene, PortalUp } from './port
 import type { RemoteLoad, ServerInput } from './remote'
 import type { PerVideoSettings, Settings } from './settings'
 import type { ResolvedProjection } from './projection'
-import type { PassthroughSettings, ResolvedPassthrough } from './passthrough'
+import type { AlphaFile, PassthroughSettings, ResolvedPassthrough } from './passthrough'
 import type { Cue, SubtitleTrack } from './subtitles'
 import type { UpdateState } from './update'
 import type { SavedSession, SessionHistory, SessionRun, SessionSetup } from './session'
@@ -131,6 +131,10 @@ export interface IpcContract {
   'library:media': (id: number) => MediaDetail | null
   'library:projection': (path: string) => ResolvedProjection
   'passthrough:resolve': (path: string, saved: PassthroughSettings | null) => ResolvedPassthrough
+  'passthrough:makeDir': (path: string) => string
+  'passthrough:export': (path: string, beside: boolean) => string
+  'passthrough:alpha': (path: string) => AlphaFile | null
+  'passthrough:delete': (path: string) => void
   'censor:trackDir': (path: string) => string
   'passthrough:sample': (path: string, timeSec: number, u: number, v: number) => number | null
   'library:suggestions': (id: number) => MediaRow[]

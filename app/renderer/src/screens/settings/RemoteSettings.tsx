@@ -30,6 +30,7 @@ export function RemoteSettings() {
   useEffect(() => {
     if (storedPassword !== undefined) setPassword(storedPassword)
   }, [storedPassword])
+  const needsPassword = remote?.enabled === true && !storedPassword
   const commitPassword = (value: string) => {
     if (value !== storedPassword) void update((s) => ({ ...s, remote: { ...s.remote, password: value } }))
   }
@@ -63,6 +64,8 @@ export function RemoteSettings() {
               className="input"
               type="password"
               autoComplete="off"
+              aria-invalid={needsPassword}
+              aria-describedby={needsPassword ? 'password-error' : undefined}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               onBlur={(e) => commitPassword(e.target.value)}
@@ -71,13 +74,18 @@ export function RemoteSettings() {
               }}
             />
           </Field>
+          {needsPassword && (
+            <span id="password-error" className="sub error" role="alert">
+              {t('settings.source.passwordRequired')}
+            </span>
+          )}
         </div>
-        {remote?.enabled && status?.running && status.urls.length > 0 && (
+        {remote?.enabled && !needsPassword && status?.running && status.urls.length > 0 && (
           <div className="prow">
             <span className="urls">
               {status.urls.map((url) => (
                 <span key={url} className="val">
-                  {remote?.password ? url.replace('http://', 'http://bp:••••@') : url}
+                  {url.replace('http://', 'http://bp:••••@')}
                 </span>
               ))}
               <span className="sub">{t('settings.sharing.enterAddress')}</span>

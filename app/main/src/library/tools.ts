@@ -72,3 +72,19 @@ export async function runToolBytes(tool: Tool, args: string[], timeoutMs: number
 export async function runTool(tool: Tool, args: string[], timeoutMs: number, signal?: AbortSignal): Promise<string> {
   return (await runToolBytes(tool, args, timeoutMs, signal)).toString()
 }
+
+const found: Partial<Record<Tool, string>> = {}
+
+export async function toolFile(tool: Tool): Promise<string> {
+  const known = found[tool]
+  if (known) return known
+  try {
+    await exec(tool, null, ['-version'], 10_000)
+    return (found[tool] = tool)
+  } catch (e) {
+    if (!(e instanceof ToolMissingError)) throw e
+  }
+  const dir = fallback().find((d) => existsSync(join(d, win32 ? `${tool}.exe` : tool)))
+  if (!dir) throw new ToolMissingError(tool)
+  return (found[tool] = join(dir, win32 ? `${tool}.exe` : tool))
+}

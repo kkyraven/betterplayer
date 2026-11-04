@@ -21,9 +21,9 @@ const float P_AP_RING_GAP = 0.0036;
 const float P_AP_RING_W = 0.0047;
 uniform int pOn;
 uniform int pCount;
-// Per portal: (az, el, d, hr), (half w, half h, corner, s), (yaw, pitch, layer, kind 0 blank 1 still
-// 2 poster 3 live), (half h, half v of its still, op, shade), (ring, flash, rim, 0), (u max, v max,
-// texel u, texel v: its picture within its layer).
+// Per portal: (az, el, d, hr), (half w, half h, corner, s), (half field (radians), bowl depth (half
+// widths), layer, kind 0 blank 1 still 2 poster), (half h, half v of its still, op, shade), (ring, flash,
+// rim, 0), (u max, v max, texel u, texel v: its picture within its layer).
 uniform vec4 pA[16];
 uniform vec4 pB[16];
 uniform vec4 pC[16];
@@ -42,6 +42,10 @@ uniform int dKind;
 uniform vec4 dAp;
 uniform vec4 dAp2;
 uniform vec4 dMix;
+// The window's picture (portals.ts diveAngles): scale, bowl, k, the window's aspect; its half field and
+// bowl depth as a portal's, live outside the window.
+uniform vec4 dFit;
+uniform vec4 dFit2;
 uniform vec2 dOld;
 uniform int dStill;
 uniform vec4 dStillA;
@@ -63,13 +67,28 @@ void pOver(inout vec3 c, inout float a, vec3 pc, float pa) {
   if (na > 0.0) c = (pc * pa + c * a * (1.0 - pa)) / na;
   a = na;
 }
-// A seat-frame direction in the video's frame after a portal's turn: (az, el).
-vec2 pTurned(vec3 v, float yaw, float pitch) {
-  float x1 = v.x * cos(yaw) + v.z * sin(yaw);
+// A seat-frame vector in the frame of a window at (yaw, pitch): right, up, into it (portals.ts windowRay).
+vec3 pWindowRay(vec3 v, float yaw, float pitch) {
   float f1 = v.x * sin(yaw) - v.z * cos(yaw);
-  float y2 = v.y * cos(pitch) - f1 * sin(pitch);
-  float f2 = v.y * sin(pitch) + f1 * cos(pitch);
-  return vec2(atan(x1, f2), asin(clamp(y2, -1.0, 1.0)));
+  return vec3(v.x * cos(yaw) + v.z * sin(yaw), v.y * cos(pitch) - f1 * sin(pitch), v.y * sin(pitch) + f1 * cos(pitch));
+}
+vec3 pFromWindow(vec3 w, float yaw, float pitch) {
+  float f1 = w.z * cos(pitch) - w.y * sin(pitch);
+  return vec3(w.x * cos(yaw) + f1 * sin(yaw), w.y * cos(pitch) + w.z * sin(pitch), w.x * sin(yaw) - f1 * cos(yaw));
+}
+vec2 pWindowAngles(vec3 w) {
+  return vec2(atan(w.x, w.z), asin(clamp(w.y, -1.0, 1.0)));
+}
+// The fitted picture in its bowl (portals.ts bowlAngles): the video's (az, el) and the shade where the eye's ray `lv`
+// through the window at `p` half widths meets an ellipsoid through the corners of a window `aspect` tall, `depth` deep.
+vec3 pBowl(vec2 p, vec3 lv, float aspect, float fh, float depth) {
+  vec3 ax = vec3(1.42, 1.42 * aspect, max(depth, 1e-3));
+  vec3 q0 = vec3(p, 0.0) / ax;
+  vec3 d = lv / ax;
+  float qa = dot(d, d), qb = dot(q0, d), qc = dot(q0, q0) - 1.0;
+  float t = (-qb + sqrt(max(qb * qb - qa * qc, 0.0))) / qa;
+  vec3 q = vec3(p, 0.0) + lv * t;
+  return vec3(q.xy * fh, mix(0.5, 1.0, smoothstep(0.15, 0.9, normalize(q / (ax * ax)).z)));
 }
 // A shelf layer at `st` (0 to 1 across its picture), half a texel inside the picture.
 vec3 pShelf(vec2 st, float layer, vec4 f, float lod) {
@@ -101,16 +120,27 @@ void portalStage(vec2 uv, inout vec3 c, inout float a, vec3 back) {
     float aa = fwidth(e);
     float fe = max(dAp2.y, aa);
     float inside = 1.0 - smoothstep(-fe, fe, e);
-    // The world: the still by the ray's direction (the window is straight ahead, so no turn), into live.
-    vec2 ang = vec2(atan(v.x, -v.z), asin(clamp(v.y, -1.0, 1.0)));
+    // The world: the still from its fitted picture in the bowl to the video at its real place as the window grows
+    // (diveAngles), into live.
+    vec3 w = pWindowRay(v, dAp.x, dAp.y);
+    vec2 fa = pWindowAngles(w) * dFit.x;
+    vec3 u = pFromWindow(vec3(cos(fa.y) * sin(fa.x), sin(fa.y), cos(fa.y) * cos(fa.x)), dAp.x, dAp.y);
+    vec2 ang = pWindowAngles(pWindowRay(u, dAp.x * (1.0 - dFit.z), dAp.y * (1.0 - dFit.z)));
+    float shade = 1.0;
+    if (dFit.y > 0.0) {
+      vec3 b = pBowl(vec2(q.x / dAp.z, q.y / dAp.w * dFit.w), w, dFit.w, dFit2.x, dFit2.y);
+      ang = mix(ang, b.xy, dFit.y);
+      shade = mix(1.0, b.z, dFit.y);
+    }
     vec2 st = vec2(0.5 + ang.x / (2.0 * dStillA.x), 0.5 - ang.y / (2.0 * dStillA.y));
     vec2 sdx = dFdx(st) * dStillB.xy, sdy = dFdy(st) * dStillB.xy;
     vec3 still = P_DARK;
     if (dStill != 0 && abs(ang.x) <= dStillA.x && abs(ang.y) <= dStillA.y) {
       vec2 t = clamp(st * dStillB.xy, 0.5 * dStillB.zw, dStillB.xy - 0.5 * dStillB.zw);
-      still = dStill == 1 ? textureGrad(pDive, t, sdx, sdy).rgb : textureGrad(pStills, vec3(t, dStillA.z), sdx, sdy).rgb;
+      still = (dStill == 1 ? textureGrad(pDive, t, sdx, sdy).rgb : textureGrad(pStills, vec3(t, dStillA.z), sdx, sdy).rgb) * shade;
     }
-    float live = dMix.w;
+    // Outside the window a same dive and B show the video behind.
+    float live = mix(dFit2.z, dMix.w, inside);
     float wa = (1.0 - live) + a0 * live;
     vec3 wc = wa > 0.0 ? (still * (1.0 - live) + c0 * a0 * live) / wa : still;
     wc *= mix(dMix.y, dMix.x, inside);
@@ -194,27 +224,24 @@ void portalStage(vec2 uv, inout vec3 c, inout float a, vec3 back) {
     vec4 F = pF[i];
     int kind = int(C.w + 0.5);
     vec3 col = P_BLANK;
-    float colA = 1.0;
     if (kind == 1) {
-      vec2 ang = pTurned(v, C.x, C.y);
+      // The fitted picture in its bowl, mipmapped by its scale: C.x radians across half the window.
+      vec3 pic = pBowl(vec2(x, y) / B.x, pWindowRay(v, A.x, A.y), B.y / B.x, C.x, C.y);
       col = P_DARK;
-      if (abs(ang.x) <= D.x && abs(ang.y) <= D.y) {
-        vec2 st = vec2(0.5 + ang.x / (2.0 * D.x), 0.5 - ang.y / (2.0 * D.y));
-        col = pShelf(st, C.z, F, log2(max(pixel * F.x / (2.0 * D.x * F.z), 1e-6)));
+      if (abs(pic.x) <= D.x && abs(pic.y) <= D.y) {
+        vec2 st = vec2(0.5 + pic.x / (2.0 * D.x), 0.5 - pic.y / (2.0 * D.y));
+        col = pShelf(st, C.z, F, log2(max(aa * C.x / B.x * F.x / (2.0 * D.x * F.z), 1e-6))) * pic.z;
       }
     } else if (kind == 2) {
       float crop = (B.x / B.y) / (16.0 / 9.0);
       vec2 st = vec2(0.5 + x / (2.0 * B.x) * crop, 0.5 - y / (2.0 * B.y));
       col = pShelf(st, C.z, F, log2(max(aa * crop * F.x / (2.0 * B.x * F.z), 1e-6)));
-    } else if (kind == 3) {
-      col = c0;
-      colA = a0;
     }
     col += smoothstep(-0.004, 0.0, e) * inside * E.z;
     col *= D.w;
     float ring = smoothstep(P_RING_GAP - aa, P_RING_GAP + aa, e) * (1.0 - smoothstep(P_RING_GAP + th - aa, P_RING_GAP + th + aa, e)) * max(E.x, E.y);
     col = mix(col, mix(P_ACCENT, vec3(1.0), E.y * 0.6), ring);
-    float alpha = max(inside * colA, ring) * D.z;
+    float alpha = max(inside, ring) * D.z;
     if (pDebug == 1) {
       col = vec3(0.0, 1.0, 0.0);
       alpha = inside * D.z;
@@ -357,6 +384,8 @@ pub(super) struct PortalUniforms {
     pub d_ap: i32,
     pub d_ap2: i32,
     pub d_mix: i32,
+    pub d_fit: i32,
+    pub d_fit2: i32,
     pub d_old: i32,
     pub d_still: i32,
     pub d_still_a: i32,
@@ -393,6 +422,8 @@ impl PortalUniforms {
             d_ap: at("dAp"),
             d_ap2: at("dAp2"),
             d_mix: at("dMix"),
+            d_fit: at("dFit"),
+            d_fit2: at("dFit2"),
             d_old: at("dOld"),
             d_still: at("dStill"),
             d_still_a: at("dStillA"),
@@ -405,7 +436,7 @@ impl PortalUniforms {
     }
 
     #[cfg(test)]
-    pub fn all(&self) -> [(&'static str, i32); 27] {
+    pub fn all(&self) -> [(&'static str, i32); 29] {
         [
             ("pOn", self.on),
             ("pCount", self.count),
@@ -426,6 +457,8 @@ impl PortalUniforms {
             ("dAp", self.d_ap),
             ("dAp2", self.d_ap2),
             ("dMix", self.d_mix),
+            ("dFit", self.d_fit),
+            ("dFit2", self.d_fit2),
             ("dOld", self.d_old),
             ("dStill", self.d_still),
             ("dStillA", self.d_still_a),
@@ -573,11 +606,12 @@ impl Stage {
         for (i, it) in self.frame.items.iter().take(n).enumerate() {
             let (kind, info) = self.shows(it.kind, it.slot);
             let (half_h, half_v) = info.map_or((0.0, 0.0), |s| (s.half_h_deg.to_radians(), s.half_v_deg.to_radians()));
-            let rim = if matches!(it.kind, ItemKind::Still | ItemKind::Live) { p::aperture::RIM_VR } else { p::aperture::RIM_FLAT };
+            let rim = if it.kind == ItemKind::Still { p::aperture::RIM_VR } else { p::aperture::RIM_FLAT };
             let q = &it.pose;
+            let hover = p::window_hover(q.s, &it.size);
             arrays[0][i] = [q.az, q.el, q.d, q.hr].map(|v| v as f32);
             arrays[1][i] = [it.size.w / 2.0, it.size.h / 2.0, it.size.corner, q.s].map(|v| v as f32);
-            arrays[2][i] = [it.turn.0, it.turn.1, it.slot.unwrap_or(0) as f64, kind as f64].map(|v| v as f32);
+            arrays[2][i] = [p::half_field(hover), p::bowl_depth(hover), it.slot.unwrap_or(0) as f64, kind as f64].map(|v| v as f32);
             arrays[3][i] = [half_h, half_v, it.op, it.shade].map(|v| v as f32);
             arrays[4][i] = [it.ring, it.flash, rim, 0.0].map(|v| v as f32);
             arrays[5][i] = picture(info, SHELF_TEXELS);
@@ -594,7 +628,6 @@ impl Stage {
     fn shows(&self, kind: ItemKind, slot: Option<u32>) -> (u32, Option<&StillInfo>) {
         let info = slot.and_then(|s| self.slots.get(s as usize)?.as_ref());
         match (kind, info) {
-            (ItemKind::Live, _) => (3, None),
             (ItemKind::Still | ItemKind::Poster, Some(i)) => (if i.equirect { 1 } else { 2 }, Some(i)),
             _ => (0, None),
         }
@@ -631,6 +664,8 @@ impl Stage {
                 gl::Uniform4f(u.d_ap, ap.az as f32, ap.el as f32, ap.hw as f32, ap.hh as f32);
                 gl::Uniform4f(u.d_ap2, ap.rr as f32, ap.feather as f32, ap.rim as f32, ap.rp as f32);
                 gl::Uniform4f(u.d_mix, f.in_b as f32, f.out_b as f32, f.out_a as f32, f.live as f32);
+                gl::Uniform4f(u.d_fit, ap.scale as f32, ap.bowl as f32, ap.k as f32, (d.size.h / d.size.w) as f32);
+                gl::Uniform4f(u.d_fit2, p::half_field(ap.hover) as f32, p::bowl_depth(ap.hover) as f32, f.out_live as f32, 0.0);
             } else if let Some(t) = f.tile {
                 let (rot, pos) = tile_frame(t.a, t.y, t.r, t.tilt);
                 gl::Uniform1i(u.d_kind, 2);
@@ -1004,7 +1039,8 @@ void main() {
             }))
             .flatten()
             .collect();
-        set_for_test(Some(scene.clone()), None, false, vec![Upload { slot: 0, rgba: quadrants, info: still(None) }], None);
+        let whole = StillInfo { half_h_deg: 90.0, half_v_deg: 90.0, ..still(None) };
+        set_for_test(Some(scene.clone()), None, false, vec![Upload { slot: 0, rgba: quadrants, info: whole }], None);
         let px = draw(&mut stage);
         let reddish = |c: [u8; 3]| c[0] > 180 && c[1] < 60 && c[2] < 60;
         assert!(reddish(pixel(&px, -3.0, 6.0)), "top-left {:?}", pixel(&px, -3.0, 6.0));

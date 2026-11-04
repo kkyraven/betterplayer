@@ -1,9 +1,9 @@
-import { mkdir } from 'node:fs/promises'
+import { mkdir, rm, stat } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { TogetherFiles } from './together-files'
 import { app, dialog, ipcMain, powerSaveBlocker, screen, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import { readFileSync, statSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { HERO_FILE_SUFFIX } from '@shared/tracking'
 import { AUDIO_EXTENSIONS, isMediaPath, VIDEO_EXTENSIONS, type IpcChannel, type IpcContract, type IpcEvent, type IpcEvents, type ScriptFile } from '@shared/ipc'
 import { BrowserTabs } from './browser'
@@ -12,6 +12,7 @@ import { checkDestination } from './downloads/files'
 import { downloadDestination, downloadSelection } from './download-selection'
 import { syncLanguage, t } from './i18n'
 import type { Library } from './library'
+import { appAlpha, besideAlpha, besideAlphaPath, exportAlpha, findAlpha } from './library/alpha'
 import { useMaskDir } from './library/masks'
 import { copyDebugInfo, logEvent } from './log'
 import { Audio } from './audio'
@@ -34,7 +35,7 @@ import { censorKey, setPortalCensor } from './library/portals'
 import { syncNativeTheme } from './theme'
 import { isForwarded, type ForwardedChannel } from '@shared/peer'
 import { sessionRun, sessionSetup } from '@shared/session-settings'
-import { passthroughModelId, readPassthrough } from '@shared/passthrough'
+import { readPassthrough } from '@shared/passthrough'
 
 type Handler<C extends IpcChannel> = (...args: Parameters<IpcContract[C]>) => ReturnType<IpcContract[C]> | Promise<ReturnType<IpcContract[C]>>
 
@@ -355,22 +356,54 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   handle('library:reshuffle', () => library.reshuffle())
   handle('library:media', (id) => library.media(id))
   handle('library:projection', (path) => library.projection(path))
-  library.setPassthroughModel(() => {
-    const settings = store.get()
-    const id = passthroughModelId(settings.tracking.models.detector, settings.vr.passthroughModel)
-    const model = kinkyravenModels().find((m) => m.id === id)
-    return model !== undefined && Object.values(models.status(model.files.map((f) => f.file))).every((s) => s !== null)
-  })
+  const keyOf = (path: string) => String(library.byPath(path)?.id ?? `file-${createHash('sha256').update(path).digest('hex').slice(0, 16)}`)
+  const alphas = join(app.getPath('userData'), 'alpha')
+  const alphaOf = (path: string) => findAlpha(path, alphas, keyOf(path))
+  library.setAlphaFinder(alphaOf)
+  remote.setAlphas(alphaOf)
   const masks = join(app.getPath('userData'), 'masks')
   remote.setMasks(masks)
   const trackDir = (root: string, path: string) => {
-    const dir = join(root, String(library.byPath(path)?.id ?? `file-${createHash('sha256').update(path).digest('hex').slice(0, 16)}`))
+    const dir = join(root, keyOf(path))
     void useMaskDir(root, dir).catch((error: unknown) => logEvent({ processType: 'main', reason: 'error', message: `mask tracks: ${String(error)}` }))
     return dir
   }
   handle('passthrough:resolve', async (path, saved) => {
     const resolved = await library.passthrough(path, readPassthrough(saved))
     return resolved.mode === 'ai' ? { ...resolved, maskDir: trackDir(masks, path) } : resolved
+  })
+  const makes = join(app.getPath('userData'), 'masks-make')
+  const exports = new Map<string, AbortController>()
+  handle('passthrough:makeDir', (path) => join(makes, keyOf(path)))
+  handle('passthrough:export', async (path, beside) => {
+    const key = keyOf(path)
+    const out = beside ? besideAlphaPath(path) : appAlpha(alphas, key)
+    const controller = new AbortController()
+    exports.get(path)?.abort()
+    exports.set(path, controller)
+    try {
+      await mkdir(dirname(out), { recursive: true })
+      await exportAlpha(path, join(makes, key), out, undefined, controller.signal)
+    } finally {
+      if (exports.get(path) === controller) exports.delete(path)
+    }
+    const other = beside ? appAlpha(alphas, key) : besideAlpha(path)
+    if (other && other !== out) await rm(other, { force: true })
+    await rm(join(makes, key), { recursive: true, force: true })
+    await rm(join(masks, key), { recursive: true, force: true })
+    return out
+  })
+  handle('passthrough:alpha', async (path) => {
+    const file = alphaOf(path)
+    if (!file) return null
+    const info = await stat(file).catch(() => null)
+    return info ? { path: file, bytes: info.size, beside: file !== appAlpha(alphas, keyOf(path)) } : null
+  })
+  handle('passthrough:delete', async (path) => {
+    const key = keyOf(path)
+    exports.get(path)?.abort()
+    const beside = besideAlpha(path)
+    await Promise.all([beside ? rm(beside, { force: true }) : null, rm(appAlpha(alphas, key), { force: true }), rm(join(makes, key), { recursive: true, force: true }), rm(join(masks, key), { recursive: true, force: true })])
   })
   const censorTracks = join(app.getPath('userData'), 'censor')
   remote.setCensorTracks(censorTracks)

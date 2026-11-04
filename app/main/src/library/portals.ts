@@ -49,12 +49,16 @@ const CONCURRENCY = 2
 const FAILURE_MS = 10 * 60_000
 const CACHE_BYTES = 512 * 1024 * 1024
 const POSTER_COVER_WIDTH = 960
+const STREAM_FILES = 64
+
+type Stream = { colour: Colour; codec: string | undefined }
 
 export class PortalStills {
   private readonly ffmpeg: (args: string[]) => Promise<string>
   private readonly ffprobe: (args: string[]) => Promise<string>
   private readonly running = new Map<string, Promise<PortalStill | null>>()
   private readonly failed = new Map<string, number>()
+  private readonly streams = new Map<string, Promise<Stream>>()
   private readonly waiting: (() => void)[] = []
   private active = 0
   private pruning: Promise<void> | null = null
@@ -68,16 +72,30 @@ export class PortalStills {
     this.ffprobe = deps.ffprobe ?? ((args) => runTool('ffprobe', args, 20_000))
   }
 
-  private async colour(path: string): Promise<Colour> {
-    const out = await this.ffprobe(['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=color_space,color_range,width,height', '-of', 'json', path]).catch(() => '{}')
-    let stream: Parameters<typeof mpvColour>[0] = {}
+  private stream(path: string, mtimeMs: number): Promise<Stream> {
+    const key = `${mtimeMs}:${path}`
+    const known = this.streams.get(key)
+    if (known) return known
+    const probed = this.probe(path, key)
+    this.streams.set(key, probed)
+    const oldest = this.streams.keys().next().value
+    if (this.streams.size > STREAM_FILES && oldest !== undefined) this.streams.delete(oldest)
+    return probed
+  }
+
+  private async probe(path: string, key: string): Promise<Stream> {
+    const out = await this.ffprobe(['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name,color_space,color_range,width,height', '-of', 'json', path]).catch(() => {
+      this.streams.delete(key)
+      return '{}'
+    })
+    let stream: Parameters<typeof mpvColour>[0] & { codec_name?: string } = {}
     try {
       const parsed: unknown = JSON.parse(out)
       const first = parsed && typeof parsed === 'object' && 'streams' in parsed && Array.isArray(parsed.streams) ? (parsed.streams[0] as unknown) : null
       if (first && typeof first === 'object') stream = first
     } catch {
     }
-    return mpvColour(stream)
+    return { colour: mpvColour(stream), codec: stream.codec_name }
   }
 
   async still(id: number, width: 1024 | 2048, ms: number | null): Promise<PortalStill | null> {
@@ -96,9 +114,10 @@ export class PortalStills {
     const view = src.view && src.view.projection.kind !== 'flat' && !src.keyed && !src.remote && !isUrl(src.path) ? src.view : null
     if (view) {
       const arc = portalArc(view.projection)
-      const halfDeg: [number, number] = width === 1024 ? [...VR_PORTAL.stills.shelfHalfDeg] : [arc / 2, 90]
-      const made = await this.cached(this.name(id, String(width), ms, src.mtimeMs, JSON.stringify(view.projection) + censor + 'colour:1'), async (out) => {
-        const time = portalTime(await this.ffmpeg(portalArgs(src.path, view, width, ms, src.durationMs, cover, out, await this.colour(src.path))))
+      const halfDeg: [number, number] = [arc / 2, 90]
+      const made = await this.cached(this.name(id, String(width), ms, src.mtimeMs, JSON.stringify(view.projection) + censor + 'colour:1' + (width === 1024 ? 'whole:cover' : '')), async (out) => {
+        const { colour, codec } = await this.stream(src.path, src.mtimeMs)
+        const time = portalTime(await this.ffmpeg(portalArgs(src.path, view, width, ms, src.durationMs, cover, out, colour, codec)))
         if (time === null) throw new Error('ffmpeg printed no frame time')
         return { kind: 'equirect', halfDeg, arcDeg: arc, ms: time, censor }
       })

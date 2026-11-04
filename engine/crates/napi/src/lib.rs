@@ -830,11 +830,34 @@ fn variants(files: Vec<ModelVariant>) -> Vec<bp_core::ModelVariant> {
 #[napi(object)]
 pub struct MatteSetup {
     pub path: String,
+    pub alpha: String,
+    pub dir: String,
+    pub layout: String,
+}
+
+#[napi(object)]
+pub struct MatteMakeSetup {
+    pub path: String,
     pub dir: String,
     pub files: Vec<ModelVariant>,
     pub cache_dir: Option<String>,
     pub layout: String,
-    pub swap_eyes: bool,
+}
+
+#[napi(object)]
+pub struct MatteMakeStatus {
+    pub status: String,
+    pub error: Option<String>,
+    pub seconds: u32,
+    pub total: u32,
+}
+
+#[napi(object)]
+pub struct MatteGrid {
+    pub index: f64,
+    pub w: u32,
+    pub h: u32,
+    pub cover: Buffer,
 }
 
 #[napi(object)]
@@ -874,13 +897,19 @@ fn layout_of(layout: &str) -> Result<bp_core::EyeLayout> {
     }
 }
 
-fn matte_status(s: bp_core::MatteStatus) -> MatteStatus {
-    let (status, error) = match s.state {
+fn matte_state(state: bp_core::MatteState) -> (String, Option<String>) {
+    let (status, error) = match state {
         bp_core::MatteState::Loading => ("loading", None),
         bp_core::MatteState::Running => ("running", None),
+        bp_core::MatteState::Done => ("done", None),
         bp_core::MatteState::Error(e) => ("error", Some(e)),
     };
-    MatteStatus { status: status.into(), error, ahead: s.ahead_s, seconds: s.seconds as u32 }
+    (status.into(), error)
+}
+
+fn matte_status(s: bp_core::MatteStatus) -> MatteStatus {
+    let (status, error) = matte_state(s.state);
+    MatteStatus { status, error, ahead: s.ahead_s, seconds: s.seconds as u32 }
 }
 
 fn kinds_of(ids: &[String]) -> Result<Vec<bp_core::DetectKind>> {
@@ -1555,14 +1584,12 @@ impl Engine {
 
     #[napi]
     pub fn matte_start(&self, setup: MatteSetup) -> Result<()> {
-        let layout = layout_of(&setup.layout)?;
         self.inner.matte_start(bp_core::MatteSetup {
             path: setup.path,
             dir: setup.dir.into(),
-            maker: bp_core::MatteMaker::Passthrough { skin: variants(setup.files) },
-            cache_dir: setup.cache_dir.map(std::path::PathBuf::from),
-            layout,
-            second_eye: setup.swap_eyes && layout != bp_core::EyeLayout::Mono,
+            maker: bp_core::MatteMaker::Alpha { alpha: setup.alpha },
+            cache_dir: None,
+            layout: layout_of(&setup.layout)?,
         });
         Ok(())
     }
@@ -1578,11 +1605,41 @@ impl Engine {
     }
 
     #[napi]
+    pub fn matte_grid(&self) -> Option<MatteGrid> {
+        let (index, m) = self.inner.matte_grid()?;
+        Some(MatteGrid { index: index as f64, w: m.w, h: m.h, cover: m.cover.clone().into() })
+    }
+
+    #[napi]
+    pub fn matte_make(&self, setup: MatteMakeSetup) -> Result<()> {
+        self.inner.matte_make(bp_core::MatteSetup {
+            path: setup.path,
+            dir: setup.dir.into(),
+            maker: bp_core::MatteMaker::Passthrough { skin: variants(setup.files) },
+            cache_dir: setup.cache_dir.map(std::path::PathBuf::from),
+            layout: layout_of(&setup.layout)?,
+        });
+        Ok(())
+    }
+
+    #[napi]
+    pub fn matte_make_stop(&self) {
+        self.inner.matte_make_stop()
+    }
+
+    #[napi]
+    pub fn matte_make_status(&self) -> Option<MatteMakeStatus> {
+        let s = self.inner.matte_make_status()?;
+        let (status, error) = matte_state(s.state);
+        Some(MatteMakeStatus { status, error, seconds: s.seconds as u32, total: s.total })
+    }
+
+    #[napi]
     pub fn censor_track(&self, setup: Option<CensorTrackSetup>, look: Option<CensorLook>) -> Result<()> {
         let track = match setup {
             Some(s) => {
                 let maker = bp_core::MatteMaker::Censor { detector: detector_spec(s.models.detector), skin: s.models.skin.map(variants), kinds: kinds_of(&s.kinds)?, key: s.key };
-                Some(bp_core::MatteSetup { path: s.path, dir: s.dir.into(), maker, cache_dir: s.models.cache_dir.map(std::path::PathBuf::from), layout: layout_of(&s.layout)?, second_eye: false })
+                Some(bp_core::MatteSetup { path: s.path, dir: s.dir.into(), maker, cache_dir: s.models.cache_dir.map(std::path::PathBuf::from), layout: layout_of(&s.layout)? })
             }
             None => None,
         };

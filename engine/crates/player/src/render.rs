@@ -3,7 +3,7 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
 use std::sync::{Arc, Condvar, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -29,6 +29,7 @@ pub enum Msg {
     PictureBack,
     VrStart(Sender<Result<(), String>>),
     VrStop(Sender<Result<(), String>>),
+    VrEnded,
     VrView(VrView),
     VrRecentre { keep_recline: bool },
     Stop,
@@ -473,21 +474,12 @@ fn run(
             (true, None) => Some(POLL),
             (false, delay) => delay,
         };
-        let msg = if let Some(h) = headset.as_mut() {
-            match rx.try_recv() {
-                Ok(m) => {
-                    if h.overdue() {
-                        h.frame();
-                    }
-                    Some(m)
-                }
-                Err(TryRecvError::Empty) => {
-                    h.frame();
-                    None
-                }
-                Err(TryRecvError::Disconnected) => break,
-            }
-        } else if let Some(timeout) = timeout {
+        let timeout = match timeout {
+            _ if headset.is_none() || !presenting => timeout,
+            Some(t) => Some(t.min(FeedPace::PERIOD)),
+            None => Some(FeedPace::PERIOD),
+        };
+        let msg = if let Some(timeout) = timeout {
             match rx.recv_timeout(timeout) {
                 Ok(m) => Some(m),
                 Err(RecvTimeoutError::Timeout) => {
@@ -532,7 +524,7 @@ fn run(
                     }
                     if let Some(h) = headset.as_mut().filter(|_| wanted(true)) {
                         skipped_frame = false;
-                        let drew = h.draw_video(ctx, source());
+                        let drew = h.draw_video(ctx, source(), presenting);
                         if decoded && drew {
                             crate::portals::drawn();
                         }
@@ -578,7 +570,7 @@ fn run(
             Some(Msg::PictureBack) => {
                 if let Some(h) = headset.as_mut().filter(|_| skipped_frame && wanted(true)) {
                     skipped_frame = false;
-                    if h.draw_video(ctx, source()) && presenting && feed(h, ctx, &mut target, &frames, &stats) {
+                    if h.draw_video(ctx, source(), presenting) && presenting && feed(h, ctx, &mut target, &frames, &stats) {
                         pace.copied(None);
                     }
                 } else if skipped_frame && wanted(presenting) {
@@ -608,7 +600,7 @@ fn run(
                 let resumed = on && !presenting;
                 presenting = on;
                 if let Some(h) = headset.as_mut().filter(|_| resumed && wanted(on)) {
-                    if h.draw_video(ctx, source()) && feed(h, ctx, &mut target, &frames, &stats) {
+                    if h.draw_video(ctx, source(), true) && feed(h, ctx, &mut target, &frames, &stats) {
                         pace.copied(None);
                     }
                 } else if resumed && wanted(on) {
@@ -653,7 +645,7 @@ fn run(
             #[cfg(any(target_os = "macos", windows))]
             Some(Msg::Redraw) => {
                 if let Some(h) = headset.as_mut() {
-                    if wanted(true) && h.draw_video(ctx, source()) && presenting && feed(h, ctx, &mut target, &frames, &stats) {
+                    if wanted(true) && h.draw_video(ctx, source(), presenting) && presenting && feed(h, ctx, &mut target, &frames, &stats) {
                         pace.copied(None);
                     }
                 } else if wanted(presenting) && !cfg.stamp {
@@ -680,10 +672,10 @@ fn run(
                         let _gpu = gpu.section();
                         dlss.suspend();
                     }
-                    match Headset::start(&gl, view, vr.clone()) {
+                    match Headset::start(&gl, view, vr.clone(), (*callback).clone()) {
                         Ok(mut h) => {
                             if wanted(true) {
-                                h.draw_video(ctx, source());
+                                h.draw_video(ctx, source(), presenting);
                             }
                             headset = Some(h);
                             pace = FeedPace::default();
@@ -724,10 +716,11 @@ fn run(
                     h.recentre(keep_recline);
                 }
             }
+            Some(Msg::VrEnded) => {}
             Some(Msg::Stop) => break,
             None => {}
         }
-        if let Some(h) = headset.as_ref().filter(|_| presenting && wanted(true)) {
+        if let Some(h) = headset.as_mut().filter(|_| presenting && wanted(true)) {
             if let Some(at) = pace.overdue(Instant::now()) {
                 if feed(h, ctx, &mut target, &frames, &stats) {
                     pace.copied(Some(at));
@@ -811,7 +804,7 @@ fn render_one(
     }
 }
 
-fn feed(h: &Headset, ctx: *mut mpv_render_context, target: &mut Target, frames: &Frames, stats: &RenderStats) -> bool {
+fn feed(h: &mut Headset, ctx: *mut mpv_render_context, target: &mut Target, frames: &Frames, stats: &RenderStats) -> bool {
     if !target.cfg.async_readback {
         return true;
     }

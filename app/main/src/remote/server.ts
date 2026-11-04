@@ -20,7 +20,7 @@ import { hereSphereIndex, hereSphereScene, readWrite, type HereSphereWrite } fro
 import { t } from '../i18n'
 import { readPerVideo } from '../settings/store'
 import { authorised } from './auth'
-import { answerProbes, invite } from './discovery'
+import { answerProbes, invite, nudge } from './discovery'
 import { firewallBlocks } from './firewall'
 import { QuestPairing, readPairRequest } from './pairing'
 import { inbound, outbound, permitted } from './paths'
@@ -36,6 +36,7 @@ export type HeadsetEmit = <E extends HeadsetEvent>(event: E, data: IpcEvents[E])
 type StreamEvent = { event: 'playing'; data: PlayingState } | { event: 'library:changed'; data: IpcEvents['library:changed'] } | { event: 'library:progress'; data: IpcEvents['library:progress'] }
 
 const HEARTBEAT_MS = 15_000
+export const NUDGE_MS = 3_000
 
 const QUEST_KEY_WAIT_MS = 2_000
 
@@ -193,7 +194,9 @@ export class RemoteServer {
   private vrFreeMs: () => number | undefined = () => undefined
   private readonly streams = new Set<ServerResponse>()
   private heartbeat: NodeJS.Timeout | null = null
+  private nudges: NodeJS.Timeout | null = null
   private masks: string | null = null
+  private alphaOf: (path: string) => string | null = () => null
   private censorTracks: string | null = null
   private censor: QuestCensor | null | undefined = undefined
   private readonly players = new Map<string, 'deovr' | 'heresphere'>()
@@ -229,6 +232,10 @@ export class RemoteServer {
     this.masks = dir
   }
 
+  setAlphas(find: (path: string) => string | null) {
+    this.alphaOf = find
+  }
+
   setCensorTracks(dir: string) {
     this.censorTracks = dir
   }
@@ -259,7 +266,7 @@ export class RemoteServer {
 
   apply(settings: Settings) {
     this.password = settings.remote.password
-    this.serving = this.forcedPort !== undefined || settings.remote.enabled
+    this.serving = (this.forcedPort !== undefined || settings.remote.enabled) && this.password !== ''
     const port = this.forcedPort ?? settings.remote.port
     if (this.server !== null && port === this.port) return
     this.stop()
@@ -275,6 +282,8 @@ export class RemoteServer {
     this.discovery = null
     if (this.heartbeat) clearInterval(this.heartbeat)
     this.heartbeat = null
+    if (this.nudges) clearInterval(this.nudges)
+    this.nudges = null
     for (const res of this.streams) res.end()
     this.streams.clear()
     if (!server) return
@@ -308,6 +317,11 @@ export class RemoteServer {
     this.heartbeat = setInterval(() => {
       for (const res of this.streams) res.write(':\n\n')
     }, HEARTBEAT_MS)
+    this.nudges = setInterval(() => {
+      const socket = this.discovery
+      if (!socket) return
+      for (const host of this.pairing.quietHosts()) if (host !== this.toysHost) nudge(socket, this.beacon(true), host)
+    }, NUDGE_MS)
   }
 
   private log(req: IncomingMessage, status: number, detail = '') {
@@ -373,6 +387,12 @@ export class RemoteServer {
       if (!row) return sendJson(res, 404, { error: 'not found' })
       this.played(req, row)
       return isUrl(row.path) ? this.proxy(req, res, row.path) : serveFile(req, res, row.path, contentType(row.path))
+    }
+    if (head === 'alpha') {
+      const row = this.row(second)
+      const alpha = row && !isUrl(row.path) ? this.alphaOf(row.path) : null
+      if (!alpha) return sendJson(res, 404, { error: 'not found' })
+      return serveFile(req, res, alpha, contentType(alpha))
     }
     if (head === 'preview') {
       const id = Number(second)
@@ -638,7 +658,8 @@ export class RemoteServer {
         row = this.library.media(row.id) ?? row
       }
     }
-    return sendJson(res, 200, hereSphereScene(row, (await this.projection(row)).projection, this.base(req)))
+    const alpha = !isUrl(row.path) && this.alphaOf(row.path) !== null
+    return sendJson(res, 200, hereSphereScene(row, (await this.projection(row)).projection, this.base(req), alpha))
   }
 
   private write(row: MediaDetail, write: HereSphereWrite) {

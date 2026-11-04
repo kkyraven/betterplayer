@@ -14,6 +14,7 @@ export interface VrPlayerState {
   heat: number[]
   axes: AxisId[]
   toys: HeadsetToys
+  tracking: boolean
   projection: Projection
   projectionSource: ProjectionSource
   volume: number
@@ -80,7 +81,7 @@ export type VrCommand =
   | { kind: 'screen'; open: boolean }
   | { kind: 'wake' }
   | { kind: 'peek'; shortcut?: VrShortcut }
-  | { kind: 'trigger'; hand: VrHand; down: boolean; ray: VrRay | null }
+  | { kind: 'trigger'; hand: VrHand; down: boolean; ray: VrRay | null; grip?: boolean }
   | { kind: 'ring'; open: boolean }
   | { kind: 'ringBack'; held?: boolean }
   | { kind: 'ringCancel' }
@@ -97,6 +98,7 @@ export type VrCommand =
   | { kind: 'buzz'; buzz: VrBuzz; hand?: VrHand }
   | { kind: 'passthrough'; change: Partial<PassthroughSettings> }
   | { kind: 'passthroughMenus'; on: boolean }
+  | { kind: 'tracking' }
   | { kind: 'pick'; hand?: VrHand }
   | { kind: 'panelOffset'; panel: VrMovablePanel; offset: VrPanelOffset }
 
@@ -123,7 +125,7 @@ export const VR_PANELS: Record<VrPanelId, VrPanelSpec> = {
 
 export const VR_WHEEL_STICK = { light: 0.5, release: 0.35 } as const
 
-export const VR_LEGEND = { distance: 0.7, angle: 25, showMs: 250, hideMs: 400, lift: 0.03, back: 0.05, tilt: 55 } as const
+export const VR_LEGEND = { distance: 0.7, angle: 25, showMs: 250, hideMs: 3000, lift: 0.03, back: 0.05, tilt: 55 } as const
 
 export const VR_BUZZES = ['open', 'hover', 'pick', 'detent', 'notch'] as const
 export type VrBuzz = (typeof VR_BUZZES)[number]
@@ -149,7 +151,7 @@ export const VR_DECK_IDLE_MS = 2500
 
 export const VR_DECK_PEEK_MS = 1500
 
-export const VR_SHORTCUTS = ['playPause', 'seekBack', 'seekForward', 'volumeUp', 'volumeDown', 'controls', 'back', 'stop', 'pointLeft', 'pointRight', 'releaseLeft', 'releaseRight'] as const
+export const VR_SHORTCUTS = ['playPause', 'seekBack', 'seekForward', 'volumeUp', 'volumeDown', 'controls', 'back', 'stop', 'pointLeft', 'pointRight', 'releaseLeft', 'releaseRight', 'gripLeft', 'gripRight', 'gripReleaseLeft', 'gripReleaseRight'] as const
 export type VrShortcut = (typeof VR_SHORTCUTS)[number]
 
 export const VR_SKIP_SECONDS = 10

@@ -65,7 +65,7 @@ export interface QuestPassthrough extends ResolvedPassthrough {
 }
 
 export interface QuestMaskMeta {
-  version: 1
+  version: 1 | 2
   w: number
   h: number
   fps: number

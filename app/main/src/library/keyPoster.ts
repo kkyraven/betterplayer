@@ -12,8 +12,8 @@ const WEBP_QUALITY = '82'
 const KEY_VERSION = 2
 
 export function posterKeyed(saved: PassthroughSettings | undefined, name: string, auto: AutoKey | null): boolean {
-  const p = resolvePassthrough(saved, name, auto, true)
-  return p.on && p.mode === 'colour'
+  const p = resolvePassthrough(saved, name, auto, false)
+  return p.on && p.settings.mode !== 'ai'
 }
 
 type Rgb = [number, number, number]

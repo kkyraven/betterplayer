@@ -1,4 +1,4 @@
-import { Link, Lock, PencilRuler, Tags, type LucideIcon } from 'lucide-react'
+import { Blend, Link, Lock, PencilRuler, Tags, type LucideIcon } from 'lucide-react'
 import { useState, type ComponentType } from 'react'
 import type { MessageKey } from '@shared/i18n'
 import { Button } from '@/components/ui/Button'
@@ -8,6 +8,7 @@ import { isFree, useAccount } from '@/state/account'
 import { useT } from '@/state/i18n'
 import { useUi } from '@/state/ui'
 import { Matcher } from './Matcher'
+import { PassthroughCreator } from './PassthroughCreator'
 import { TagManager } from './TagManager'
 import '@/components/ui/Prompt.css'
 import './utilities.css'
@@ -15,6 +16,7 @@ import './utilities.css'
 const TOOLS = [
   { id: 'matcher', label: 'utilities.matcher', icon: Link, screen: Matcher, supporter: false },
   { id: 'tags', label: 'utilities.tags', icon: Tags, screen: TagManager, supporter: true },
+  { id: 'passthrough', label: 'utilities.passthrough', icon: Blend, screen: PassthroughCreator, supporter: true },
 ] as const satisfies ReadonlyArray<{
   id: string
   label: MessageKey

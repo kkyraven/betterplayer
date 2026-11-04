@@ -1,11 +1,13 @@
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
+import { isIPv4 } from 'node:net'
 import { QUEST_DISCOVERY_PORT, QUEST_PAIR_TIMEOUT_MS, QUEST_PROTOCOL, type QuestHeadset, type QuestPairPrompt, type QuestPairRequest, type QuestPinResult, type QuestProbe } from '@shared/quest'
 
 interface Paired {
   id: string
   name: string
   tokenHash: string
+  host?: string
 }
 
 interface Pending {
@@ -112,6 +114,11 @@ export class QuestPairing {
   }
 
   used(headset: { id: string; name: string }, host: string) {
+    const known = this.paired.find((h) => h.id === headset.id)
+    if (known && isIPv4(host) && known.host !== host) {
+      known.host = host
+      this.save()
+    }
     const s = this.seen.get(headset.id)
     const fresh = s?.host === host && Date.now() - s.at < SEEN_MS / 2 && s.probes === 0
     this.seen.set(headset.id, { name: s?.name || headset.name, host, port: s?.host === host ? s.port : QUEST_DISCOVERY_PORT, v: s?.v ?? QUEST_PROTOCOL, at: Date.now(), probes: 0 })
@@ -122,6 +129,13 @@ export class QuestPairing {
   address(id: string): { host: string; port: number } | null {
     const s = this.seen.get(id)
     return s && Date.now() - s.at < SEEN_MS ? { host: s.host, port: s.port } : null
+  }
+
+  quietHosts(now = Date.now()): string[] {
+    return this.paired.flatMap((h) => {
+      const s = this.seen.get(h.id)
+      return h.host && isIPv4(h.host) && !(s && now - s.at < SEEN_MS) ? [h.host] : []
+    })
   }
 
   request(headset: QuestPairRequest, host: string, respond: (status: number, body: unknown) => void): string | null {

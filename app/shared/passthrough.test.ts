@@ -3,6 +3,7 @@ import { FLAT, type Projection } from './projection'
 import {
   autoKey,
   eyeToFrame,
+  isAlphaName,
   keyColour,
   keyName,
   keySamplePoints,
@@ -125,13 +126,22 @@ describe('resolvePassthrough', () => {
     expect(resolvePassthrough(saved, 'x', found, true)).toMatchObject({ on: false, key: LIME, keySource: 'user', modeSource: 'user', feather: 'distance', featherPx: 16, settings: saved })
   })
 
-  it('goes to AI when no colour won and the model is ready, else keys the commonest colour', () => {
-    expect(resolvePassthrough(undefined, 'passthrough', none, true)).toMatchObject({ mode: 'ai', modeSource: 'auto' })
+  it('goes to AI when a mask is made, else keys the commonest colour', () => {
+    expect(resolvePassthrough(undefined, 'passthrough', found, true)).toMatchObject({ mode: 'ai', modeSource: 'auto' })
     expect(resolvePassthrough(undefined, 'passthrough', none, false)).toMatchObject({ mode: 'colour', key: LIME, auto: LIME, candidates: [BLUE] })
+    expect(resolvePassthrough({ ...PASSTHROUGH_DEFAULTS, on: true, mode: 'ai' }, 'x', found, false)).toMatchObject({ mode: 'colour', modeSource: 'user' })
   })
 
   it('keys chroma green before the colour is sampled', () => {
-    expect(resolvePassthrough(undefined, 'passthrough', null, true)).toMatchObject({ mode: 'colour', key: PASSTHROUGH_FALLBACK_KEY, auto: null, candidates: [] })
+    expect(resolvePassthrough(undefined, 'passthrough', null, false)).toMatchObject({ mode: 'colour', key: PASSTHROUGH_FALLBACK_KEY, auto: null, candidates: [] })
+  })
+
+  it('knows an external alpha by its name', () => {
+    expect(isAlphaName('scene_XALPHA.mp4')).toBe(true)
+    expect(isAlphaName('Scene_xalpha.MKV')).toBe(true)
+    expect(isAlphaName('scene_XALPHA')).toBe(false)
+    expect(isAlphaName('scene_XALPHA.mp4.part')).toBe(false)
+    expect(isAlphaName('my_XALPHA_cut.mp4')).toBe(false)
   })
 })
 

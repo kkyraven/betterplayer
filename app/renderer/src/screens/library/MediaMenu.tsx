@@ -1,5 +1,5 @@
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
-import { ArrowDown, ArrowUp, Ellipsis, ExternalLink, EyeOff, FolderOpen, Pencil, PencilRuler, Pin, PinOff, Tag, Undo2 } from 'lucide-react'
+import { ArrowDown, ArrowUp, Blend, Ellipsis, ExternalLink, EyeOff, FolderOpen, Pencil, PencilRuler, Pin, PinOff, Tag, Undo2 } from 'lucide-react'
 import { useEffect, useRef, useState, type FormEvent, type MouseEvent } from 'react'
 import { create } from 'zustand'
 import { isPlaylist, type MediaRow } from '@shared/library'
@@ -9,10 +9,13 @@ import { Button } from '@/components/ui/Button'
 import { Field } from '@/components/ui/Field'
 import { IconButton } from '@/components/ui/IconButton'
 import { Modal } from '@/components/ui/Modal'
+import { Toast } from '@/components/ui/Toast'
 import { electron, REVEAL_LABEL } from '@/node'
+import { isPremium, useAccount } from '@/state/account'
 import { useEditor } from '@/state/editor'
 import { useT } from '@/state/i18n'
 import { useLibrary } from '@/state/library'
+import { useCreator } from '@/state/passthroughCreator'
 import { canReorderPlaylist, movePlaylistRow } from './playlistDrag'
 import '@/components/ui/Prompt.css'
 
@@ -44,6 +47,9 @@ export function MediaMenu() {
   const tags = useLibrary((s) => s.tags)
   const playlistId = useLibrary(s => s.playlistId)
   const reorderable = useLibrary(canReorderPlaylist)
+  const premium = useAccount(isPremium)
+  const queued = useCreator((s) => (row ? s.jobs.some((j) => j.path === row.path) : false))
+  const [queuedToast, setQueuedToast] = useState(0)
   const position = useLibrary(s => s.rows.findIndex(r => !isPlaylist(r) && r.id === id))
   const total = useLibrary(s => s.total)
   const [tagging, setTagging] = useState<{ id: number; tags: string[]; rect: DOMRect; anchor: HTMLElement | null } | null>(null)
@@ -116,6 +122,12 @@ export function MediaMenu() {
                   {t('library.menu.openInEditor')}
                 </DropdownMenu.Item>
               )}
+              {premium && !queued && !isUrl(row.path) && row.projection !== 'flat' && (
+                <DropdownMenu.Item className="item" onSelect={() => void useCreator.getState().add([row]).then(() => setQueuedToast((n) => n + 1))}>
+                  <Blend />
+                  {t('library.menu.makePassthrough')}
+                </DropdownMenu.Item>
+              )}
               <DropdownMenu.Separator className="sep" />
               {playlistId !== null && <>
                 <DropdownMenu.Item className="item" disabled={!reorderable || position <= 0} onSelect={() => void movePlaylistRow(row, -1)}><ArrowUp />{t('library.playlist.moveEarlier')}</DropdownMenu.Item>
@@ -138,6 +150,7 @@ export function MediaMenu() {
         if (!open && useRenameMedia.getState() === rename) useRenameMedia.setState({ row: null })
       }} />}
       {tagging && <TagPicker tags={tags.map((tag) => tag.name)} selected={selectedTags} saveError={tagError} onChange={changeTags} rect={tagging.rect} anchor={tagging.anchor} onClose={() => setTagging(null)} />}
+      {queuedToast > 0 && <Toast key={queuedToast} message={t('utilities.passthrough.queuedToast')} onHide={() => setQueuedToast(0)} />}
     </>
   )
 }

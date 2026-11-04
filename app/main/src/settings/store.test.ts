@@ -162,8 +162,13 @@ describe('denial', () => {
 })
 
 describe('remote source', () => {
-  it('starts with no source and follow off', () => {
+  it('starts with no source, follow off and the library not served', () => {
     expect(migrate(null).remote).toEqual({ enabled: false, port: 8420, source: '', follow: false, password: '', sourcePassword: '' })
+  })
+
+  it('keeps a server switched on with no password as it was, for the server to refuse', () => {
+    const remote = migrate({ version: 1, remote: { enabled: true, port: 8420, password: '' } }).remote
+    expect(remote).toMatchObject({ enabled: true, password: '' })
   })
 
   it('normalises the address and keeps follow', () => {

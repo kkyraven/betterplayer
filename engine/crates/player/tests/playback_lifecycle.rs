@@ -7,7 +7,9 @@ struct Fixtures(PathBuf);
 
 impl Fixtures {
     fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("bp-playback-lifecycle-{}", std::process::id()));
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("bp-playback-lifecycle-{}-{n}", std::process::id()));
         std::fs::create_dir(&dir).unwrap();
         let fixtures = Self(dir);
         let picture = fixtures.0.join("colors.ppm");
@@ -165,4 +167,32 @@ fn stop_start_resize_and_overlapping_players_preserve_pixels() {
             assert_eq!(player.stats().render_errors, 0);
         }
     }
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires ffmpeg with hevc_nvenc, libmpv and a D3D11 HEVC decoder"]
+fn hevc_marked_main10_with_8_bit_pixels_decodes_on_the_gpu() {
+    let fixtures = Fixtures::new();
+    let decoder = |name: &str, profile: &str| {
+        let path = fixtures.0.join(name);
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-loop", "1", "-i"])
+            .arg(fixtures.0.join("colors.ppm"))
+            .args(["-t", "1", "-r", "30", "-c:v", "hevc_nvenc", "-profile:v", profile, "-pix_fmt", "yuv420p"])
+            .args(["-vf", "scale=out_color_matrix=bt709", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"])
+            .arg(&path)
+            .output().expect("ffmpeg is required");
+        assert!(made.status.success(), "Could not encode {name}: {}", String::from_utf8_lossy(&made.stderr));
+        let mut buffers = Buffers::new(320, 180);
+        let player = Player::new(320, 180, options(None, true), None).unwrap();
+        player.resize(320, 180, Some(buffers.external())).unwrap();
+        open(&player, &path);
+        let decoder = player.hwdec_current();
+        drop(player);
+        buffers.check_guards();
+        decoder
+    };
+    assert_eq!(decoder("main.mp4", "main"), "d3d11va", "this GPU has no D3D11 HEVC decoder");
+    assert_eq!(decoder("main10-8bit.mp4", "main10"), "d3d11va");
 }

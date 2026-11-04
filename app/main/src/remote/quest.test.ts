@@ -9,11 +9,11 @@ import type { IpcEvents } from '@shared/ipc'
 import type { MediaDetail } from '@shared/library'
 import { PASSTHROUGH_DEFAULTS, resolvePassthrough, type PassthroughSettings } from '@shared/passthrough'
 import { resolveProjection } from '@shared/projection'
-import type { QuestBeacon, QuestPairPrompt, QuestPaired, QuestScene, QuestToys } from '@shared/quest'
+import { QUEST_DISCOVERY_PORT, type QuestBeacon, type QuestPairPrompt, type QuestPaired, type QuestScene, type QuestToys } from '@shared/quest'
 import type { PerVideoSettings, Settings } from '@shared/settings'
 import type { Library } from '../library'
 import { peerHost, readHello, readPosition, readSample, readToyCommand, resumePosition } from './quest'
-import { RemoteServer } from './server'
+import { NUDGE_MS, RemoteServer } from './server'
 
 vi.mock('electron', () => ({ app: {} }))
 
@@ -351,5 +351,40 @@ describe('pairing', () => {
     expect(prompts).toHaveLength(1)
     server.pairing.decline(prompts[0]!.requestId)
     await newer
+  })
+})
+
+describe('nudge', () => {
+  let server: RemoteServer
+  let headset: ReturnType<typeof createSocket>
+
+  afterEach(() => {
+    server.stop()
+    headset.close()
+    vi.useRealTimers()
+  })
+
+  it('sends the beacon to a paired headset that went quiet, and not while it is heard', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'Date'] })
+    headset = createSocket('udp4')
+    const got: QuestBeacon[] = []
+    headset.on('message', (m) => got.push(JSON.parse(m.toString('utf8')) as QuestBeacon))
+    await new Promise<void>((done) => headset.bind(QUEST_DISCOVERY_PORT, '127.0.0.1', done))
+    const port = await freePort()
+    server = new RemoteServer({} as Library)
+    await new Promise<void>((done) => {
+      server.setEmitter(() => done())
+      server.apply({ remote: { enabled: false, port, password: '' } } as Settings)
+    })
+    const requestId = server.pairing.request({ id: 'h1', name: 'Quest 3', pin: '0420' }, '127.0.0.1', () => {})
+    server.pairing.pin(requestId!, '0420')
+    server.pairing.used({ id: 'h1', name: 'Quest 3' }, '127.0.0.1')
+    const settle = () => new Promise((r) => setTimeout(r, 100))
+    vi.advanceTimersByTime(NUDGE_MS)
+    await settle()
+    expect(got).toEqual([])
+    vi.advanceTimersByTime(10_000)
+    while (got.length === 0) await settle()
+    expect(got[0]).toMatchObject({ app: 'betterplayer', id: server.pairing.id, port, paired: true })
   })
 })

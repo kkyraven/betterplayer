@@ -5,6 +5,7 @@ pub mod egl;
 pub mod fruc;
 pub mod portals;
 pub mod probe;
+mod share;
 pub mod vr;
 
 use std::path::PathBuf;

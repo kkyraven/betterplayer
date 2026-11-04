@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { PASSTHROUGH_DEFAULTS } from '@shared/passthrough'
 import { keyPixels, posterKeyed, type KeyLook } from './keyPoster'
 
 function frame(w: number, h: number, at: (x: number, y: number) => number): Uint8Array {
@@ -29,9 +30,10 @@ describe('keyPixels', () => {
 })
 
 describe('posterKeyed', () => {
-  it('keys a passthrough name in Colour mode, not in AI or off', () => {
+  it('keys a passthrough name unless AI is picked or it is off', () => {
     expect(posterKeyed(undefined, 'scene passthrough', null)).toBe(true)
-    expect(posterKeyed(undefined, 'scene passthrough', { key: null, candidates: [] })).toBe(false)
+    expect(posterKeyed(undefined, 'scene passthrough', { key: null, candidates: [] })).toBe(true)
+    expect(posterKeyed({ ...PASSTHROUGH_DEFAULTS, on: true, mode: 'ai' }, 'scene', null)).toBe(false)
     expect(posterKeyed(undefined, 'scene', null)).toBe(false)
   })
 })

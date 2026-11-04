@@ -1,5 +1,8 @@
 use std::ffi::{CStr, CString, c_char};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use bp_vr::{Aim, Buzz, Drag, Eye, Frame, Grab, Offset, Pose, Ray, Recentre, Scene, Shortcut, eye_view};
@@ -12,9 +15,10 @@ use windows::core::Interface;
 
 use super::controllers::Controllers;
 use super::egl::{Context, D3dImage};
+use super::share::{Handoff, Inbox, Outbox};
 use crate::gl_context::{GlContext, Gpu};
 use crate::mpv::{mpv_render_context, mpv_render_context_report_swap};
-use crate::render::{draw_mpv, skip_one, take_gl_error};
+use crate::render::{Msg, draw_mpv, skip_one, take_gl_error};
 use crate::vr::{ASKED, VrKind, VrLayout, VrStatus, VrView};
 use crate::{Feather, KEYING, KeyMode, Matte, VrPassthrough, VrPick};
 
@@ -29,6 +33,8 @@ void main() {
 const FRAGMENT: &str = "#version 300 es
 precision highp float;
 const float PI = 3.141592653589793;
+// Alpha this near 0 or 1 draws as 0 or 1: under half a step of 8 bits.
+const float NEAR = 0.5 / 255.0;
 const vec3 ROOM = vec3(7.0, 8.0, 11.0) / 255.0;
 const vec3 GLOW = vec3(183.0, 163.0, 255.0) / 255.0;
 const float RADIUS = 3.0;
@@ -67,7 +73,7 @@ uniform vec3 keyColour;
 // 0 Edges, 1 Colour distance.
 uniform int feather;
 uniform float featherPx;
-// The AI mask over one eye's picture, 1 where the video shows (`matte::showing`).
+// The AI mask over the whole frame, each eye its own, 1 where the video shows (`matte::showing`).
 uniform sampler2D mask;
 // 1 shows the room (the pass colour) round the picture and wherever it is keyed.
 uniform int passRoom;
@@ -167,33 +173,47 @@ float enclosed(vec2 t) {
 float keyAlpha(vec2 t, vec2 dx, vec2 dy, vec3 c, out float own) {
   own = shows(c, keyColour);
   float k = own;
-  if (featherPx > 0.0) {
+  // Taps that cannot change what draws (NEAR) are skipped, as in the Quest's keyAlpha: Edges needs none where the
+  // colour does not show, and Colour distance none past the first where the colour shows all but whole or not at
+  // all and that tap agrees.
+  if (featherPx > 0.0 && (feather == 1 || own > NEAR)) {
     vec2 r = featherPx / (vec2(textureSize(video, 0)) * share());
-    float sum = own;
-    float least = 1.0;
-    float most = 0.0;
-    for (int i = 0; i < 8; i++) {
-      float a = float(i) * PI * 0.25;
-      float s = shows(sampleAt(t + r * vec2(cos(a), sin(a)), dx, dy), keyColour);
-      sum += s;
-      least = min(least, s);
-      most = max(most, s);
+    float s = shows(sampleAt(t + r * vec2(1.0, 0.0), dx, dy), keyColour);
+    float sum = own + s;
+    float least = s;
+    float most = s;
+    bool settled = feather == 1 && (s >= 0.5 ? own >= 1.0 - NEAR : own <= NEAR);
+    if (!settled) {
+      for (int i = 1; i < 8; i++) {
+        float a = float(i) * PI * 0.25;
+        s = shows(sampleAt(t + r * vec2(cos(a), sin(a)), dx, dy), keyColour);
+        sum += s;
+        least = min(least, s);
+        most = max(most, s);
+      }
     }
-    k = feather == 0 ? min(own, sum / 9.0) : least > 0.5 ? 1.0 : most < 0.5 ? 0.0 : own;
+    k = feather == 0 ? min(own, sum / 9.0) : settled ? own : least > 0.5 ? 1.0 : most < 0.5 ? 0.0 : own;
   }
   float grey = 1.0 - smoothstep(0.05, 0.15, length(ycc(keyColour).yz - 0.5));
   if (grey > 0.0 && k < 1.0) k = max(k, grey * enclosed(t));
   return k;
 }
-// AI: the mask (255 shows) at `t`, softened by the same taps as Edges. As maskAlpha in the Quest's
-// passthrough.frag.
+// The AI mask at `t` in this eye, read at the frame point the video is (`eyeOf`). Half a cell inside
+// this eye's cells, so the filter never blends in the other eye's.
+float maskAt(vec2 t) {
+  vec2 inset = 0.5 / (vec2(textureSize(mask, 0)) * share());
+  return texture(mask, eyeOf(clamp(t, inset, 1.0 - inset))).r;
+}
+// AI: the mask (255 shows) at `t`, softened by the same taps as Edges, `featherPx` of the frame's
+// pixels round it. As maskAlpha in the Quest's passthrough.frag.
 float maskAlpha(vec2 t) {
-  float sum = texture(mask, t).r;
+  float sum = maskAt(t);
   if (featherPx > 0.0) {
+    // In this eye's 0 to 1, that is featherPx / textureSize(video, 0) of the frame.
     vec2 reach = featherPx / (vec2(textureSize(video, 0)) * share());
     for (int i = 0; i < 8; i++) {
       float a = float(i) * PI * 0.25;
-      sum += texture(mask, clamp(t + reach * vec2(cos(a), sin(a)), 0.0, 1.0)).r;
+      sum += maskAt(t + reach * vec2(cos(a), sin(a)));
     }
     sum /= 9.0;
   }
@@ -589,7 +609,7 @@ impl EyeTarget {
     }
 }
 
-pub(crate) struct Headset {
+struct Renderer {
     gpu: Gpu,
     targets: [EyeTarget; 2],
     size: (u32, u32),
@@ -599,15 +619,15 @@ pub(crate) struct Headset {
     legend: Option<usize>,
     models: [bool; 2],
     rays: [bool; 2],
+    inbox: Inbox,
     video: Option<Video>,
-    max_texture: u32,
     anisotropy: f32,
     view: VrView,
     passthrough: VrPassthrough,
     mask: Option<MaskTexture>,
     censor: Option<MaskTexture>,
     pick: Option<usize>,
-    held_back: [bool; 2],
+    held_back: [bool; 4],
     aim: [Option<Ray>; 2],
     head: Option<Pose>,
     recentre: Recentre,
@@ -617,8 +637,6 @@ pub(crate) struct Headset {
     grab: Option<Grab>,
     screen: f32,
     status: Arc<Mutex<Option<VrStatus>>>,
-    period: Duration,
-    last_frame: Instant,
     second: (Instant, u32),
     failing: Option<(Instant, String)>,
     ended: bool,
@@ -626,8 +644,8 @@ pub(crate) struct Headset {
     scene: Scene,
 }
 
-impl Headset {
-    pub fn start(gl: &GlContext, view: VrView, status: Arc<Mutex<Option<VrStatus>>>) -> Result<Headset, String> {
+impl Renderer {
+    fn start(gl: &GlContext, view: VrView, status: Arc<Mutex<Option<VrStatus>>>, handoff: Handoff) -> Result<Renderer, String> {
         let angle = gl.angle();
         if !angle.has_extension("EGL_ANGLE_image_d3d11_texture") {
             return Err("no-interop: This build's ANGLE cannot share D3D11 textures (EGL_ANGLE_image_d3d11_texture), which the headset needs".into());
@@ -646,8 +664,6 @@ impl Headset {
         let controllers = Controllers::new(gpu, [targets[0].image.fbo, targets[1].image.fbo], size)
             .inspect_err(|e| eprintln!("bp-player: the controllers are not drawn: {e}"))
             .ok();
-        let mut max_texture = 0;
-        unsafe { gl::GetIntegerv(gl::MAX_TEXTURE_SIZE, &mut max_texture) };
         let anisotropy = unsafe { max_anisotropy() };
         let refresh_hz = scene.refresh_hz();
         *status.lock().unwrap() = Some(VrStatus {
@@ -674,7 +690,7 @@ impl Headset {
             keying.picks.clear();
             keying.passthrough
         };
-        Ok(Headset {
+        Ok(Renderer {
             gpu,
             targets,
             size,
@@ -684,15 +700,15 @@ impl Headset {
             legend: None,
             models: [true; 2],
             rays: [false; 2],
+            inbox: Inbox::new(handoff),
             video: None,
-            max_texture: max_texture.max(1) as u32,
             anisotropy,
             view,
             passthrough,
             mask: None,
             censor: None,
             pick: None,
-            held_back: [false; 2],
+            held_back: [false; 4],
             aim: [None; 2],
             head,
             recentre: head.map(|h| Recentre::from_head(&h)).unwrap_or_default(),
@@ -702,8 +718,6 @@ impl Headset {
             grab: None,
             screen,
             status,
-            period: Duration::from_secs_f32(1.0 / if refresh_hz.is_finite() && refresh_hz >= 1.0 { refresh_hz } else { 90.0 }),
-            last_frame: Instant::now(),
             second: (Instant::now(), 0),
             failing: None,
             ended: false,
@@ -712,73 +726,69 @@ impl Headset {
         })
     }
 
-    pub fn view(&mut self, view: VrView) {
+    fn view(&mut self, view: VrView) {
         if self.portals.hold_view(view) {
             return;
         }
         self.view = view;
     }
 
-    pub fn recentre(&mut self, keep_recline: bool) {
+    fn recentre(&mut self, keep_recline: bool) {
         self.keep_recline = keep_recline && (!self.recentre_next || self.keep_recline);
         self.recentre_next = true;
     }
 
-    pub fn draw_video(&mut self, ctx: *mut mpv_render_context, (w, h): (u32, u32)) -> bool {
-        if w == 0 || h == 0 {
-            return true;
+    fn take_video(&mut self, angle: &Context) {
+        let (video, gpu, anisotropy) = (&mut self.video, self.gpu, self.anisotropy);
+        let mut failed = None;
+        let taken = self.inbox.take(angle, |(w, h), from| {
+            if video.as_ref().is_none_or(|v| (v.w, v.h) != (w, h)) {
+                *video = None;
+                match Video::new(w, h, anisotropy, gpu) {
+                    Ok(v) => *video = Some(v),
+                    Err(e) => {
+                        failed = Some(e);
+                        return;
+                    }
+                }
+            }
+            let Some(v) = video.as_ref() else { return };
+            unsafe {
+                gl::Disable(gl::SCISSOR_TEST);
+                gl::BindFramebuffer(gl::READ_FRAMEBUFFER, from);
+                gl::BindFramebuffer(gl::DRAW_FRAMEBUFFER, v.fbo);
+                gl::BlitFramebuffer(0, 0, w as i32, h as i32, 0, 0, w as i32, h as i32, gl::COLOR_BUFFER_BIT, gl::NEAREST);
+                gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+            }
+        });
+        if let Some(e) = failed {
+            self.fail(format!("failed: {e}"));
+            return;
         }
-        let shrink = (self.max_texture as f32 / w.max(h) as f32).min(1.0);
-        let (w, h) = (((w as f32 * shrink) as u32).max(1), ((h as f32 * shrink) as u32).max(1));
-        let _gpu = self.gpu.section();
-        if self.video.as_ref().is_none_or(|v| (v.w, v.h) != (w, h)) {
-            self.video = None;
-            match Video::new(w, h, self.anisotropy, self.gpu) {
-                Ok(v) => self.video = Some(v),
-                Err(e) => {
-                    skip_one(self.gpu, ctx);
-                    self.fail(format!("failed: {e}"));
-                    return false;
+        match taken {
+            Ok(true) => {
+                if let Some(v) = &self.video {
+                    unsafe {
+                        gl::BindTexture(gl::TEXTURE_2D, v.tex);
+                        gl::GenerateMipmap(gl::TEXTURE_2D);
+                        gl::BindTexture(gl::TEXTURE_2D, 0);
+                    }
+                }
+            }
+            Ok(false) => {}
+            Err(e) => {
+                static REPORTED: AtomicBool = AtomicBool::new(false);
+                if !REPORTED.swap(true, Ordering::Relaxed) {
+                    eprintln!("bp-player: {e}");
                 }
             }
         }
-        let Some(v) = &self.video else { return false };
-        let drawn = draw_mpv(ctx, v.fbo, w, h, VIDEO_DEPTH) >= 0;
-        if drawn {
-            unsafe {
-                gl::BindTexture(gl::TEXTURE_2D, v.tex);
-                gl::GenerateMipmap(gl::TEXTURE_2D);
-                gl::BindTexture(gl::TEXTURE_2D, 0);
-            }
+        if let Some(e) = take_gl_error() {
+            eprintln!("bp-player: GL error 0x{e:x} taking the headset video");
         }
-        unsafe { mpv_render_context_report_swap(ctx) };
-        take_gl_error().is_none() && drawn
     }
 
-    pub fn copy_video(&self, fbo: u32, w: u32, h: u32) -> bool {
-        let Some(v) = &self.video else { return false };
-        let mut level = 0;
-        while v.w >> (level + 1) >= w && v.h >> (level + 1) >= h {
-            level += 1;
-        }
-        let _gpu = self.gpu.section();
-        unsafe {
-            gl::Disable(gl::SCISSOR_TEST);
-            gl::BindFramebuffer(gl::READ_FRAMEBUFFER, v.read);
-            gl::FramebufferTexture2D(gl::READ_FRAMEBUFFER, gl::COLOR_ATTACHMENT0, gl::TEXTURE_2D, v.tex, level);
-            gl::BindFramebuffer(gl::DRAW_FRAMEBUFFER, fbo);
-            let (sw, sh) = ((v.w >> level) as i32, (v.h >> level) as i32);
-            gl::BlitFramebuffer(0, 0, sw, sh, 0, 0, w as i32, h as i32, gl::COLOR_BUFFER_BIT, gl::LINEAR);
-            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
-        }
-        take_gl_error().is_none()
-    }
-
-    pub fn overdue(&self) -> bool {
-        self.last_frame.elapsed() > self.period / 2
-    }
-
-    pub fn frame(&mut self) {
+    fn frame(&mut self, angle: &Context) {
         let called = Instant::now();
         match self.wait() {
             Ok(()) => {
@@ -795,7 +805,7 @@ impl Headset {
                     self.view = view;
                 }
                 if let Some(head) = self.head {
-                    match self.draw(&head) {
+                    match self.draw(&head, angle) {
                         Ok(()) => self.failing = None,
                         Err(e) => self.trouble(e),
                     }
@@ -808,14 +818,17 @@ impl Headset {
             }
         }
         self.events();
-        self.last_frame = Instant::now();
     }
 
-    pub fn ended(&self) -> bool {
+    fn ended(&self) -> bool {
         self.ended
     }
 
-    fn draw(&mut self, head: &Pose) -> Result<(), String> {
+    fn draw(&mut self, head: &Pose, angle: &Context) -> Result<(), String> {
+        let asked = Instant::now();
+        let _gpu = self.gpu.section();
+        self.portals.locked(asked);
+        self.take_video(angle);
         let p = &self.program;
         let (w, h) = self.size;
         let (mode, hfov) = self.mode();
@@ -829,9 +842,6 @@ impl Headset {
         let matte = key.filter(|k| k.mode == KeyMode::Ai && mode != 0).and_then(|_| crate::matte::showing());
         let reticle = self.pick.and_then(|hand| self.aimed(hand));
         let models = self.scene.controllers();
-        let asked = Instant::now();
-        let _gpu = self.gpu.section();
-        self.portals.locked(asked);
         let masked = matte.is_some_and(|(at, m)| MaskTexture::show(&mut self.mask, self.gpu, at, &m));
         let censoring = crate::matte::censoring().map(|(look, grid)| (look, grid.is_some_and(|(at, m)| MaskTexture::show(&mut self.censor, self.gpu, at, &m))));
         let keying = match key {
@@ -1039,6 +1049,10 @@ impl Headset {
                 Shortcut::PointRight => (1, true),
                 Shortcut::ReleaseLeft => (0, false),
                 Shortcut::ReleaseRight => (1, false),
+                Shortcut::GripLeft => (2, true),
+                Shortcut::GripRight => (3, true),
+                Shortcut::GripReleaseLeft => (2, false),
+                Shortcut::GripReleaseRight => (3, false),
                 Shortcut::Back => {
                     let Some(hand) = self.pick.take() else { return true };
                     picks.push(VrPick::Cancel { hand });
@@ -1101,6 +1115,218 @@ impl Headset {
         }
         self.ended = true;
     }
+}
+
+enum Ask {
+    View(VrView),
+    Recentre(bool),
+}
+
+pub(crate) struct Headset {
+    gpu: Gpu,
+    angle: *const Context,
+    out: Outbox,
+    video: Option<Video>,
+    mipmapped: bool,
+    max_texture: u32,
+    status: Arc<Mutex<Option<VrStatus>>>,
+    asks: Option<Sender<Ask>>,
+    thread: Option<JoinHandle<()>>,
+    ended: Arc<AtomicBool>,
+}
+
+impl Headset {
+    pub fn start(gl: &GlContext, view: VrView, status: Arc<Mutex<Option<VrStatus>>>, wake: Sender<Msg>) -> Result<Headset, String> {
+        let out = Outbox::new();
+        let handoff = out.handoff();
+        let (asks, asked) = channel();
+        let (started, answer) = channel();
+        let ended = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let (status, ended) = (status.clone(), ended.clone());
+            std::thread::Builder::new()
+                .name("bp-headset".into())
+                .spawn(move || run(view, status, handoff, asked, started, ended, wake))
+                .map_err(|e| format!("failed: the headset thread: {e}"))?
+        };
+        if let Err(e) = answer.recv().unwrap_or_else(|_| Err("failed: the headset thread ended".into())) {
+            let _ = thread.join();
+            return Err(e);
+        }
+        let gpu = gl.gpu();
+        let mut max_texture = 0;
+        {
+            let _gpu = gpu.section();
+            unsafe { gl::GetIntegerv(gl::MAX_TEXTURE_SIZE, &mut max_texture) };
+        }
+        Ok(Headset {
+            gpu,
+            angle: gl.angle(),
+            out,
+            video: None,
+            mipmapped: false,
+            max_texture: max_texture.max(1) as u32,
+            status,
+            asks: Some(asks),
+            thread: Some(thread),
+            ended,
+        })
+    }
+
+    pub fn view(&mut self, view: VrView) {
+        self.ask(Ask::View(view));
+    }
+
+    pub fn recentre(&mut self, keep_recline: bool) {
+        self.ask(Ask::Recentre(keep_recline));
+    }
+
+    fn ask(&self, ask: Ask) {
+        if let Some(asks) = &self.asks {
+            let _ = asks.send(ask);
+        }
+    }
+
+    pub fn draw_video(&mut self, ctx: *mut mpv_render_context, (w, h): (u32, u32), window: bool) -> bool {
+        if w == 0 || h == 0 {
+            return true;
+        }
+        let shrink = (self.max_texture as f32 / w.max(h) as f32).min(1.0);
+        let (w, h) = (((w as f32 * shrink) as u32).max(1), ((h as f32 * shrink) as u32).max(1));
+        let _gpu = self.gpu.section();
+        if !window {
+            self.video = None;
+        } else if self.video.as_ref().is_none_or(|v| (v.w, v.h) != (w, h)) {
+            self.video = None;
+            match Video::new(w, h, 0.0, self.gpu) {
+                Ok(v) => self.video = Some(v),
+                Err(e) => {
+                    skip_one(self.gpu, ctx);
+                    self.fail(format!("failed: {e}"));
+                    return false;
+                }
+            }
+        }
+        let angle = unsafe { &*self.angle };
+        let video = self.video.as_ref();
+        let sent = self.out.send(angle, (w, h), |to| match video {
+            Some(v) => {
+                let drawn = draw_mpv(ctx, v.fbo, w, h, VIDEO_DEPTH) >= 0;
+                if drawn {
+                    unsafe {
+                        gl::Disable(gl::SCISSOR_TEST);
+                        gl::BindFramebuffer(gl::READ_FRAMEBUFFER, v.fbo);
+                        gl::BindFramebuffer(gl::DRAW_FRAMEBUFFER, to);
+                        gl::BlitFramebuffer(0, 0, w as i32, h as i32, 0, 0, w as i32, h as i32, gl::COLOR_BUFFER_BIT, gl::NEAREST);
+                        gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+                    }
+                }
+                drawn
+            }
+            None => draw_mpv(ctx, to, w, h, VIDEO_DEPTH) >= 0,
+        });
+        let drawn = match sent {
+            Ok(drawn) => drawn,
+            Err(e) => {
+                skip_one(self.gpu, ctx);
+                self.fail(format!("failed: {e}"));
+                return false;
+            }
+        };
+        self.mipmapped = false;
+        unsafe { mpv_render_context_report_swap(ctx) };
+        take_gl_error().is_none() && drawn
+    }
+
+    pub fn copy_video(&mut self, fbo: u32, w: u32, h: u32) -> bool {
+        let Some(v) = &self.video else { return false };
+        let mut level = 0;
+        while v.w >> (level + 1) >= w && v.h >> (level + 1) >= h {
+            level += 1;
+        }
+        let _gpu = self.gpu.section();
+        unsafe {
+            if !self.mipmapped {
+                gl::BindTexture(gl::TEXTURE_2D, v.tex);
+                gl::GenerateMipmap(gl::TEXTURE_2D);
+                gl::BindTexture(gl::TEXTURE_2D, 0);
+                self.mipmapped = true;
+            }
+            gl::Disable(gl::SCISSOR_TEST);
+            gl::BindFramebuffer(gl::READ_FRAMEBUFFER, v.read);
+            gl::FramebufferTexture2D(gl::READ_FRAMEBUFFER, gl::COLOR_ATTACHMENT0, gl::TEXTURE_2D, v.tex, level);
+            gl::BindFramebuffer(gl::DRAW_FRAMEBUFFER, fbo);
+            let (sw, sh) = ((v.w >> level) as i32, (v.h >> level) as i32);
+            gl::BlitFramebuffer(0, 0, sw, sh, 0, 0, w as i32, h as i32, gl::COLOR_BUFFER_BIT, gl::LINEAR);
+            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+        }
+        take_gl_error().is_none()
+    }
+
+    pub fn ended(&self) -> bool {
+        self.ended.load(Ordering::Relaxed)
+    }
+
+    fn fail(&mut self, error: String) {
+        if let Some(s) = self.status.lock().unwrap().as_mut() {
+            s.active = false;
+            s.error = Some(bp_vr::coded(error));
+        }
+        self.ended.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for Headset {
+    fn drop(&mut self) {
+        self.asks = None;
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+fn run(
+    view: VrView,
+    status: Arc<Mutex<Option<VrStatus>>>,
+    handoff: Handoff,
+    asks: Receiver<Ask>,
+    started: Sender<Result<(), String>>,
+    ended: Arc<AtomicBool>,
+    wake: Sender<Msg>,
+) {
+    let gl = match GlContext::new() {
+        Ok(gl) => gl,
+        Err(e) => {
+            let _ = started.send(Err(format!("failed: the headset's GL context: {e}")));
+            return;
+        }
+    };
+    let mut r = match Renderer::start(&gl, view, status, handoff) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = started.send(Err(e));
+            return;
+        }
+    };
+    let _ = started.send(Ok(()));
+    'frames: loop {
+        loop {
+            match asks.try_recv() {
+                Ok(Ask::View(v)) => r.view(v),
+                Ok(Ask::Recentre(keep_recline)) => r.recentre(keep_recline),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break 'frames,
+            }
+        }
+        r.frame(gl.angle());
+        if r.ended() {
+            ended.store(true, Ordering::Relaxed);
+            let _ = wake.send(Msg::VrEnded);
+            break;
+        }
+    }
+    drop(r);
+    drop(gl);
 }
 
 fn flat_aspect(layout: VrLayout, w: f32, h: f32) -> f32 {

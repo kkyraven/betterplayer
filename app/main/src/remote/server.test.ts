@@ -109,3 +109,146 @@ describe('/media', () => {
     expect(events).toEqual([])
   })
 })
+
+describe('access', () => {
+  const ROUTES: [method: string, path: string][] = [
+    ['GET', '/'],
+    ['POST', '/'],
+    ['GET', '/heresphere'],
+    ['POST', '/heresphere/1'],
+    ['GET', '/deovr/1'],
+    ['GET', '/media/1'],
+    ['GET', '/preview/1'],
+    ['GET', '/thumb/1'],
+    ['GET', '/strip/1'],
+    ['GET', '/portal/1'],
+    ['GET', '/script/1/L0.funscript'],
+    ['GET', '/scripts/1'],
+    ['POST', '/api/library:query'],
+    ['POST', '/api/library:setFavourite'],
+    ['GET', '/events'],
+    ['GET', '/quest/scene/1'],
+    ['POST', '/quest/scene/1/position'],
+    ['GET', '/quest/toys'],
+    ['POST', '/quest/toys'],
+    ['POST', '/quest/hello'],
+    ['GET', '/quest/censor'],
+    ['GET', '/quest/mask/1/meta'],
+    ['GET', '/quest/info/x'],
+  ]
+  const OPEN: [method: string, path: string][] = [
+    ['GET', '/quest/info'],
+    ['POST', '/quest/pair'],
+  ]
+
+  let server: RemoteServer
+  let base: string
+  let token: string
+  const api = vi.fn(async () => ({ rows: [] }))
+  const headsetEvents: unknown[] = []
+
+  const library = {
+    media: () => null,
+    index: () => [],
+    tags: () => [],
+    tagIndex: () => [],
+    roots: () => [],
+    stripFile: () => '/nonexistent/strip.jpg',
+    poster: async () => ({ file: '/nonexistent/poster.jpg', type: 'image/jpeg' }),
+    portals: { still: async () => null },
+    scriptSet: async () => null,
+    scriptFile: () => null,
+    servePreview: async () => new Response(null, { status: 404 }),
+  } as unknown as Library
+
+  const start = async (remote: { enabled: boolean; password: string }, forced = false) => {
+    const port = await freePort()
+    server = new RemoteServer(library, forced ? port : undefined)
+    server.setApi(api)
+    server.setHeadsetEmitter((_event, data) => headsetEvents.push(data))
+    await new Promise<void>((done) => {
+      server.setEmitter(() => done())
+      server.apply({ remote: { ...remote, port } } as Settings)
+    })
+    base = `http://127.0.0.1:${port}`
+    token = await new Promise<string>((done) => {
+      const id = server.pairing.request({ id: 'quest-1', name: 'Quest', pin: '1234' }, '127.0.0.1', (_status, body) => done((body as { token: string }).token))
+      if (id) server.pairing.pin(id, '1234')
+    })
+  }
+
+  const status = async (method: string, path: string, authorization?: string) => {
+    const res = await fetch(`${base}${path}`, { method, headers: authorization ? { Authorization: authorization } : {}, body: method === 'POST' ? '[]' : undefined })
+    await res.body?.cancel()
+    return { status: res.status, challenge: res.headers.get('www-authenticate') }
+  }
+
+  const credentials = () => ({
+    none: undefined,
+    wrong: `Basic ${btoa('bp:nope')}`,
+    empty: `Basic ${btoa('bp:')}`,
+    password: `Basic ${btoa('bp:pw')}`,
+    token: `Bearer ${token}`,
+    unknownToken: 'Bearer not-a-token',
+  })
+
+  beforeEach(() => {
+    api.mockClear()
+    headsetEvents.length = 0
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+  })
+
+  afterEach(() => {
+    server.stop()
+    vi.restoreAllMocks()
+  })
+
+  const MODES: { name: string; remote: { enabled: boolean; password: string }; forced?: boolean; allowed: (keyof ReturnType<typeof credentials>)[] }[] = [
+    { name: 'serving off, no password', remote: { enabled: false, password: '' }, allowed: ['token'] },
+    { name: 'serving off, password set', remote: { enabled: false, password: 'pw' }, allowed: ['token'] },
+    { name: 'serving on, no password', remote: { enabled: true, password: '' }, allowed: ['token'] },
+    { name: 'serving on, password set', remote: { enabled: true, password: 'pw' }, allowed: ['token', 'password'] },
+    { name: 'dev flag, no password', remote: { enabled: false, password: '' }, forced: true, allowed: ['token'] },
+    { name: 'dev flag, password set', remote: { enabled: false, password: 'pw' }, forced: true, allowed: ['token', 'password'] },
+  ]
+
+  it.each(MODES)('$name', async ({ remote, forced, allowed }) => {
+    await start(remote, forced)
+    for (const [kind, authorization] of Object.entries(credentials())) {
+      const reaches = allowed.includes(kind as keyof ReturnType<typeof credentials>)
+      for (const [method, path] of ROUTES) {
+        const got = await status(method, path, authorization)
+        expect({ kind, method, path, refused: got.status === 401 }).toEqual({ kind, method, path, refused: !reaches })
+      }
+      for (const [method, path] of OPEN) expect((await status(method, path, authorization)).status).not.toBe(401)
+    }
+  })
+
+  it('never runs a forwarded channel or a headset event without credentials', async () => {
+    await start({ enabled: true, password: '' })
+    for (const [method, path] of ROUTES) await status(method, path)
+    expect(api).not.toHaveBeenCalled()
+    expect(headsetEvents).toEqual([])
+    await status('POST', '/api/library:setFavourite', `Bearer ${token}`)
+    expect(api).toHaveBeenCalledOnce()
+  })
+
+  it('asks for the password only while it can be given', async () => {
+    await start({ enabled: true, password: '' })
+    expect((await status('GET', '/')).challenge).toBeNull()
+    server.stop()
+    await start({ enabled: true, password: 'pw' })
+    expect((await status('GET', '/')).challenge).toBe('Basic realm="Better Player"')
+  })
+
+  it('stops letting the password in once it is cleared or serving is turned off', async () => {
+    await start({ enabled: true, password: 'pw' })
+    const password = `Basic ${btoa('bp:pw')}`
+    expect((await status('GET', '/thumb/1', password)).status).toBe(404)
+    server.apply({ remote: { enabled: true, password: '', port: Number(new URL(base).port) } } as Settings)
+    expect((await status('GET', '/thumb/1', password)).status).toBe(401)
+    server.apply({ remote: { enabled: false, password: 'pw', port: Number(new URL(base).port) } } as Settings)
+    expect((await status('GET', '/thumb/1', password)).status).toBe(401)
+    expect((await status('GET', '/thumb/1', `Bearer ${token}`)).status).toBe(404)
+  })
+})

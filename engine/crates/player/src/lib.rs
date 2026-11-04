@@ -117,6 +117,7 @@ pub struct VideoInfo {
     pub width: u32,
     pub height: u32,
     pub color_matrix: String,
+    pub fps: f64,
 }
 
 pub fn probe_video(path: &str) -> Result<VideoInfo, String> {
@@ -133,7 +134,12 @@ pub fn probe_video(path: &str) -> Result<VideoInfo, String> {
                 let width = mpv.get_double("video-dec-params/w").unwrap_or(0.0) as u32;
                 let height = mpv.get_double("video-dec-params/h").unwrap_or(0.0) as u32;
                 if width == 0 || height == 0 { continue; }
-                return Ok(VideoInfo { width, height, color_matrix: mpv.get_string("video-dec-params/colormatrix").unwrap_or_else(|| "auto".into()) });
+                return Ok(VideoInfo {
+                    width,
+                    height,
+                    color_matrix: mpv.get_string("video-dec-params/colormatrix").unwrap_or_else(|| "auto".into()),
+                    fps: mpv.get_double("container-fps").filter(|f| f.is_finite() && *f > 0.0).unwrap_or(0.0),
+                });
             }
             Event::EndFile { error } => return Err(error.unwrap_or_else(|| "the file has no video".into())),
             _ => {}
@@ -252,6 +258,8 @@ impl Player {
         mpv.set_option("idle", "yes")?;
         mpv.set_option("keep-open", "yes")?;
         mpv.set_option("pause", "yes")?;
+        #[cfg(windows)]
+        mpv.set_option("vd-lavc-check-hw-profile", "no")?;
         #[cfg(target_os = "linux")]
         for scaler in ["scale", "cscale", "dscale"] {
             mpv.set_option(scaler, enhance::DEFAULT_SCALE)?;

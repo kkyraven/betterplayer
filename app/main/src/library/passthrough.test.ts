@@ -60,7 +60,7 @@ describe('the auto colour column', () => {
 describe('Passthrough', () => {
   let db: LibraryDb
   let projection: Projection
-  let modelReady: boolean
+  let alpha: string | null
   const read = vi.fn<typeof readFrame>()
   let passthrough: Passthrough
 
@@ -70,10 +70,10 @@ describe('Passthrough', () => {
     db.upsertMedia({ ...media, rootId, path: '/v/room passthrough.mp4', title: 'Room' }, 1)
     db.upsertMedia({ ...media, rootId, path: '/v/plain.mp4', title: 'Plain' }, 1)
     projection = FLAT
-    modelReady = false
+    alpha = null
     read.mockReset()
     read.mockResolvedValue(frame(GREEN, { x: 0.3, y: 0.2, w: 0.4, h: 0.6, colour: RED }))
-    passthrough = new Passthrough(db, { projection: async () => projection, headers: () => undefined, modelReady: () => modelReady, read })
+    passthrough = new Passthrough(db, { projection: async () => projection, headers: () => undefined, alpha: (path) => (path.startsWith('/v/') ? alpha : null), read })
   })
 
   afterEach(() => {
@@ -108,12 +108,12 @@ describe('Passthrough', () => {
     expect(read).not.toHaveBeenCalled()
   })
 
-  it('turns to AI with no winning colour only for a local file with the model on disk', async () => {
-    read.mockResolvedValue(frame(GREEN, { x: 0, y: 0, w: 0.5, h: 1, colour: RED }))
+  it('turns to AI only for a local file with a made mask', async () => {
     const on = { ...PASSTHROUGH_DEFAULTS, on: true }
     expect(await passthrough.resolve('/v/plain.mp4', on)).toMatchObject({ mode: 'colour', modeSource: 'auto', aiReady: false })
-    modelReady = true
-    expect(await passthrough.resolve('/v/plain.mp4', on)).toMatchObject({ mode: 'ai', aiReady: true })
+    alpha = '/v/plain_XALPHA.mp4'
+    expect(await passthrough.resolve('/v/plain.mp4', on)).toMatchObject({ mode: 'ai', aiReady: true, alpha: '/v/plain_XALPHA.mp4' })
+    expect(await passthrough.resolve('/v/plain.mp4', { ...on, mode: 'colour' })).not.toHaveProperty('alpha')
     expect(await passthrough.resolve('https://cdn.example/clip.mp4', on)).toMatchObject({ mode: 'colour', aiReady: false })
   })
 

@@ -3,9 +3,10 @@ import { basicAuth } from '@shared/peer'
 import { authorised } from './auth'
 
 describe('authorised', () => {
-  it('lets everything through with no password set', () => {
-    expect(authorised(undefined, '')).toBe(true)
-    expect(authorised('Basic nonsense', '')).toBe(true)
+  it('lets nobody in with no password set', () => {
+    expect(authorised(undefined, '')).toBe(false)
+    expect(authorised('Basic nonsense', '')).toBe(false)
+    expect(authorised(basicAuth(''), '')).toBe(false)
   })
 
   it('needs the password under any user name', () => {

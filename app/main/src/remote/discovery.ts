@@ -1,5 +1,5 @@
 import { createSocket, type Socket } from 'node:dgram'
-import { QUEST_DISCOVERY_PROBE, QUEST_INVITE, type QuestBeacon, type QuestProbe } from '@shared/quest'
+import { QUEST_DISCOVERY_PORT, QUEST_DISCOVERY_PROBE, QUEST_INVITE, type QuestBeacon, type QuestProbe } from '@shared/quest'
 import { readProbe } from './pairing'
 
 export function probeOf(message: Buffer): Required<QuestProbe> | null {
@@ -20,4 +20,8 @@ export function answerProbes(port: number, beacon: (probe: Required<QuestProbe>,
 
 export function invite(socket: Socket, beacon: QuestBeacon, host: string, port: number) {
   socket.send(QUEST_INVITE + JSON.stringify(beacon), port, host)
+}
+
+export function nudge(socket: Socket, beacon: QuestBeacon, host: string) {
+  socket.send(JSON.stringify(beacon), QUEST_DISCOVERY_PORT, host)
 }

@@ -38,7 +38,7 @@ const fileName = (path: string) => (path.split(/[\\/]/).pop() ?? '').replace(/[?
 export interface PassthroughDeps {
   projection(path: string): Promise<Projection>
   headers(path: string): Record<string, string> | undefined
-  modelReady(): boolean
+  alpha(path: string): string | null
   read?: typeof readFrame
 }
 
@@ -57,15 +57,17 @@ export class Passthrough {
   async resolve(path: string, saved: PassthroughSettings | undefined, waitMs = Infinity): Promise<ResolvedPassthrough> {
     const facts = this.db.passthroughFacts(path)
     const name = facts?.name ?? fileName(path)
-    const aiReady = !isUrl(path) && this.deps.modelReady()
+    const alpha = isUrl(path) ? null : this.deps.alpha(path)
+    const aiReady = alpha !== null
+    const withAlpha = (r: ResolvedPassthrough): ResolvedPassthrough => (alpha && r.mode === 'ai' ? { ...r, alpha } : r)
     const cached = facts?.auto ?? null
-    const first = resolvePassthrough(saved, name, cached, aiReady)
+    const first = withAlpha(resolvePassthrough(saved, name, cached, aiReady))
     if (!first.on || first.settings.key !== null || cached !== null) return first
     let timer: ReturnType<typeof setTimeout> | undefined
     const late = Number.isFinite(waitMs) ? new Promise<null>((done) => (timer = setTimeout(done, waitMs, null))) : null
     const auto = await (late ? Promise.race([this.auto(path, facts), late]) : this.auto(path, facts))
     clearTimeout(timer)
-    return auto ? resolvePassthrough(saved, name, auto, aiReady) : first
+    return auto ? withAlpha(resolvePassthrough(saved, name, auto, aiReady)) : first
   }
 
   async sample(path: string, timeSec: number, u: number, v: number): Promise<number | null> {

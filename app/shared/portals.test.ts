@@ -2,10 +2,10 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
-  VR_PORTAL, PORTAL_SIZE, RETURN_SIZE, bandDirection, bandLayout, bandTexel, chipText, chipsQuery, columnAz, diveElDeg, diveFrame,
-  ease, edgeDeg, edgeFade, elapsed, fadeInDeg, fadeOutDeg, keyframeAt, portalAngles, portalHit, portalPose, portalStepDeg,
+  VR_PORTAL, PORTAL_SIZE, RETURN_SIZE, bandDirection, bandLayout, bandTexel, chipText, chipsQuery, columnAz, diveAngles, diveElDeg, diveFrame,
+  ease, edgeDeg, edgeFade, elapsed, fadeInDeg, fadeOutDeg, fromWindow, halfField, keyframeAt, portalAngles, portalHit, portalPose, portalStepDeg,
   readPortalHeaders, portalPath, resultCell, retarget, returnAz, reverse, scrollMax, shelfRows, startTransition, stillUv, textChips,
-  turnedAngles, worldTurn, type Chip, type DiveSpec, type Keyframe, type PortalSize, type Transition, type Vec3,
+  windowAngles, windowPicture, windowRay, type Chip, type DiveSpec, type Keyframe, type PortalPose, type PortalSize, type Transition, type Vec3,
 } from './portals'
 
 const DEG = Math.PI / 180
@@ -44,8 +44,8 @@ const hitCases: { name: string; az: number; el: number; h: number; size: 'portal
   { name: 'inside top edge', az: 8.1, el: -13.7, h: 0, size: 'portal', o: [0, 0, 0], v: dir(8.1, -13.7 + halfArc(P.h / 2 - 0.002, R / Math.cos(13.7 * DEG))) },
   { name: 'corner cut', az: 0, el: 2.5, h: 0, size: 'portal', o: [0, 0, 0], v: dir(halfArc(P.w / 2 - 0.1 * P.corner), 2.5 + halfArc(P.h / 2 - 0.1 * P.corner, R / Math.cos(2.5 * DEG))) },
   { name: 'inside corner', az: 0, el: 2.5, h: 0, size: 'portal', o: [0, 0, 0], v: dir(halfArc(P.w / 2 - 0.3 * P.corner), 2.5 + halfArc(P.h / 2 - 0.3 * P.corner, R / Math.cos(2.5 * DEG))) },
-  { name: 'lifted grows 12.5%', az: -24.35, el: 2.5, h: 1, size: 'portal', o: [0, 0, 0], v: dir(-24.35 + 1.12 * halfArc(P.w / 2), 2.5) },
-  { name: 'rest misses there', az: -24.35, el: 2.5, h: 0, size: 'portal', o: [0, 0, 0], v: dir(-24.35 + 1.12 * halfArc(P.w / 2), 2.5) },
+  { name: 'lifted grows 30%', az: -24.35, el: 2.5, h: 1, size: 'portal', o: [0, 0, 0], v: dir(-24.35 + 1.25 * halfArc(P.w / 2), 2.5) },
+  { name: 'rest misses there', az: -24.35, el: 2.5, h: 0, size: 'portal', o: [0, 0, 0], v: dir(-24.35 + 1.25 * halfArc(P.w / 2), 2.5) },
   { name: 'between columns', az: columnAz(1), el: 2.5, h: 0, size: 'portal', o: [0, 0, 0], v: dir((columnAz(1) + columnAz(2)) / 2, 2.5) },
   { name: 'eye offset', az: 8.1, el: 2.5, h: 0, size: 'portal', o: [0.032, 0.01, -0.02], v: dir(8.6, 2.2) },
   { name: 'behind', az: 0, el: 2.5, h: 0, size: 'portal', o: [0, 0, 0], v: dir(180, -2.5) },
@@ -53,16 +53,40 @@ const hitCases: { name: string; az: number; el: number; h: number; size: 'portal
 ]
 const hits = () => hitCases.map((c) => ({ ...c, pose: portalPose(c.az, c.el, c.h, sizes[c.size]), hit: portalHit(c.o, c.v, portalPose(c.az, c.el, c.h, sizes[c.size]), sizes[c.size]) }))
 
+const unit = (v: Vec3): Vec3 => { const n = Math.hypot(...v); return [v[0] / n, v[1] / n, v[2] / n] }
+const through = (o: Vec3, p: PortalPose, x: number, y: number): Vec3 => {
+  const az = p.az + (x * p.s) / p.hr, el = p.el + (y * p.s) / p.d
+  return unit([Math.cos(el) * Math.sin(az) * p.d - o[0], Math.sin(el) * p.d - o[1], -Math.cos(el) * Math.cos(az) * p.d - o[2]])
+}
+const EYE = 0.032
+const pictureCases: { name: string; az: number; el: number; h: number; size: 'portal' | 'return'; o: Vec3; x: number; y: number }[] = [
+  { name: 'centre', az: 0, el: 2.5, h: 0, size: 'portal', o: [0, 0, 0], x: 0, y: 0 },
+  { name: 'right edge', az: 0, el: 2.5, h: 0, size: 'portal', o: [0, 0, 0], x: P.w / 2 - 0.002, y: 0 },
+  { name: 'top edge', az: 8.1, el: -13.7, h: 0, size: 'portal', o: [0, 0, 0], x: 0, y: P.h / 2 - 0.002 },
+  { name: 'corner', az: -24.35, el: 2.5, h: 0, size: 'portal', o: [0, 0, 0], x: -(P.w / 2 - 0.4 * P.corner), y: -(P.h / 2 - 0.4 * P.corner) },
+  { name: 'left eye', az: 8.1, el: 2.5, h: 0, size: 'portal', o: [-EYE, 0, 0], x: 0.12, y: 0.05 },
+  { name: 'right eye', az: 8.1, el: 2.5, h: 0, size: 'portal', o: [EYE, 0, 0], x: 0.12, y: 0.05 },
+  { name: 'head moved', az: 8.1, el: -13.7, h: 0, size: 'portal', o: [0.12, -0.04, -0.1], x: -0.15, y: 0.08 },
+  { name: 'hovered centre', az: 24.35, el: 2.5, h: 1, size: 'portal', o: [0, 0, 0], x: 0, y: 0 },
+  { name: 'hovered edge', az: 24.35, el: 2.5, h: 1, size: 'portal', o: [0, 0, 0], x: P.w / 2 - 0.002, y: 0.03 },
+  { name: 'return picture', az: 26, el: 10.4, h: 1, size: 'return', o: [EYE, 0, 0], x: 0.03, y: -0.02 },
+]
+const pictures = () => pictureCases.map((c) => {
+  const pose = portalPose(c.az, c.el, c.h, sizes[c.size])
+  const v = through(c.o, pose, c.x, c.y)
+  return { ...c, v, picture: windowPicture(c.o, v, pose, sizes[c.size]) }
+})
+
 const layout = () => ({
   columnAz: [0, 1, 2, 3, 5].map((i) => ({ i, az: columnAz(i) })),
   resultCell: [[0, 3], [2, 3], [0, 9], [1, 9], [5, 9], [8, 9]].map(([i, n]) => ({ i, count: n, cell: resultCell(i!, n!) })),
   scrollMax: [0, 3, 4, 9, 24].map((columns) => ({ columns, deg: scrollMax(columns) })),
   edgeFade: [0, 20, fadeInDeg, 30, 35, fadeOutDeg, 45, -30].map((az) => ({ az, k: edgeFade(az) })),
   returnAz: [0.1, 0.19].map((labelW) => ({ labelW, az: returnAz(labelW) })),
-  turns: [[0, 2.5, dir(0, 2.5)], [-24.35, -13.7, dir(-20, -10)], [16.2, 2.5, dir(16.2, -1.909)], [8, 0, dir(0, 0)]].map(([az, el, v]) => {
-    const turn = worldTurn(az as number, el as number)
-    const angles = turnedAngles(v as Vec3, turn)
-    return { az, el, v, turn, angles, uv: stillUv(angles[0], angles[1], 36 * DEG, 27 * DEG) }
+  windows: [[0, 2.5, dir(0, 2.5)], [-24.35, -13.7, dir(-20, -10)], [16.2, 2.5, dir(16.2, -1.909)], [8, 0, dir(0, 0)]].map(([az, el, v]) => {
+    const w = windowRay(v as Vec3, (az as number) * DEG, (el as number) * DEG)
+    const angles = windowAngles(w)
+    return { az, el, v, w, angles, uv: stillUv(angles[0], angles[1], 36 * DEG, 27 * DEG) }
   }),
   portalAngles: [portalAngles(0, -0.05 * 1.4 / R, 1.4, 1.05, PORTAL_SIZE), portalAngles(20 * DEG, 0.27, R, 1, RETURN_SIZE)],
 })
@@ -92,6 +116,7 @@ const diveCases = (): DiveCase[] => {
   return [
     { name: 'dive start', t: s, nowMs: at(0), dim: 0.32 },
     { name: 'mid slide', t: s, nowMs: at(slideSpec.slideMs / 2), dim: 0.32 },
+    { name: 'grow start', t: s, nowMs: at(slideSpec.slideMs + 0.01), dim: 0.32 },
     { name: 'grow 25%', t: s, nowMs: at(slideSpec.slideMs + 125), dim: 0.32 },
     { name: 'grow end, no live yet', t: s, nowMs: at(end), dim: 0.32 },
     { name: 'live early: mid crossfade', t: live(s, at(100)), nowMs: at(end + 60 + 150), dim: 0.32 },
@@ -106,10 +131,13 @@ const diveCases = (): DiveCase[] => {
     { name: 'no slide 360 fade', t: startTransition(noSlideSpec), nowMs: 60, dim: 1 },
     { name: 'same: start', t: startTransition(sameSpec), nowMs: 0, dim: 0.32 },
     { name: 'same: mid', t: startTransition(sameSpec), nowMs: 300, dim: 0.32 },
-    { name: 'same: done', t: startTransition(sameSpec), nowMs: 500, dim: 0.32 },
+    { name: 'same: grow end', t: startTransition(sameSpec), nowMs: 500, dim: 0.32 },
+    { name: 'same: crossfade', t: startTransition(sameSpec), nowMs: 650, dim: 0.32 },
+    { name: 'same: done', t: startTransition(sameSpec), nowMs: 800, dim: 0.32 },
     { name: 'back start', t: startTransition(backSpec), nowMs: 0, dim: 0.32 },
-    { name: 'back mid', t: startTransition(backSpec), nowMs: 250, dim: 0.32 },
-    { name: 'back end', t: startTransition(backSpec), nowMs: 500, dim: 0.32 },
+    { name: 'back crossfade', t: startTransition(backSpec), nowMs: 150, dim: 0.32 },
+    { name: 'back mid', t: startTransition(backSpec), nowMs: 550, dim: 0.32 },
+    { name: 'back end', t: startTransition(backSpec), nowMs: 800, dim: 0.32 },
     { name: 'flat mid', t: startTransition(flatSpec), nowMs: 250, dim: 0.32 },
     { name: 'flat waiting', t: startTransition(flatSpec), nowMs: 800, dim: 0.32 },
     { name: 'flatBack mid', t: startTransition(flatBackSpec), nowMs: 250, dim: 0.32 },
@@ -117,6 +145,14 @@ const diveCases = (): DiveCase[] => {
   ]
 }
 const dives = () => diveCases().map((c) => ({ ...c, frame: diveFrame(c.t, c.nowMs, c.dim) }))
+
+const divePictureCases = ['grow start', 'grow 25%', 'grow end, no live yet', 'same: mid', 'back mid']
+const diveRays: [Vec3, Vec3][] = [[[0, 0, 0], dir(0, 1.909)], [[-EYE, 0, 0], dir(3, 1)], [[EYE, 0, 0], dir(3, 1)], [[0, 0, 0], dir(-40, -12)], [[EYE, 0.01, 0], dir(25, 15)]]
+const divePictures = () => divePictureCases.flatMap((name) => {
+  const c = diveCases().find((d) => d.name === name)!
+  const ap = diveFrame(c.t, c.nowMs, c.dim).aperture!
+  return diveRays.map(([o, v]) => ({ name, o, v, picture: diveAngles(o, v, ap, P.h / P.w) }))
+})
 
 const TAGS = ['Rain', 'Night', 'Sunset Balcony', 'pov', 'Point of View', 'Golden  Hour']
 const chipCases = [
@@ -141,7 +177,7 @@ const rows = () => rowCases.map(({ name, ...input }) => ({ name, input, output: 
 const fixture = () => ({
   constants: VR_PORTAL,
   derived: { stepDeg: portalStepDeg, edgeDeg, fadeInDeg, fadeOutDeg, diveElDeg },
-  keyframes: keyframes(), bands: bands(), poses: poses(), hits: hits(), layout: layout(), dives: dives(), chips: chips(), rows: rows(),
+  keyframes: keyframes(), bands: bands(), poses: poses(), hits: hits(), pictures: pictures(), layout: layout(), dives: dives(), divePictures: divePictures(), chips: chips(), rows: rows(),
 })
 
 function expectClose(actual: unknown, expected: unknown, path = '$'): void {
@@ -256,19 +292,40 @@ describe('portalPose and portalHit', () => {
     expect(hit('behind')).toBeNull()
   })
 
-  it('grows a lifted portal 12.5% as seen', () => {
+  it('grows a lifted portal 1.3 times as seen', () => {
     const lifted = portalPose(0, 0, 1, PORTAL_SIZE), rest = portalPose(0, 0, 0, PORTAL_SIZE)
-    expect((lifted.s / lifted.hr) / (rest.s / rest.hr)).toBeCloseTo(1.125, 9)
-    expect(hit('lifted grows 12.5%')).not.toBeNull()
+    expect((lifted.s / lifted.hr) / (rest.s / rest.hr)).toBeCloseTo(1.3, 2)
+    expect(hit('lifted grows 30%')).not.toBeNull()
     expect(hit('rest misses there')).toBeNull()
   })
+})
 
-  it('turns a portal so its front faces out through it', () => {
-    const [az, el] = turnedAngles(dir(-24.35, 2.5), worldTurn(-24.35, 2.5))
-    expect(az).toBeCloseTo(0, 9)
-    expect(el).toBeCloseTo(diveElDeg * DEG, 9)
-    expect(stillUv(0, 0, 36 * DEG, 27 * DEG)).toEqual([0.5, 0.5])
-    expect(stillUv(37 * DEG, 0, 36 * DEG, 27 * DEG)).toBeNull()
+describe('the fitted picture', () => {
+  const picture = (name: string) => pictures().find((p) => p.name === name)!.picture!
+
+  it('shows the front at the centre and 70% of 180 degrees across, wherever the portal sits', () => {
+    expect(picture('centre')[0]).toBeCloseTo(0, 9)
+    expect(picture('centre')[1]).toBeCloseTo(0, 9)
+    expect(picture('right edge')[0] / DEG).toBeGreaterThan(63)
+    expect(picture('right edge')[0] / DEG).toBeLessThan(70)
+    expect(picture('top edge')[1] / DEG).toBeGreaterThan(0.625 * 63)
+    expect(picture('corner')[0]).toBeLessThan(0)
+    expect(picture('corner')[2]).toBeLessThan(picture('centre')[2])
+  })
+
+  it('shows each eye a different part of the bowl, and 80% once grown', () => {
+    expect(picture('left eye')[0]).not.toBeCloseTo(picture('right eye')[0], 3)
+    expect(picture('hovered centre')[0]).toBeCloseTo(0, 9)
+    expect(picture('hovered edge')[0] / DEG).toBeGreaterThan(72)
+    expect(halfField(1) / DEG).toBeCloseTo(72, 9)
+  })
+
+  it('turns a window frame and back', () => {
+    const v = dir(-20, -10), w = windowRay(v, -24.35 * DEG, -13.7 * DEG)
+    fromWindow(w, -24.35 * DEG, -13.7 * DEG).forEach((c, i) => expect(c).toBeCloseTo(v[i]!, 12))
+    expect(windowAngles(windowRay(dir(-24.35, -13.7), -24.35 * DEG, -13.7 * DEG))[0]).toBeCloseTo(0, 9)
+    expect(stillUv(0, 0, 90 * DEG, 90 * DEG)).toEqual([0.5, 0.5])
+    expect(stillUv(91 * DEG, 0, 90 * DEG, 90 * DEG)).toBeNull()
   })
 })
 
@@ -283,6 +340,26 @@ describe('diveFrame', () => {
     const mid = frame('mid slide')
     expect(mid.portal!.az).toBeCloseTo(-8.1 / 2, 9)
     expect(mid.portal!.hover).toBeCloseTo(0.5, 9)
+  })
+
+  it('scales the picture from the fitted one at the grow start to the real scale at its end', () => {
+    const start = frame('grow start').aperture!, mid = frame('grow 25%').aperture!, k = 1 - 0.75 ** 1.6
+    expect(start.scale).toBeCloseTo(halfField(1) / slideSpec.from.hw, 2)
+    expect(start.bowl).toBeCloseTo(1, 6)
+    expect(mid.scale).toBeCloseTo((halfField(1) / slideSpec.from.hw) ** (1 - k), 9)
+    expect(frame('grow end, no live yet').aperture).toMatchObject({ scale: 1, bowl: 0, k: 1 })
+    const pose = portalPose(0, start.el / DEG, 1, PORTAL_SIZE)
+    for (const [o, v] of diveRays.slice(0, 3)) {
+      const atRest = windowPicture(o, v, pose, PORTAL_SIZE)!, grown = diveAngles(o, v, start, P.h / P.w)
+      expect(grown[0]).toBeCloseTo(atRest[0], 2)
+      expect(grown[1]).toBeCloseTo(atRest[1], 2)
+    }
+    const end = frame('grow end, no live yet').aperture!
+    for (const [o, v] of diveRays) {
+      const [az, el] = diveAngles(o, v, end, P.h / P.w)
+      expect(az).toBeCloseTo(Math.atan2(v[0], -v[2]), 9)
+      expect(el).toBeCloseTo(Math.asin(v[1]), 9)
+    }
   })
 
   it('grows the window in log size after the slide', () => {
@@ -314,19 +391,29 @@ describe('diveFrame', () => {
     expect(frame('reversed: undone').undone).toBe(true)
   })
 
-  it('fades the library fast with no slide and dims back in for the same video', () => {
+  it('fades the library fast with no slide and grows the same video from its still', () => {
     expect(frame('no slide 360 fade').libF).toBeCloseTo(1 - 0.5, 9)
-    expect(frame('same: start')).toMatchObject({ live: 1, outA: 1, outB: 0.32 })
-    expect(frame('same: done')).toMatchObject({ outB: 1, done: true })
+    expect(frame('same: start')).toMatchObject({ live: 0, outLive: 1, outA: 1, outB: 0.32 })
+    expect(frame('same: start').aperture!.scale).toBeGreaterThan(5)
+    expect(frame('same: grow end')).toMatchObject({ outB: 1, live: 0, done: false })
+    expect(frame('same: grow end').aperture!.scale).toBe(1)
+    expect(frame('same: crossfade').live).toBeCloseTo(0.5, 9)
+    expect(frame('same: done')).toMatchObject({ live: 1, done: true })
   })
 
-  it('runs back into the portal: library late, dim once the edge is in view', () => {
-    expect(frame('back start')).toMatchObject({ libF: 0, outB: 1, flash: 0 })
+  it('runs back into the portal: crossfades to the still at real scale, then shrinks and scales it down', () => {
+    expect(frame('back start')).toMatchObject({ libF: 0, outB: 1, flash: 0, live: 1, outLive: 1 })
+    expect(frame('back start').aperture).toMatchObject({ scale: 1, k: 1 })
     expect(frame('back start').aperture!.hw).toBeCloseTo(fullHw, 9)
+    expect(frame('back crossfade').live).toBeCloseTo(0.5, 9)
+    expect(frame('back crossfade').aperture!.scale).toBe(1)
+    expect(frame('back mid').live).toBe(0)
+    expect(frame('back mid').aperture!.k).toBeCloseTo(0.5 ** 1.6, 9)
     expect(frame('back end')).toMatchObject({ libF: 1, done: true })
     expect(frame('back end').outB).toBeCloseTo(0.32, 12)
     expect(frame('back end').portal!.op).toBe(1)
     expect(frame('back end').aperture!.hw).toBeCloseTo(backSpec.from.hw, 9)
+    expect(frame('back end').aperture!.scale).toBeCloseTo(halfField(0) / backSpec.from.hw, 9)
   })
 
   it('moves a flat poster to the screen and back', () => {
@@ -399,8 +486,8 @@ describe('still headers', () => {
   it('builds paths and reads headers', () => {
     expect(portalPath(7, 1024, null)).toBe('portal/7?w=1024')
     expect(portalPath(7, 2048, 25_000.4)).toBe('portal/7?w=2048&ms=25000')
-    const h: Record<string, string> = { 'X-Portal-Kind': 'equirect', 'X-Portal-Half': '36,27', 'X-Portal-Arc': '180', 'X-Portal-Ms': '20000.000', 'X-Portal-Censor': 'off' }
-    expect(readPortalHeaders((n) => h[n] ?? null)).toEqual({ kind: 'equirect', halfDeg: [36, 27], arcDeg: 180, ms: 20000, censor: 'off' })
+    const h: Record<string, string> = { 'X-Portal-Kind': 'equirect', 'X-Portal-Half': '90,90', 'X-Portal-Arc': '180', 'X-Portal-Ms': '20000.000', 'X-Portal-Censor': 'off' }
+    expect(readPortalHeaders((n) => h[n] ?? null)).toEqual({ kind: 'equirect', halfDeg: [90, 90], arcDeg: 180, ms: 20000, censor: 'off' })
     expect(readPortalHeaders(() => null)).toBeNull()
   })
 })

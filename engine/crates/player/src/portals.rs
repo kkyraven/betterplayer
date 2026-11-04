@@ -12,8 +12,11 @@ const DEG: f64 = PI / 180.0;
 
 pub const RADIUS: f64 = 1.5;
 pub const PPM: f64 = 1200.0;
-pub const PORTAL: PortalSize = PortalSize { w: 0.36, h: 0.225, corner: 0.0135, lift: 0.1, grow: 0.05 };
+pub const PORTAL: PortalSize = PortalSize { w: 0.36, h: 0.225, corner: 0.0135, lift: 0.1, grow: 0.21 };
 pub const PORTAL_GAP: f64 = 0.065;
+pub const FIELD: f64 = 0.7;
+pub const HOVER_FIELD: f64 = 0.8;
+pub const BOWL: f64 = 0.18;
 pub const DIVE_DROP: f64 = 0.05;
 pub const ROWS_BAND: BandSpec = BandSpec { centre_deg: -4.25, from_deg: -21.0, to_deg: 12.5, half_arc_deg: 33.0 };
 pub const STRIP_BAND: BandSpec = BandSpec { centre_deg: -25.55, from_deg: -29.5, to_deg: -21.6, half_arc_deg: 33.0 };
@@ -53,6 +56,7 @@ pub mod aperture {
     pub const RIM_VR: f64 = 0.14;
     pub const RIM_FLAT: f64 = 0.05;
     pub const RIM_K: f64 = 0.35;
+    pub const BOWL_K: f64 = 0.4;
 }
 
 pub fn step_deg() -> f64 {
@@ -290,18 +294,69 @@ pub fn portal_point(p: &PortalPose, x: f64, y: f64) -> V3 {
     direction(az, el).map(|c| c * p.d)
 }
 
-pub fn world_turn(az_deg: f64, el_deg: f64) -> (f64, f64) {
-    (az_deg * DEG, (el_deg - dive_el_deg()) * DEG)
+pub fn window_hover(s: f64, size: &PortalSize) -> f64 {
+    if size.grow > 0.0 { clamp01((s - 1.0) / size.grow) } else { 0.0 }
 }
 
-pub fn turned_angles(v: V3, (yaw, pitch): (f64, f64)) -> (f64, f64) {
-    let (sy, cy) = yaw.sin_cos();
-    let x1 = v[0] * cy + v[2] * sy;
+pub fn half_field(hover: f64) -> f64 {
+    lerp(FIELD, HOVER_FIELD, hover) * PI / 2.0
+}
+
+pub fn bowl_depth(hover: f64) -> f64 {
+    BOWL / (PORTAL.w / 2.0) * (1.0 - 0.5 * hover)
+}
+
+pub fn window_ray(v: V3, yaw: f64, pitch: f64) -> V3 {
+    let ((sy, cy), (sp, cp)) = (yaw.sin_cos(), pitch.sin_cos());
     let f1 = v[0] * sy - v[2] * cy;
-    let (sp, cp) = pitch.sin_cos();
-    let y2 = v[1] * cp - f1 * sp;
-    let f2 = v[1] * sp + f1 * cp;
-    (x1.atan2(f2), y2.clamp(-1.0, 1.0).asin())
+    [v[0] * cy + v[2] * sy, v[1] * cp - f1 * sp, v[1] * sp + f1 * cp]
+}
+
+pub fn from_window(w: V3, yaw: f64, pitch: f64) -> V3 {
+    let ((sy, cy), (sp, cp)) = (yaw.sin_cos(), pitch.sin_cos());
+    let f1 = w[2] * cp - w[1] * sp;
+    [w[0] * cy + f1 * sy, w[1] * cp + w[2] * sp, w[0] * sy - f1 * cy]
+}
+
+pub fn window_angles(w: V3) -> (f64, f64) {
+    (w[0].atan2(w[2]), w[1].clamp(-1.0, 1.0).asin())
+}
+
+pub fn bowl_angles(x: f64, y: f64, lv: V3, aspect: f64, hover: f64) -> (f64, f64, f64) {
+    let ax = [1.42, 1.42 * aspect, bowl_depth(hover).max(1e-3)];
+    let p = [x / ax[0], y / ax[1]];
+    let d = [lv[0] / ax[0], lv[1] / ax[1], lv[2] / ax[2]];
+    let a = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+    let b = p[0] * d[0] + p[1] * d[1];
+    let c = p[0] * p[0] + p[1] * p[1] - 1.0;
+    let t = (-b + (b * b - a * c).max(0.0).sqrt()) / a;
+    let q = [x + lv[0] * t, y + lv[1] * t, lv[2] * t];
+    let n = [q[0] / (ax[0] * ax[0]), q[1] / (ax[1] * ax[1]), q[2] / (ax[2] * ax[2])];
+    let nz = n[2] / (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    let fh = half_field(hover);
+    (q[0] * fh, q[1] * fh, lerp(0.5, 1.0, smooth((nz - 0.15) / 0.75)))
+}
+
+pub fn window_picture(o: V3, v: V3, p: &PortalPose, size: &PortalSize) -> Option<(f64, f64, f64)> {
+    let (_, x, y) = portal_hit(o, v, p, size)?;
+    let half = size.w / 2.0;
+    Some(bowl_angles(x / half, y / half, window_ray(v, p.az, p.el), size.h / size.w, window_hover(p.s, size)))
+}
+
+pub fn dive_angles(o: V3, v: V3, ap: &FrameAperture, aspect: f64) -> (f64, f64, f64) {
+    let w = window_ray(v, ap.az, ap.el);
+    let (qx, qy) = window_angles(w);
+    let (a, e) = (qx * ap.scale, qy * ap.scale);
+    let u = from_window([e.cos() * a.sin(), e.sin(), e.cos() * a.cos()], ap.az, ap.el);
+    let (fx, fy) = window_angles(window_ray(u, ap.az * (1.0 - ap.k), ap.el * (1.0 - ap.k)));
+    if ap.bowl <= 0.0 {
+        return (fx, fy, 1.0);
+    }
+    let ob = o[0] * v[0] + o[1] * v[1] + o[2] * v[2];
+    let t = -ob + (ob * ob - (o[0] * o[0] + o[1] * o[1] + o[2] * o[2] - ap.rp * ap.rp)).max(0.0).sqrt();
+    let (dx, dy) = window_angles(window_ray([0, 1, 2].map(|i| (o[i] + v[i] * t) / ap.rp), ap.az, ap.el));
+    let (bx, by, shade) = bowl_angles(dx / ap.hw, dy / ap.hh * aspect, w, aspect, ap.hover);
+    (lerp(fx, bx, ap.bowl), lerp(fy, by, ap.bowl), lerp(1.0, shade, ap.bowl))
 }
 
 pub fn still_uv(az: f64, el: f64, hh: f64, hv: f64) -> Option<(f64, f64)> {
@@ -340,11 +395,12 @@ pub struct ApertureFrom {
     pub hh: f64,
     pub rr: f64,
     pub rp: f64,
+    pub hover: f64,
 }
 
 pub fn portal_angles(az_rad: f64, y: f64, r: f64, s: f64, size: &PortalSize) -> ApertureFrom {
     let d = r.hypot(y);
-    ApertureFrom { az: az_rad, el: y.atan2(r), hw: size.w * s / 2.0 / d, hh: size.h * s / 2.0 / d, rr: size.corner * s / d, rp: d }
+    ApertureFrom { az: az_rad, el: y.atan2(r), hw: size.w * s / 2.0 / d, hh: size.h * s / 2.0 / d, rr: size.corner * s / d, rp: d, hover: window_hover(s, size) }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -436,7 +492,7 @@ impl Transition {
 pub fn grow_end(spec: &DiveSpec) -> f64 {
     match spec.kind {
         DiveKind::Vr => spec.slide_ms + ms::GROW,
-        DiveKind::Back => ms::GROW,
+        DiveKind::Back => ms::LIVE + ms::GROW,
         DiveKind::Flat | DiveKind::FlatBack => ms::FLAT,
     }
 }
@@ -461,6 +517,10 @@ pub struct FrameAperture {
     pub feather: f64,
     pub rim: f64,
     pub rp: f64,
+    pub scale: f64,
+    pub bowl: f64,
+    pub k: f64,
+    pub hover: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -475,6 +535,7 @@ pub struct DiveFrame {
     pub in_b: f64,
     pub out_b: f64,
     pub out_a: f64,
+    pub out_live: f64,
     pub tile: Option<TilePose>,
     pub live: f64,
     pub loading: f64,
@@ -496,6 +557,10 @@ fn grown(from: &ApertureFrom, full: u32, k: f64) -> FrameAperture {
         feather: FEATHER * hh * smooth(k / FEATHER_K),
         rim: RIM_VR * (1.0 - smooth(k / RIM_K)),
         rp: from.rp,
+        scale: (half_field(from.hover) / from.hw).powf(1.0 - k),
+        bowl: 1.0 - smooth(k / BOWL_K),
+        k,
+        hover: from.hover,
     }
 }
 
@@ -505,15 +570,17 @@ pub fn dive_frame(t: &Transition, now_ms: f64, dim: f64) -> DiveFrame {
     let raw = t.elapsed(now_ms);
     let forward = s.kind.forward();
     let end = grow_end(s);
-    let t_ready = if !forward || s.same {
+    let fades = forward && (!s.same || s.kind == DiveKind::Vr);
+    let t_ready = if !fades {
         0.0
+    } else if t.held {
+        f64::INFINITY
+    } else if s.same {
+        end
     } else {
-        match t.live_at_ms.filter(|_| !t.held) {
-            Some(live) => (end + ms::LIVE_AFTER_END).max(live - s.start_ms),
-            None => f64::INFINITY,
-        }
+        t.live_at_ms.map_or(f64::INFINITY, |live| (end + ms::LIVE_AFTER_END).max(live - s.start_ms))
     };
-    let total = if !forward || s.same { end } else { t_ready + ms::LIVE };
+    let total = if fades { t_ready + ms::LIVE } else { end };
     let e = raw.max(0.0).min(total);
     let mut f = DiveFrame {
         e,
@@ -526,6 +593,7 @@ pub fn dive_frame(t: &Transition, now_ms: f64, dim: f64) -> DiveFrame {
         in_b: 1.0,
         out_b: 1.0,
         out_a: 1.0,
+        out_live: 1.0,
         tile: None,
         live: 1.0,
         loading: 0.0,
@@ -536,13 +604,8 @@ pub fn dive_frame(t: &Transition, now_ms: f64, dim: f64) -> DiveFrame {
         let e_max = if reversed { t.reversed_from_e.unwrap_or(e) } else { e };
         f.flash = 1.0 - smooth(e_max / ms::FLASH);
         f.text_f = 1.0 - smooth(e / ms::TEXT_FADE);
-        f.live = if s.same {
-            1.0
-        } else if t.held {
-            0.0
-        } else {
-            smooth((e - t_ready) / ms::LIVE)
-        };
+        f.live = if fades { smooth((e - t_ready) / ms::LIVE) } else { 1.0 };
+        f.out_live = if s.same { 1.0 } else { f.live };
         f.loading = if !s.same && !t.held && t_ready > end + ms::GRACE {
             smooth((e - end - ms::GRACE) / ms::LOADING_FADE) * (1.0 - smooth((e - t_ready) / ms::LOADING_FADE))
         } else {
@@ -573,13 +636,14 @@ pub fn dive_frame(t: &Transition, now_ms: f64, dim: f64) -> DiveFrame {
             }
         }
         DiveKind::Back => {
-            let k = (1.0 - clamp01(e / ms::GROW)).powf(aperture::GROW_POW);
+            f.live = 1.0 - smooth(e / ms::LIVE);
+            let k = (1.0 - clamp01((e - ms::LIVE) / ms::GROW)).powf(aperture::GROW_POW);
             f.aperture = Some(grown(&s.from, s.full, k));
             f.out_b = lerp(1.0, dim, smooth((0.8 - k) / 0.45));
             f.lib_f = smooth((e - ms::BACK_LIB_DELAY) / ms::BACK_LIB);
             f.text_f = f.lib_f;
             let a = &s.from;
-            f.portal = Some(FramePortal { az: a.az / DEG, y: a.rp * a.el.sin(), r: a.rp * a.el.cos(), s: 1.0, hover: 0.0, op: if e >= ms::GROW { 1.0 } else { 0.0 } });
+            f.portal = Some(FramePortal { az: a.az / DEG, y: a.rp * a.el.sin(), r: a.rp * a.el.cos(), s: 1.0, hover: 0.0, op: if e >= end { 1.0 } else { 0.0 } });
         }
         DiveKind::FlatBack => {
             f.lib_f = smooth((e - ms::BACK_LIB_DELAY) / ms::BACK_LIB);
@@ -613,7 +677,6 @@ pub struct PortalBand {
 pub enum ItemKind {
     Still,
     Poster,
-    Live,
     Blank,
 }
 
@@ -622,7 +685,6 @@ impl ItemKind {
         match s {
             "still" => Ok(ItemKind::Still),
             "poster" => Ok(ItemKind::Poster),
-            "live" => Ok(ItemKind::Live),
             "blank" => Ok(ItemKind::Blank),
             k => Err(format!("unknown portal kind {k:?}")),
         }
@@ -948,7 +1010,6 @@ pub struct ItemDraw {
     pub key: String,
     pub pose: PortalPose,
     pub size: PortalSize,
-    pub turn: (f64, f64),
     pub kind: ItemKind,
     pub slot: Option<u32>,
     pub op: f64,
@@ -1027,7 +1088,6 @@ fn frame_of(s: &Shared, now: f64) -> FrameState {
             key: item.key.clone(),
             pose: portal_pose(az, el, lift, &item.size, item.dz * (1.0 - enter)),
             size: item.size,
-            turn: world_turn(az, el),
             kind: item.kind,
             slot: item.slot,
             op,
@@ -1053,8 +1113,7 @@ fn frame_of(s: &Shared, now: f64) -> FrameState {
                 key: r.key.clone(),
                 pose: PortalPose { az: p.az * DEG, el, d: p.r.hypot(p.y), hr: p.r, s: p.s },
                 size,
-                turn: world_turn(p.az, el / DEG),
-                kind: if spec.kind.forward() { item.map_or(ItemKind::Blank, |i| i.kind) } else { ItemKind::Live },
+                kind: item.map_or(ItemKind::Blank, |i| i.kind),
                 slot: item.and_then(|i| i.slot),
                 op: p.op,
                 shade: 1.0,
@@ -1459,7 +1518,7 @@ mod tests {
         let n = (outside.iter().map(|c| c * c).sum::<f64>()).sqrt();
         assert!(portal_hit(o, outside.map(|c| c / n), &p, &PORTAL).is_none());
         let rest = portal_pose(10.0, 2.5, 0.0, &PORTAL, 0.0);
-        assert!(near((p.s / p.hr) / (rest.s / rest.hr), 1.05 * 1.5 / 1.4, 1e-9));
+        assert!(near((p.s / p.hr) / (rest.s / rest.hr), 1.3, 0.005));
     }
 
     #[test]
@@ -1684,7 +1743,7 @@ mod fixture {
     }
 
     fn aperture_from(v: &Value) -> ApertureFrom {
-        ApertureFrom { az: f(&v["az"]), el: f(&v["el"]), hw: f(&v["hw"]), hh: f(&v["hh"]), rr: f(&v["rr"]), rp: f(&v["rp"]) }
+        ApertureFrom { az: f(&v["az"]), el: f(&v["el"]), hw: f(&v["hw"]), hh: f(&v["hh"]), rr: f(&v["rr"]), rp: f(&v["rp"]), hover: f(&v["hover"]) }
     }
 
     fn tile(v: &Value) -> Option<TilePose> {
@@ -1731,7 +1790,7 @@ mod fixture {
         let c = &x["constants"];
         close("radius", RADIUS, f(&c["radius"]));
         close("ppm", PPM, f(&c["ppm"]));
-        for (k, v) in [("w", PORTAL.w), ("h", PORTAL.h), ("corner", PORTAL.corner), ("lift", PORTAL.lift), ("grow", PORTAL.grow), ("gap", PORTAL_GAP)] {
+        for (k, v) in [("w", PORTAL.w), ("h", PORTAL.h), ("corner", PORTAL.corner), ("lift", PORTAL.lift), ("grow", PORTAL.grow), ("gap", PORTAL_GAP), ("field", FIELD), ("hoverField", HOVER_FIELD), ("bowl", BOWL)] {
             close(k, v, f(&c["portal"][k]));
         }
         close("diveDrop", DIVE_DROP, f(&c["diveDrop"]));
@@ -1755,7 +1814,7 @@ mod fixture {
         ] {
             close(k, v, f(&c["ms"][k]));
         }
-        for (k, v) in [("rimVr", aperture::RIM_VR), ("rimFlat", aperture::RIM_FLAT), ("growPow", aperture::GROW_POW), ("corner", aperture::CORNER), ("feather", aperture::FEATHER)] {
+        for (k, v) in [("rimVr", aperture::RIM_VR), ("rimFlat", aperture::RIM_FLAT), ("growPow", aperture::GROW_POW), ("corner", aperture::CORNER), ("feather", aperture::FEATHER), ("bowlK", aperture::BOWL_K)] {
             close(k, v, f(&c["aperture"][k]));
         }
         close("screen radius", SCREEN_RADIUS, f(&c["screen"]["radius"]));
@@ -1795,7 +1854,7 @@ mod fixture {
     }
 
     #[test]
-    fn portals_fixture_poses_hits_and_turns() {
+    fn portals_fixture_poses_hits_and_window_frames() {
         let x = fixture();
         let pose_eq = |what: &str, p: &PortalPose, w: &Value| {
             for (k, v) in [("az", p.az), ("el", p.el), ("d", p.d), ("hr", p.hr), ("s", p.s)] {
@@ -1822,13 +1881,14 @@ mod fixture {
             }
         }
         let layout = &x["layout"];
-        for t in layout["turns"].as_array().unwrap() {
-            let turn = world_turn(f(&t["az"]), f(&t["el"]));
-            close("yaw", turn.0, f(&t["turn"]["yaw"]));
-            close("pitch", turn.1, f(&t["turn"]["pitch"]));
-            let (az, el) = turned_angles(v3(&t["v"]), turn);
-            close("turned az", az, f(&t["angles"][0]));
-            close("turned el", el, f(&t["angles"][1]));
+        for t in layout["windows"].as_array().unwrap() {
+            let w = window_ray(v3(&t["v"]), f(&t["az"]).to_radians(), f(&t["el"]).to_radians());
+            for (i, c) in w.iter().enumerate() {
+                close("window ray", *c, f(&t["w"][i]));
+            }
+            let (az, el) = window_angles(w);
+            close("window az", az, f(&t["angles"][0]));
+            close("window el", el, f(&t["angles"][1]));
             match (still_uv(az, el, 36f64.to_radians(), 27f64.to_radians()), t["uv"].is_array()) {
                 (Some((u, v)), true) => {
                     close("u", u, f(&t["uv"][0]));
@@ -1843,9 +1903,39 @@ mod fixture {
         assert_eq!(pa.len(), got.len());
         for (g, w) in got.iter().zip(pa) {
             let want = aperture_from(w);
-            for (k, a, b) in [("az", g.az, want.az), ("el", g.el, want.el), ("hw", g.hw, want.hw), ("hh", g.hh, want.hh), ("rr", g.rr, want.rr), ("rp", g.rp, want.rp)] {
+            for (k, a, b) in [("az", g.az, want.az), ("el", g.el, want.el), ("hw", g.hw, want.hw), ("hh", g.hh, want.hh), ("rr", g.rr, want.rr), ("rp", g.rp, want.rp), ("hover", g.hover, want.hover)] {
                 close(k, a, b);
             }
+        }
+    }
+
+    #[track_caller]
+    fn picture_eq(name: &str, got: Option<(f64, f64, f64)>, want: &Value) {
+        match (got, want.is_array()) {
+            (Some((az, el, shade)), true) => {
+                close(&format!("{name} az"), az, f(&want[0]));
+                close(&format!("{name} el"), el, f(&want[1]));
+                close(&format!("{name} shade"), shade, f(&want[2]));
+            }
+            (None, false) => {}
+            (got, _) => panic!("{name}: {got:?} against {want}"),
+        }
+    }
+
+    #[test]
+    fn portals_fixture_fitted_pictures() {
+        let x = fixture();
+        for c in x["pictures"].as_array().unwrap() {
+            let s = size(&c["size"]);
+            let p = portal_pose(f(&c["az"]), f(&c["el"]), f(&c["h"]), &s, 0.0);
+            picture_eq(c["name"].as_str().unwrap(), window_picture(v3(&c["o"]), v3(&c["v"]), &p, &s), &c["picture"]);
+        }
+        let dives = x["dives"].as_array().unwrap();
+        for c in x["divePictures"].as_array().unwrap() {
+            let name = c["name"].as_str().unwrap();
+            let d = dives.iter().find(|d| d["name"] == c["name"]).unwrap_or_else(|| panic!("{name}"));
+            let ap = dive_frame(&transition(&d["t"]), f(&d["nowMs"]), f(&d["dim"])).aperture.unwrap();
+            picture_eq(name, Some(dive_angles(v3(&c["o"]), v3(&c["v"]), &ap, PORTAL.h / PORTAL.w)), &c["picture"]);
         }
     }
 
@@ -1858,7 +1948,7 @@ mod fixture {
             let got = dive_frame(&t, f(&c["nowMs"]), f(&c["dim"]));
             let w = &c["frame"];
             let n = |k: &str| format!("{name}: {k}");
-            for (k, v) in [("e", got.e), ("libF", got.lib_f), ("textF", got.text_f), ("flash", got.flash), ("inB", got.in_b), ("outB", got.out_b), ("outA", got.out_a), ("live", got.live), ("loading", got.loading)] {
+            for (k, v) in [("e", got.e), ("libF", got.lib_f), ("textF", got.text_f), ("flash", got.flash), ("inB", got.in_b), ("outB", got.out_b), ("outA", got.out_a), ("outLive", got.out_live), ("live", got.live), ("loading", got.loading)] {
                 close(&n(k), v, f(&w[k]));
             }
             assert_eq!((got.sliding, got.done, got.undone), (w["sliding"].as_bool().unwrap(), w["done"].as_bool().unwrap(), w["undone"].as_bool().unwrap()), "{name}");
@@ -1873,7 +1963,7 @@ mod fixture {
             }
             match (got.aperture, w["aperture"].is_object()) {
                 (Some(a), true) => {
-                    for (k, v) in [("az", a.az), ("el", a.el), ("hw", a.hw), ("hh", a.hh), ("rr", a.rr), ("feather", a.feather), ("rim", a.rim), ("rp", a.rp)] {
+                    for (k, v) in [("az", a.az), ("el", a.el), ("hw", a.hw), ("hh", a.hh), ("rr", a.rr), ("feather", a.feather), ("rim", a.rim), ("rp", a.rp), ("scale", a.scale), ("bowl", a.bowl), ("k", a.k), ("hover", a.hover)] {
                         close(&n(&format!("aperture {k}")), v, f(&w["aperture"][k]));
                     }
                 }

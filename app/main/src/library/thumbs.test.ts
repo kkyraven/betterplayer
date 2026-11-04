@@ -126,31 +126,38 @@ describe('portal stills', () => {
     expect(mpvColour({ color_space: 'bt2020nc' }).matrix).toBe('bt2020')
   })
 
-  it('takes the shown eye whole for the dive and the front 72 x 54 degrees for the shelf', () => {
+  it('takes the shown eye whole, 2048 across for the dive and 1024 for the shelf', () => {
     expect(portalFilter(vr({}), 2048, null)).toBe('crop=iw/2:ih:0:0,scale=2048:2048:flags=lanczos')
     expect(portalFilter(vr({ swapEyes: true }), 2048, null)).toBe('crop=iw/2:ih:iw/2:0,scale=2048:2048:flags=lanczos')
-    expect(portalFilter(vr({ arc: 200 }), 1024, null)).toBe('crop=iw/2:ih:0:0,crop=iw*72/200:ih*54/180,scale=1024:768:flags=lanczos')
+    expect(portalFilter(vr({ arc: 200 }), 1024, null)).toBe('crop=iw/2:ih:0:0,scale=1024:1024:flags=lanczos')
     expect(portalFilter(vr({ kind: 'equirect360', layout: 'ou' }), 2048, null)).toBe('crop=iw:ih/2:0:0,scale=2048:1024:flags=lanczos')
-    expect(portalFilter(vr({ kind: 'equirect360', layout: 'ou', swapEyes: true }), 1024, null)).toBe('crop=iw:ih/2:0:ih/2,crop=iw*72/360:ih*54/180,scale=1024:768:flags=lanczos')
+    expect(portalFilter(vr({ kind: 'equirect360', layout: 'ou', swapEyes: true }), 1024, null)).toBe('crop=iw:ih/2:0:ih/2,scale=1024:512:flags=lanczos')
     expect(portalFilter({ projection: FLAT, width: 1920, height: 1080 }, 1024, null)).toBeNull()
     expect(portalFilter(vr({}), 2048, null, { matrix: 'bt709', range: 'tv' })).toBe('crop=iw/2:ih:0:0,scale=2048:2048:flags=lanczos:in_color_matrix=bt709:out_color_matrix=bt601:in_range=tv:out_range=pc,format=yuvj420p')
   })
 
-  it('turns fisheye into a half equirect, sharper for the shelf crop', () => {
+  it('turns fisheye into a half equirect', () => {
     expect(portalFilter(vr({ kind: 'fisheye', fov: 190 }), 2048, null)).toBe('crop=iw/2:ih:0:0,v360=input=fisheye:ih_fov=190:iv_fov=190:output=hequirect:w=2048:h=2048:interp=lanczos,scale=2048:2048:flags=lanczos')
-    expect(portalFilter(vr({ kind: 'fisheye', fov: 190, layout: 'mono' }), 1024, null)).toBe('v360=input=fisheye:ih_fov=190:iv_fov=190:output=hequirect:w=2560:h=2560:interp=lanczos,crop=iw*72/180:ih*54/180,scale=1024:768:flags=lanczos')
+    expect(portalFilter(vr({ kind: 'fisheye', fov: 190, layout: 'mono' }), 1024, null)).toBe('v360=input=fisheye:ih_fov=190:iv_fov=190:output=hequirect:w=1024:h=1024:interp=lanczos,scale=1024:1024:flags=lanczos')
   })
 
   it('covers the whole picture at the look strength, cells as large as in the headset', () => {
     expect(coverFilter({ style: 'pixelate', strength: 0, track: null }, 960, 540)).toBe('scale=64:-2:flags=area,scale=960:540:flags=neighbor')
     expect(coverFilter({ style: 'blur', strength: 1, track: null }, 2048, 2048)).toBe('scale=24:-2:flags=area,scale=2048:2048:flags=bicubic')
     expect(coverFilter('unknown', 2048, 2048)).toBe(coverFilter({ style: 'blur', strength: 1, track: null }, 2048, 2048))
-    expect(portalFilter(vr({}), 1024, { style: 'pixelate', strength: 0, track: 'm' })).toMatch(/scale=1024:768:flags=lanczos,scale=26:-2:flags=area,scale=1024:768:flags=neighbor$/)
+    expect(portalFilter(vr({}), 2048, { style: 'pixelate', strength: 0, track: 'm' })).toMatch(/,scale=64:-2:flags=area,scale=2048:2048:flags=neighbor$/)
   })
 
-  it('seeks to the keyframe and prints the frame time in one process', () => {
-    const args = portalArgs('/v.mp4', vr({}), 2048, null, 60_000, null, '/out.jpg')
-    expect(args.slice(args.indexOf('-copyts'), args.indexOf('-i') + 2)).toEqual(['-copyts', '-start_at_zero', '-ss', '12.000', '-noaccurate_seek', '-i', '/v.mp4'])
+  it('covers a shelf still as coarsely as its window shrinks it, so the fitted picture hides as much as the headset', () => {
+    expect(portalFilter(vr({}), 1024, { style: 'pixelate', strength: 0, track: 'm' })).toMatch(/,scale=7:-2:flags=area,scale=1024:1024:flags=neighbor$/)
+    expect(portalFilter(vr({}), 1024, 'unknown')).toMatch(/,scale=3:-2:flags=area,scale=1024:1024:flags=bicubic$/)
+  })
+
+  it('seeks to the keyframe, decodes only keyframes but for H.264 and prints the frame time in one process', () => {
+    const args = portalArgs('/v.mp4', vr({}), 2048, null, 60_000, null, '/out.jpg', undefined, 'hevc')
+    expect(args.slice(args.indexOf('-copyts'), args.indexOf('-i') + 2)).toEqual(['-copyts', '-start_at_zero', '-skip_frame', 'nokey', '-thread_type', 'slice', '-flags', 'low_delay', '-ss', '12.000', '-noaccurate_seek', '-i', '/v.mp4'])
+    expect(portalArgs('/v.mp4', vr({}), 2048, null, 60_000, null, '/out.jpg', undefined, 'h264')).not.toContain('-skip_frame')
+    expect(portalArgs('/v.mp4', vr({}), 2048, null, 60_000, null, '/out.jpg')).not.toContain('-skip_frame')
     expect(args[args.indexOf('-vf') + 1]).toMatch(/^metadata=mode=add:key=bp:value=1,metadata=mode=print:file=-,crop=/)
     expect(portalArgs('/v.mp4', vr({}), 1024, 25_000, 60_000, null, '/o.jpg')).toContain('25.000')
   })

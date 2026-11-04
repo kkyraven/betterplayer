@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -12,12 +12,14 @@ use serde::{Deserialize, Serialize};
 use crate::Shared;
 use crate::censor::{self, Held};
 
-const PASSTHROUGH_FPS: u32 = 10;
+const MASK_FPS: u32 = 30;
 const CENSOR_FPS: u32 = 15;
-const CELLS: usize = 256;
+const MAKE_CELLS: usize = 384;
 const CENSOR_CELLS: usize = 192;
+const ALPHA_SIZE: u32 = 768;
 const BOX_PADDING: f64 = 0.15;
-const VERSION: u32 = 1;
+const MASK_VERSION: u32 = 2;
+const CENSOR_VERSION: u32 = 1;
 const LEAD_PAUSE_S: u32 = 60;
 const LEAD_RESUME_S: u32 = 30;
 const KEPT_BEHIND: u32 = 1;
@@ -27,6 +29,9 @@ const SEEK_S: u32 = 10;
 const SEEK_SLACK_S: f64 = 5.0;
 const FRAME_WAIT: Duration = Duration::from_millis(100);
 const LOAD_TIMEOUT: Duration = Duration::from_secs(20);
+const PACE: f64 = 1.5;
+const PACE_GAP_S: f64 = 0.5;
+const SKIP_FROM_FRAMES: f64 = 4.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -43,25 +48,33 @@ pub struct MatteSetup {
     pub maker: Maker,
     pub cache_dir: Option<PathBuf>,
     pub layout: EyeLayout,
-    pub second_eye: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Maker {
+    Alpha { alpha: String },
     Passthrough { skin: Vec<Variant> },
     Censor { detector: Arc<ModelSpec>, skin: Option<Vec<Variant>>, kinds: Vec<Kind>, key: String },
 }
 
 impl Maker {
-    fn fps(&self) -> u32 {
+    fn fps(&self, video_fps: f64) -> u32 {
         match self {
-            Maker::Passthrough { .. } => PASSTHROUGH_FPS,
             Maker::Censor { .. } => CENSOR_FPS,
+            _ => mask_fps(video_fps),
+        }
+    }
+
+    fn version(&self) -> u32 {
+        match self {
+            Maker::Censor { .. } => CENSOR_VERSION,
+            _ => MASK_VERSION,
         }
     }
 
     fn variants(&self) -> impl Iterator<Item = &Variant> {
         let (first, second) = match self {
+            Maker::Alpha { .. } => (&[][..], None),
             Maker::Passthrough { skin } => (skin.as_slice(), None),
             Maker::Censor { detector, skin, .. } => (detector.variants.as_slice(), skin.as_deref()),
         };
@@ -74,10 +87,23 @@ impl Maker {
 
     fn names(&self) -> String {
         match self {
+            Maker::Alpha { .. } => "xalpha".into(),
             Maker::Passthrough { skin } => skin.iter().filter_map(|v| Some(v.path.file_name()?.to_string_lossy().into_owned())).collect::<Vec<_>>().join(","),
             Maker::Censor { key, .. } => key.clone(),
         }
     }
+
+    fn decoded<'a>(&'a self, path: &'a str) -> &'a str {
+        match self {
+            Maker::Alpha { alpha } => alpha,
+            _ => path,
+        }
+    }
+}
+
+fn mask_fps(video_fps: f64) -> u32 {
+    let f = video_fps.round();
+    if f >= 1.0 { (f as u32).min(MASK_FPS) } else { MASK_FPS }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -85,6 +111,7 @@ pub enum MatteState {
     #[default]
     Loading,
     Running,
+    Done,
     Error(String),
 }
 
@@ -93,6 +120,13 @@ pub struct MatteStatus {
     pub state: MatteState,
     pub ahead_s: f64,
     pub seconds: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MatteMakeStatus {
+    pub state: MatteState,
+    pub seconds: usize,
+    pub total: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -122,9 +156,16 @@ fn source_of(path: &str) -> String {
     }
 }
 
+fn wanted_meta(setup: &MatteSetup, fps: u32) -> Meta {
+    let source = source_of(setup.maker.decoded(&setup.path));
+    Meta { version: setup.maker.version(), w: 0, h: 0, fps, layout: setup.layout, eye: 2, model: setup.maker.names(), source }
+}
+
 #[derive(Default)]
 struct Track {
     state: MatteState,
+    fps: u32,
+    total: u32,
     done: BTreeSet<u32>,
     near: HashMap<u32, Arc<[Arc<Matte>]>>,
 }
@@ -134,37 +175,60 @@ struct Inner {
     stop: AtomicBool,
 }
 
+impl Inner {
+    fn new() -> Arc<Inner> {
+        Arc::new(Inner { track: Mutex::new(Track::default()), stop: AtomicBool::new(false) })
+    }
+
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+}
+
+fn spawn(inner: &Arc<Inner>, work: impl FnOnce(&Inner) -> Result<(), String> + Send + 'static) {
+    let i = inner.clone();
+    let spawned = std::thread::Builder::new().name("bp-matte".into()).spawn(move || {
+        if let Err(e) = work(&i) {
+            eprintln!("bp-core: mask track: {e}");
+            i.track.lock().unwrap().state = MatteState::Error(e);
+        }
+    });
+    if let Err(e) = spawned {
+        inner.track.lock().unwrap().state = MatteState::Error(format!("thread: {e}"));
+    }
+}
+
+static TRACKS: AtomicU64 = AtomicU64::new(0);
+
 pub struct MatteTrack {
     pub setup: MatteSetup,
-    inner: Arc<Inner>,
-    shared: Arc<Shared>,
+    reader: Arc<Source>,
+    generation: u64,
 }
 
 impl MatteTrack {
     pub(crate) fn start(shared: Arc<Shared>, setup: MatteSetup, hwdec: Option<String>) -> MatteTrack {
-        let inner = Arc::new(Inner { track: Mutex::new(Track::default()), stop: AtomicBool::new(false) });
-        let spawned = {
-            let (inner, shared, setup) = (inner.clone(), shared.clone(), setup.clone());
-            std::thread::Builder::new().name("bp-matte".into()).spawn(move || {
-                if let Err(e) = run(&inner, &shared, &setup, hwdec) {
-                    eprintln!("bp-core: mask track: {e}");
-                    inner.track.lock().unwrap().state = MatteState::Error(e);
-                }
-            })
-        };
-        if let Err(e) = spawned {
-            inner.track.lock().unwrap().state = MatteState::Error(format!("thread: {e}"));
-        }
-        MatteTrack { setup, inner, shared }
+        let inner = Inner::new();
+        let (s, run_setup) = (shared.clone(), setup.clone());
+        spawn(&inner, move |inner| run(inner, &s, &run_setup, hwdec));
+        let generation = TRACKS.fetch_add(1, Ordering::Relaxed) + 1;
+        let reader = Arc::new(Source { inner, shared, path: setup.path.clone() });
+        MatteTrack { setup, reader, generation }
     }
 
     pub(crate) fn source(&self) -> Arc<dyn MatteSource> {
-        Arc::new(Source { inner: self.inner.clone(), shared: self.shared.clone(), path: self.setup.path.clone(), fps: self.setup.maker.fps() })
+        self.reader.clone()
+    }
+
+    pub fn grid(&self) -> Option<(u64, Arc<Matte>)> {
+        let pos = self.reader.shared.clock.lock().unwrap().peek() / 1000.0;
+        let (slot, grid) = self.reader.matte_at(pos)?;
+        Some(((self.generation << 32) + slot.min(u32::MAX as u64), grid))
     }
 
     pub fn status(&self) -> MatteStatus {
-        let pos = (self.shared.clock.lock().unwrap().peek() / 1000.0).max(0.0);
-        let t = self.inner.track.lock().unwrap();
+        let pos = (self.reader.shared.clock.lock().unwrap().peek() / 1000.0).max(0.0);
+        let t = self.reader.inner.track.lock().unwrap();
         let mut s = pos.floor() as u32;
         while t.done.contains(&s) {
             s += 1;
@@ -175,6 +239,35 @@ impl MatteTrack {
 
 impl Drop for MatteTrack {
     fn drop(&mut self) {
+        self.reader.inner.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+pub struct MatteMake {
+    pub setup: MatteSetup,
+    inner: Arc<Inner>,
+}
+
+impl MatteMake {
+    pub(crate) fn start(setup: MatteSetup, hwdec: Option<String>) -> MatteMake {
+        let inner = Inner::new();
+        let run_setup = setup.clone();
+        spawn(&inner, move |inner| run_make(inner, &run_setup, hwdec));
+        MatteMake { setup, inner }
+    }
+
+    pub fn going(&self) -> bool {
+        matches!(self.inner.track.lock().unwrap().state, MatteState::Loading | MatteState::Running)
+    }
+
+    pub fn status(&self) -> MatteMakeStatus {
+        let t = self.inner.track.lock().unwrap();
+        MatteMakeStatus { state: t.state.clone(), seconds: t.done.len(), total: t.total }
+    }
+}
+
+impl Drop for MatteMake {
+    fn drop(&mut self) {
         self.inner.stop.store(true, Ordering::Relaxed);
     }
 }
@@ -183,7 +276,6 @@ struct Source {
     inner: Arc<Inner>,
     shared: Arc<Shared>,
     path: String,
-    fps: u32,
 }
 
 impl MatteSource for Source {
@@ -191,9 +283,9 @@ impl MatteSource for Source {
         if self.shared.media_path.lock().unwrap().as_deref().is_some_and(|p| p != self.path) {
             return None;
         }
-        let fps = self.fps as u64;
-        let i = slot_of(pts, self.fps)?;
         let t = self.inner.track.lock().unwrap();
+        let fps = t.fps as u64;
+        let i = slot_of(pts, t.fps).filter(|_| fps > 0)?;
         let grid = t.near.get(&((i / fps) as u32))?.get((i % fps) as usize)?.clone();
         Some((i, grid))
     }
@@ -201,6 +293,33 @@ impl MatteSource for Source {
 
 fn slot_of(pts: f64, fps: u32) -> Option<u64> {
     (pts.is_finite() && pts >= 0.0).then(|| (pts * fps as f64 + 1e-3).floor() as u64)
+}
+
+fn made_slot(pts: f64, fps: u32, video_fps: f64) -> Option<u64> {
+    let half = if video_fps > 0.0 { 0.5 / video_fps } else { 0.0 };
+    let s = (pts + half) * fps as f64 - 0.5 + 1e-3;
+    (pts.is_finite() && s >= 0.0).then(|| s.floor() as u64)
+}
+
+fn skips(video_fps: f64, fps: u32) -> bool {
+    (video_fps / fps as f64).round() >= SKIP_FROM_FRAMES
+}
+
+#[derive(Default)]
+struct Pace {
+    last: Option<(f64, Instant)>,
+}
+
+impl Pace {
+    fn wait(&mut self, pts: f64, now: Instant) -> Duration {
+        let wait = match self.last {
+            Some((p, _)) if pts <= p => return Duration::ZERO,
+            Some((p, t)) if pts - p < PACE_GAP_S => (t + Duration::from_secs_f64((pts - p) / PACE)).saturating_duration_since(now),
+            _ => Duration::ZERO,
+        };
+        self.last = Some((pts, now + wait));
+        wait
+    }
 }
 
 struct Chunker {
@@ -271,6 +390,13 @@ fn decode_size((w, h): (u32, u32), layout: EyeLayout, (mw, mh): (u32, u32)) -> (
     (even(ew * scale * ex), even(eh * scale * ey))
 }
 
+fn decode_for(setup: &MatteSetup, (w, h): (u32, u32)) -> (u32, u32) {
+    match setup.maker {
+        Maker::Alpha { .. } => decode_size((w, h), EyeLayout::Mono, (ALPHA_SIZE, ALPHA_SIZE)),
+        _ => decode_size((w, h), setup.layout, setup.maker.input()),
+    }
+}
+
 fn eye_rgb(bytes: &[u8], (w, h): (usize, usize), bgra: bool, layout: EyeLayout, second: bool, out: &mut Vec<u8>) -> (usize, usize) {
     let (ew, eh, x0, y0) = match layout {
         EyeLayout::Mono => (w, h, 0, 0),
@@ -287,6 +413,24 @@ fn eye_rgb(bytes: &[u8], (w, h): (usize, usize), bgra: bool, layout: EyeLayout, 
         }
     }
     (ew, eh)
+}
+
+fn linear_table() -> Box<[f32; 256]> {
+    let mut t = Box::new([0.0; 256]);
+    for (i, v) in t.iter_mut().enumerate() {
+        let c = i as f32 / 255.0;
+        *v = if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+    }
+    t
+}
+
+fn alpha_of(lin: &[f32; 256], [r, g, b]: [u8; 3]) -> u8 {
+    ((lin[r as usize] + lin[g as usize] + lin[b as usize]).min(1.0) * 255.0).round() as u8
+}
+
+fn alpha_grid(bytes: &[u8], (w, h): (usize, usize), lin: &[f32; 256]) -> Matte {
+    let cover = bytes[..w * h * 4].chunks_exact(4).map(|p| alpha_of(lin, [p[0], p[1], p[2]])).collect();
+    Matte { w: w as u32, h: h as u32, cover }
 }
 
 fn second_file(dir: &Path, second: u32) -> PathBuf {
@@ -321,6 +465,16 @@ fn read_meta(dir: &Path) -> Option<Meta> {
     serde_json::from_slice(&std::fs::read(dir.join("meta.json")).ok()?).ok()
 }
 
+fn meta_for<'a>(meta: &'a mut Option<Meta>, wanted: &Meta, grid: &Matte, dir: &Path) -> &'a Meta {
+    meta.get_or_insert_with(|| {
+        let m = Meta { w: grid.w, h: grid.h, ..wanted.clone() };
+        if let Err(e) = serde_json::to_vec(&m).map_err(std::io::Error::other).and_then(|b| write_atomic(&dir.join("meta.json"), &b)) {
+            eprintln!("bp-core: mask track: meta.json: {e}");
+        }
+        m
+    })
+}
+
 fn seconds_on_disk(dir: &Path) -> BTreeSet<u32> {
     let Ok(entries) = std::fs::read_dir(dir) else { return BTreeSet::new() };
     entries.flatten().filter_map(|e| e.file_name().to_str()?.strip_suffix(".z")?.parse().ok()).collect()
@@ -337,12 +491,28 @@ fn clear(dir: &Path) {
     }
 }
 
+fn resume(inner: &Inner, dir: &Path, wanted: &Meta) -> Result<Option<Meta>, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let meta = read_meta(dir).filter(|m| m.same_track(wanted));
+    let mut t = inner.track.lock().unwrap();
+    t.fps = wanted.fps;
+    match meta {
+        Some(_) => t.done = seconds_on_disk(dir),
+        None => clear(dir),
+    }
+    Ok(meta)
+}
+
 fn next_missing(done: &BTreeSet<u32>, from: u32, end: Option<u32>) -> Option<u32> {
     let mut s = from;
     while done.contains(&s) {
         s += 1;
     }
     end.is_none_or(|e| s < e).then_some(s)
+}
+
+fn file_end(duration: f64, end_seen: Option<u32>) -> Option<u32> {
+    [(duration > 0.0).then(|| duration.ceil() as u32), end_seen].into_iter().flatten().min()
 }
 
 #[derive(Default)]
@@ -354,26 +524,7 @@ struct Events {
     duration: Mutex<f64>,
 }
 
-fn run(inner: &Inner, shared: &Shared, setup: &MatteSetup, hwdec: Option<String>) -> Result<(), String> {
-    let stopped = || inner.stop.load(Ordering::Relaxed);
-    let dir = setup.dir.as_path();
-    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let fps = setup.maker.fps();
-    let eye = match setup.maker {
-        Maker::Passthrough { .. } => setup.second_eye as u8,
-        Maker::Censor { .. } => 2,
-    };
-    let wanted = Meta { version: VERSION, w: 0, h: 0, fps, layout: setup.layout, eye, model: setup.maker.names(), source: source_of(&setup.path) };
-    let mut meta = read_meta(dir).filter(|m| m.same_track(&wanted));
-    if meta.is_none() {
-        clear(dir);
-    } else {
-        inner.track.lock().unwrap().done = seconds_on_disk(dir);
-    }
-
-    let mut analyser = Analyser::load(&setup.maker, setup.cache_dir.as_deref())?;
-    let info = bp_player::probe_video(&setup.path)?;
-    let (w, h) = decode_size((info.width, info.height), setup.layout, setup.maker.input());
+fn open(inner: &Inner, path: &str, (w, h): (u32, u32), options: PlayerOptions) -> Result<Option<(Player, Arc<Events>)>, String> {
     let events = Arc::new(Events::default());
     let sink: bp_player::EventSink = {
         let events = events.clone();
@@ -386,12 +537,12 @@ fn run(inner: &Inner, shared: &Shared, setup: &MatteSetup, hwdec: Option<String>
             _ => {}
         })
     };
-    let player = Player::new(w, h, options(hwdec), Some(sink))?;
-    player.load(&setup.path, None)?;
+    let player = Player::new(w, h, options, Some(sink))?;
+    player.load(path, None)?;
     let began = Instant::now();
     while !events.loaded.load(Ordering::Relaxed) {
-        if stopped() {
-            return Ok(());
+        if inner.stopped() {
+            return Ok(None);
         }
         if events.ended.load(Ordering::Relaxed) || began.elapsed() > LOAD_TIMEOUT {
             return Err("the file did not open".into());
@@ -399,6 +550,38 @@ fn run(inner: &Inner, shared: &Shared, setup: &MatteSetup, hwdec: Option<String>
         std::thread::sleep(Duration::from_millis(20));
     }
     inner.track.lock().unwrap().state = MatteState::Running;
+    Ok(Some((player, events)))
+}
+
+fn seek_to(player: &Player, events: &Events, second: u32) -> Result<(), String> {
+    events.restarted.store(false, Ordering::Relaxed);
+    events.eof.store(false, Ordering::Relaxed);
+    player.seek(second as f64)?;
+    player.play()
+}
+
+fn past_seek(seeking: &mut Option<u32>, pts: f64, restarted: bool) -> bool {
+    if let Some(s) = *seeking {
+        let slack = if restarted { SEEK_SLACK_S } else { 1.0 };
+        if pts < s as f64 - 0.05 || pts > s as f64 + slack {
+            return false;
+        }
+        *seeking = None;
+    }
+    true
+}
+
+fn run(inner: &Inner, shared: &Shared, setup: &MatteSetup, hwdec: Option<String>) -> Result<(), String> {
+    let dir = setup.dir.as_path();
+    let decoded = setup.maker.decoded(&setup.path);
+    let info = bp_player::probe_video(decoded)?;
+    let fps = setup.maker.fps(info.fps);
+    let wanted = wanted_meta(setup, fps);
+    let mut meta = resume(inner, dir, &wanted)?;
+    let mut analyser = Analyser::load(&setup.maker, setup.cache_dir.as_deref())?;
+    let Some((player, events)) = open(inner, decoded, decode_for(setup, (info.width, info.height)), options(hwdec, skips(info.fps, fps)))? else {
+        return Ok(());
+    };
 
     let mut chunker: Option<Chunker> = None;
     let mut seeking: Option<u32> = None;
@@ -410,13 +593,13 @@ fn run(inner: &Inner, shared: &Shared, setup: &MatteSetup, hwdec: Option<String>
     let mut skip: Option<(u32, u32)> = None;
     let mut paused = true;
     let mut end_seen: Option<u32> = None;
+    let mut pace = Pace::default();
     let mut rgb = Vec::new();
 
-    while !stopped() {
+    while !inner.stopped() {
         let pos = (shared.clock.lock().unwrap().peek() / 1000.0).max(0.0);
         let here = pos.floor() as u32;
-        let duration = *events.duration.lock().unwrap();
-        let end = [(duration > 0.0).then(|| duration.ceil() as u32), end_seen].into_iter().flatten().min();
+        let end = file_end(*events.duration.lock().unwrap(), end_seen);
         keep_near(inner, dir, meta.as_ref(), here);
 
         let from = match skip {
@@ -450,16 +633,14 @@ fn run(inner: &Inner, shared: &Shared, setup: &MatteSetup, hwdec: Option<String>
                         }
                     }
                     started = Some(here);
-                    events.restarted.store(false, Ordering::Relaxed);
-                    player.seek(want as f64)?;
-                    player.play()?;
+                    seek_to(&player, &events, want)?;
                     paused = false;
                     chunker = Some(Chunker::new(want, fps));
                     due = 0;
                     analyser.restart();
+                    pace = Pace::default();
                     seeking = Some(want);
                     restarted = Some(Instant::now());
-                    events.eof.store(false, Ordering::Relaxed);
                 } else if let Some(a) = at {
                     let ahead = a.saturating_sub(here);
                     if !paused && ahead >= LEAD_PAUSE_S {
@@ -489,36 +670,23 @@ fn run(inner: &Inner, shared: &Shared, setup: &MatteSetup, hwdec: Option<String>
             continue;
         };
         let Some(pts) = frame.pts else { continue };
-        if let Some(s) = seeking {
-            let slack = if events.restarted.load(Ordering::Relaxed) { SEEK_SLACK_S } else { 1.0 };
-            if pts < s as f64 - 0.05 || pts > s as f64 + slack {
-                continue;
-            }
-            seeking = None;
+        if !past_seek(&mut seeking, pts, events.restarted.load(Ordering::Relaxed)) {
+            continue;
         }
-        let (Some(c), Some(slot)) = (chunker.as_mut(), slot_of(pts, fps)) else { continue };
+        let wait = pace.wait(pts, Instant::now());
+        if !wait.is_zero() {
+            std::thread::sleep(wait);
+        }
+        let (Some(c), Some(slot)) = (chunker.as_mut(), made_slot(pts, fps, info.fps)) else { continue };
         if !c.wants(slot) || slot < due {
             continue;
         }
         due = slot + stride as u64;
-        let slot_bytes = player.slot(frame.index);
-        let bytes = unsafe { slot_bytes.as_slice() };
-        let (fw, fh) = player.size();
-        let (fw, fh) = (fw as usize, fh as usize);
-        if bytes.len() < fw * fh * 4 {
-            continue;
-        }
-        let grid = Arc::new(analyser.grid(bytes, (fw, fh), player.bgra(), setup, pts, &mut rgb)?);
-        if stopped() {
+        let Some(grid) = frame_grid(&player, frame.index, &mut analyser, setup, pts, &mut rgb)? else { continue };
+        if inner.stopped() {
             break;
         }
-        let m = meta.get_or_insert_with(|| {
-            let m = Meta { w: grid.w, h: grid.h, ..wanted.clone() };
-            if let Err(e) = serde_json::to_vec(&m).map_err(std::io::Error::other).and_then(|b| write_atomic(&dir.join("meta.json"), &b)) {
-                eprintln!("bp-core: mask track: meta.json: {e}");
-            }
-            m
-        });
+        let m = meta_for(&mut meta, &wanted, &grid, dir);
         if (grid.w, grid.h) != (m.w, m.h) {
             continue;
         }
@@ -532,12 +700,103 @@ fn run(inner: &Inner, shared: &Shared, setup: &MatteSetup, hwdec: Option<String>
     Ok(())
 }
 
+fn run_make(inner: &Inner, setup: &MatteSetup, hwdec: Option<String>) -> Result<(), String> {
+    let dir = setup.dir.as_path();
+    let info = bp_player::probe_video(&setup.path)?;
+    let fps = setup.maker.fps(info.fps);
+    let wanted = wanted_meta(setup, fps);
+    let mut meta = resume(inner, dir, &wanted)?;
+    let mut analyser = Analyser::load(&setup.maker, setup.cache_dir.as_deref())?;
+    let Some((player, events)) = open(inner, &setup.path, decode_for(setup, (info.width, info.height)), options(hwdec, skips(info.fps, fps)))? else {
+        return Ok(());
+    };
+
+    let mut chunker: Option<Chunker> = None;
+    let mut seeking: Option<u32> = None;
+    let mut end_seen: Option<u32> = None;
+    let mut rgb = Vec::new();
+    while !inner.stopped() {
+        let end = file_end(*events.duration.lock().unwrap(), end_seen);
+        let at = chunker.as_ref().map(|c| c.second);
+        let want = {
+            let mut t = inner.track.lock().unwrap();
+            t.total = end.unwrap_or(0);
+            next_missing(&t.done, at.unwrap_or(0), end)
+        };
+        let Some(want) = want else {
+            inner.track.lock().unwrap().state = MatteState::Done;
+            return Ok(());
+        };
+        if at != Some(want) {
+            seek_to(&player, &events, want)?;
+            chunker = Some(Chunker::new(want, fps));
+            analyser.restart();
+            seeking = Some(want);
+        }
+
+        let Some(frame) = player.acquire_wait(FRAME_WAIT) else {
+            if events.eof.load(Ordering::Relaxed)
+                && (seeking.is_none() || events.restarted.load(Ordering::Relaxed))
+                && let Some(c) = chunker.as_mut()
+            {
+                match c.finish() {
+                    Some((s, grids)) => {
+                        end_seen = Some(s + 1);
+                        if meta.is_some() {
+                            write_second(dir, s, &grids)?;
+                            inner.track.lock().unwrap().done.insert(s);
+                        }
+                    }
+                    None => end_seen = Some(c.second),
+                }
+            }
+            continue;
+        };
+        let Some(pts) = frame.pts else { continue };
+        if !past_seek(&mut seeking, pts, events.restarted.load(Ordering::Relaxed)) {
+            continue;
+        }
+        let (Some(c), Some(slot)) = (chunker.as_mut(), made_slot(pts, fps, info.fps)) else { continue };
+        if !c.wants(slot) {
+            continue;
+        }
+        let Some(grid) = frame_grid(&player, frame.index, &mut analyser, setup, pts, &mut rgb)? else { continue };
+        if inner.stopped() {
+            break;
+        }
+        let m = meta_for(&mut meta, &wanted, &grid, dir);
+        if (grid.w, grid.h) != (m.w, m.h) {
+            continue;
+        }
+        for (s, grids) in c.push(slot, grid) {
+            write_second(dir, s, &grids)?;
+            inner.track.lock().unwrap().done.insert(s);
+        }
+    }
+    Ok(())
+}
+
+fn frame_grid(player: &Player, index: usize, analyser: &mut Analyser, setup: &MatteSetup, pts: f64, rgb: &mut Vec<u8>) -> Result<Option<Arc<Matte>>, String> {
+    let slot = player.slot(index);
+    let bytes = unsafe { slot.as_slice() };
+    let (w, h) = player.size();
+    let (w, h) = (w as usize, h as usize);
+    if bytes.len() < w * h * 4 {
+        return Ok(None);
+    }
+    Ok(Some(Arc::new(analyser.grid(bytes, (w, h), player.bgra(), setup, pts, rgb)?)))
+}
+
+fn write_second(dir: &Path, second: u32, grids: &[Arc<Matte>]) -> Result<(), String> {
+    encode(grids).and_then(|z| write_atomic(&second_file(dir, second), &z)).map_err(|e| format!("second {second}: {e}"))
+}
+
 fn save(inner: &Inner, dir: &Path, meta: Option<&Meta>, here: u32, second: u32, grids: Vec<Arc<Matte>>) {
     if meta.is_none() {
         return;
     }
-    if let Err(e) = encode(&grids).and_then(|z| write_atomic(&second_file(dir, second), &z)) {
-        eprintln!("bp-core: mask track: second {second}: {e}");
+    if let Err(e) = write_second(dir, second, &grids) {
+        eprintln!("bp-core: mask track: {e}");
         return;
     }
     let mut t = inner.track.lock().unwrap();
@@ -574,7 +833,8 @@ fn keep_near(inner: &Inner, dir: &Path, meta: Option<&Meta>, here: u32) {
 }
 
 enum Analyser {
-    Passthrough(Skin),
+    Alpha(Box<[f32; 256]>),
+    Passthrough(Box<(Skin, [Vec<f32>; 2])>),
     Censor(Box<CensorPass>),
 }
 
@@ -590,7 +850,8 @@ struct CensorPass {
 impl Analyser {
     fn load(maker: &Maker, cache_dir: Option<&Path>) -> Result<Analyser, String> {
         Ok(match maker {
-            Maker::Passthrough { skin } => Analyser::Passthrough(Skin::load(skin.clone(), cache_dir, CELLS)?),
+            Maker::Alpha { .. } => Analyser::Alpha(linear_table()),
+            Maker::Passthrough { skin } => Analyser::Passthrough(Box::new((Skin::load(skin.clone(), cache_dir, MAKE_CELLS)?, Default::default()))),
             Maker::Censor { detector, skin, kinds, .. } => {
                 let mut d = Detector::load(detector.clone(), cache_dir)?;
                 d.set_threshold(censor::KEEP);
@@ -605,22 +866,32 @@ impl Analyser {
     }
 
     fn restart(&mut self) {
-        if let Analyser::Censor(c) = self {
-            c.held = Default::default();
-            c.prev = Default::default();
+        match self {
+            Analyser::Alpha(_) => {}
+            Analyser::Passthrough(p) => p.1 = Default::default(),
+            Analyser::Censor(c) => {
+                c.held = Default::default();
+                c.prev = Default::default();
+            }
         }
     }
 
     fn grid(&mut self, bytes: &[u8], (w, h): (usize, usize), bgra: bool, setup: &MatteSetup, pts: f64, rgb: &mut Vec<u8>) -> Result<Matte, String> {
+        let eyes = if setup.layout == EyeLayout::Mono { 1 } else { 2 };
         match self {
-            Analyser::Passthrough(skin) => {
-                let (ew, eh) = eye_rgb(bytes, (w, h), bgra, setup.layout, setup.second_eye, rgb);
-                let mask = skin.segment_soft(rgb, ew, eh)?;
-                Ok(Matte { w: mask.width as u32, h: mask.height as u32, cover: mask.data })
+            Analyser::Alpha(lin) => Ok(alpha_grid(bytes, (w, h), lin)),
+            Analyser::Passthrough(p) => {
+                let (skin, prev) = &mut **p;
+                let mut masks = Vec::with_capacity(eyes);
+                for (eye, prev) in prev.iter_mut().enumerate().take(eyes) {
+                    let (ew, eh) = eye_rgb(bytes, (w, h), bgra, setup.layout, eye == 1, rgb);
+                    let mask = skin.segment_soft_with(rgb, ew, eh, prev)?;
+                    masks.push(Matte { w: mask.width as u32, h: mask.height as u32, cover: mask.data });
+                }
+                Ok(whole_frame(setup.layout, masks))
             }
             Analyser::Censor(c) => {
                 let now = c.epoch + Duration::from_secs_f64(pts.max(0.0));
-                let eyes = if setup.layout == EyeLayout::Mono { 1 } else { 2 };
                 let mut covers = Vec::with_capacity(eyes);
                 for eye in 0..eyes {
                     let (ew, eh) = eye_rgb(bytes, (w, h), bgra, setup.layout, eye == 1, rgb);
@@ -684,9 +955,11 @@ fn whole_frame(layout: EyeLayout, mut eyes: Vec<Matte>) -> Matte {
     }
 }
 
-fn options(hwdec: Option<String>) -> PlayerOptions {
+fn options(hwdec: Option<String>, skip: bool) -> PlayerOptions {
+    let skip = skip.then_some("vd-lavc-skipframe=nonref");
     let mpv_options = ["aid=no", "sid=no", "untimed=yes", "framedrop=no", "hr-seek=yes", "osd-level=0", "audio-display=no"]
-        .iter()
+        .into_iter()
+        .chain(skip)
         .map(|kv| {
             let (k, v) = kv.split_once('=').unwrap();
             (k.to_string(), v.to_string())
@@ -715,6 +988,87 @@ mod tests {
         assert_eq!(slot_of(12.34, 10), Some(123));
         assert_eq!(slot_of(-0.1, 10), None);
         assert_eq!(slot_of(f64::NAN, 10), None);
+    }
+
+    #[test]
+    fn a_grid_is_made_from_the_frame_showing_at_its_slots_middle() {
+        assert_eq!(made_slot(0.0, 10, 0.0), None, "before the first slot's middle");
+        assert_eq!(made_slot(0.049, 10, 0.0), None);
+        assert_eq!(made_slot(0.05, 10, 0.0), Some(0));
+        assert_eq!(made_slot(0.149, 10, 0.0), Some(0));
+        assert_eq!(made_slot(0.15, 10, 0.0), Some(1));
+        assert_eq!(made_slot(12.34, 10, 0.0), Some(122));
+        assert_eq!(made_slot(1.0 / 60.0, 15, 60.0), None);
+        assert_eq!(made_slot(2.0 / 60.0 - 1e-9, 15, 60.0), Some(0));
+        for f in [0, 1, 29, 30, 1799] {
+            assert_eq!(made_slot(f as f64 / 30.0, 30, 30.0), Some(f), "frame {f}");
+            assert_eq!(made_slot(f as f64 / 24.0, 24, 24.0), Some(f));
+        }
+        assert_eq!(made_slot(0.0, 30, 60.0), None);
+        assert_eq!(made_slot(1.0 / 60.0, 30, 60.0), Some(0));
+        assert_eq!(made_slot(2.0 / 60.0, 30, 60.0), Some(0));
+        assert_eq!(made_slot(3.0 / 60.0, 30, 60.0), Some(1));
+    }
+
+    #[test]
+    fn mask_tracks_follow_the_video_up_to_30_grids_a_second() {
+        assert_eq!(mask_fps(24.0), 24);
+        assert_eq!(mask_fps(30000.0 / 1001.0), 30);
+        assert_eq!(mask_fps(25.0), 25);
+        assert_eq!(mask_fps(60.0), 30);
+        assert_eq!(mask_fps(0.0), 30, "unknown");
+        let alpha = Maker::Alpha { alpha: "a_XALPHA.mp4".into() };
+        assert_eq!(alpha.fps(24.0), 24);
+        let censor = Maker::Censor { detector: Arc::new(ModelSpec::new("d", &[], Vec::new())), skin: None, kinds: Vec::new(), key: "k".into() };
+        assert_eq!(censor.fps(60.0), CENSOR_FPS);
+        assert_eq!((alpha.version(), Maker::Passthrough { skin: Vec::new() }.version(), censor.version()), (2, 2, 1));
+        let setup = MatteSetup { path: "v.mp4".into(), dir: PathBuf::new(), maker: alpha, cache_dir: None, layout: EyeLayout::Sbs };
+        let m = wanted_meta(&setup, 30);
+        assert_eq!((m.version, m.eye, m.model.as_str(), m.source.as_str()), (2, 2, "xalpha", "a_XALPHA.mp4"), "the alpha file's stamp");
+        assert!(!Meta { version: 1, eye: 0, ..m.clone() }.same_track(&m));
+    }
+
+    #[test]
+    fn an_alpha_pixels_opacity_is_its_channels_summed_in_linear_light() {
+        let lin = linear_table();
+        assert_eq!(alpha_of(&lin, [0, 0, 0]), 0, "black is transparent");
+        assert_eq!(alpha_of(&lin, [255, 255, 255]), 255);
+        assert_eq!(alpha_of(&lin, [128, 128, 128]), 165);
+        assert_eq!(alpha_of(&lin, [128, 0, 0]), 55);
+        assert_eq!(alpha_of(&lin, [128, 128, 0]), 110, "colours sum");
+        assert_eq!(alpha_of(&lin, [255, 0, 0]), 255);
+        assert_eq!(alpha_of(&lin, [200, 200, 0]), 255, "at most opaque");
+        let frame = [0, 0, 0, 255, 255, 255, 255, 0, 128, 128, 128, 7, 0, 0, 255, 255];
+        assert_eq!(alpha_grid(&frame, (2, 2), &lin), Matte { w: 2, h: 2, cover: vec![0, 255, 165, 255] });
+    }
+
+    #[test]
+    fn the_decode_is_held_to_its_pace() {
+        let t0 = Instant::now();
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        let step = 1000.0 / 60.0 / PACE;
+        let mut p = Pace::default();
+        assert_eq!(p.wait(10.0, t0), Duration::ZERO, "the first frame");
+        assert!((ms(p.wait(10.0 + 1.0 / 60.0, t0)) - step).abs() < 0.01);
+        assert!((ms(p.wait(10.0 + 2.0 / 60.0, t0)) - 2.0 * step).abs() < 0.01, "from when the last was let go");
+        let later = t0 + Duration::from_secs(1);
+        assert_eq!(p.wait(10.0 + 3.0 / 60.0, later), Duration::ZERO);
+        assert!((ms(p.wait(10.0 + 4.0 / 60.0, later)) - step).abs() < 0.01);
+        assert_eq!(p.wait(20.0, later), Duration::ZERO);
+        assert_eq!(p.wait(19.0, later), Duration::ZERO);
+    }
+
+    #[test]
+    fn frames_nothing_refers_to_are_skipped_only_with_plenty_a_slot() {
+        assert!(skips(60.0, 10));
+        assert!(skips(60000.0 / 1001.0, 15), "59.94 fps for a censor track");
+        assert!(skips(120.0, 15));
+        assert!(!skips(30.0, 10), "a frame each 100 ms could leave a slot without one");
+        assert!(!skips(50.0, 15));
+        assert!(!skips(60.0, 30));
+        assert!(!skips(0.0, 10), "unknown");
+        let has = |skip| options(None, skip).mpv_options.iter().any(|(k, v)| k == "vd-lavc-skipframe" && v == "nonref");
+        assert!(has(true) && !has(false));
     }
 
     #[test]
@@ -768,11 +1122,28 @@ mod tests {
     }
 
     #[test]
-    fn the_decode_fits_the_shown_eye_to_the_model() {
+    fn a_make_runs_to_the_files_end() {
+        assert_eq!(file_end(9.5, None), Some(10));
+        assert_eq!(file_end(0.0, None), None, "unknown until the duration comes");
+        assert_eq!(file_end(10.02, Some(10)), Some(10));
+        let done = BTreeSet::from([0, 1, 2, 5]);
+        assert_eq!(next_missing(&done, 0, file_end(9.5, None)), Some(3));
+        assert_eq!(next_missing(&done, 4, file_end(9.5, None)), Some(4));
+        let all: BTreeSet<u32> = (0..10).collect();
+        assert_eq!(next_missing(&all, 0, file_end(9.5, None)), None, "done");
+        assert_eq!(next_missing(&all, 0, None), Some(10), "not done before the end is known");
+    }
+
+    #[test]
+    fn the_decode_fits_one_eye_to_the_model() {
         assert_eq!(decode_size((3840, 1920), EyeLayout::Sbs, (768, 768)), (1536, 768));
         assert_eq!(decode_size((1920, 1080), EyeLayout::Mono, (768, 768)), (768, 432));
         assert_eq!(decode_size((1920, 2160), EyeLayout::Ou, (768, 768)), (768, 864));
         assert_eq!(decode_size((640, 360), EyeLayout::Mono, (1024, 1024)), (640, 360), "never larger");
+        let alpha = |w, h| decode_for(&MatteSetup { path: String::new(), dir: PathBuf::new(), maker: Maker::Alpha { alpha: String::new() }, cache_dir: None, layout: EyeLayout::Sbs }, (w, h));
+        assert_eq!(alpha(1920, 960), (768, 384));
+        assert_eq!(alpha(960, 1920), (384, 768));
+        assert_eq!(alpha(640, 320), (640, 320), "never larger");
     }
 
     #[test]
@@ -793,7 +1164,7 @@ mod tests {
     }
 
     #[test]
-    fn the_shown_eye_is_cut_out_as_rgb() {
+    fn an_eye_is_cut_out_as_rgb() {
         let px = |left: bool| if left { [0u8, 0, 255, 255] } else { [255, 0, 0, 255] };
         let frame: Vec<u8> = (0..8).flat_map(|i| px(i % 4 < 2)).collect();
         let mut rgb = Vec::new();

@@ -50,3 +50,9 @@ it('serves marks as timed tags that read back as marks', () => {
   ])
   expect(readWrite({ tags: scene.tags }, detail)).toEqual({ tags: ['pov'], marks: [{ name: 'Mine', startMs: 50_000, endMs: null }] })
 })
+
+it('names the external alpha only for a video with one', () => {
+  const detail = clip([], [])
+  expect(hereSphereScene(detail, FLAT, 'http://pc')).not.toHaveProperty('alphaExternal')
+  expect(hereSphereScene(detail, FLAT, 'http://pc', true).alphaExternal).toBe(`http://pc/alpha/${detail.id}`)
+})

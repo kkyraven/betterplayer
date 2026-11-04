@@ -34,6 +34,7 @@ import { useTracking } from './state/tracking'
 import { useUi } from './state/ui'
 import { startVr, useVr } from './state/vr'
 import { startPassthrough } from './state/passthrough'
+import { startCreator } from './state/passthroughCreator'
 
 document.documentElement.dataset.platform = process.platform
 
@@ -87,6 +88,7 @@ async function boot() {
     startAccount()
     startVr()
     startPassthrough()
+    startCreator()
     startHeadsetCensor()
     void useRemote.getState().init()
     void startBroadcast()

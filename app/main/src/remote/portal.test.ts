@@ -11,7 +11,7 @@ const dir = mkdtempSync(join(tmpdir(), 'bp-portal-route-'))
 const file = join(dir, 'still.jpg')
 writeFileSync(file, 'jpeg bytes')
 const answers: Record<number, PortalStill | null> = {
-  1: { file, type: 'image/jpeg', info: { kind: 'equirect', halfDeg: [36, 27], arcDeg: 200, ms: 20_000, censor: 'a1b2c3d4e5' } },
+  1: { file, type: 'image/jpeg', info: { kind: 'equirect', halfDeg: [100, 90], arcDeg: 200, ms: 20_000, censor: 'a1b2c3d4e5' } },
   2: { blank: true },
   3: { file, type: 'image/webp', info: { kind: 'poster', halfDeg: [0, 0], arcDeg: 0, ms: 12_000, censor: 'off' } },
 }
@@ -35,7 +35,7 @@ it('answers a still with its headers and no caching', async () => {
   expect(res.status).toBe(200)
   expect(await res.text()).toBe('jpeg bytes')
   expect(Object.fromEntries(res.headers)).toMatchObject({
-    'content-type': 'image/jpeg', 'cache-control': 'no-store', 'x-portal-kind': 'equirect', 'x-portal-half': '36,27',
+    'content-type': 'image/jpeg', 'cache-control': 'no-store', 'x-portal-kind': 'equirect', 'x-portal-half': '100,90',
     'x-portal-arc': '200', 'x-portal-ms': '20000.000', 'x-portal-censor': 'a1b2c3d4e5',
   })
   expect(asked.at(-1)).toEqual([1, 2048, 25_000])
