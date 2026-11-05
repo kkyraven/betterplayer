@@ -8,10 +8,11 @@ import { TvSheet } from '@/components/tv/TvSheet'
 import { enhanceCapabilities } from '@/engine/client'
 import { outputName, useDevices } from '@/state/devices'
 import { useT } from '@/state/i18n'
-import { RATES, usePlayer, useScriptedAxes } from '@/state/player'
+import { RATE_GRID_MIN, RATE_MAX, RATE_STEP, stepRate } from '@/lib/rate'
+import { usePlayer, useScriptedAxes } from '@/state/player'
 import { useSettings } from '@/state/settings'
+import { useTracking } from '@/state/tracking'
 
-const RATE_OPTIONS = RATES.map((r) => ({ value: r, label: `${r}×` }))
 const FRAME_GEN_OPTIONS: ReadonlyArray<{ value: FrameGenOverride | 'default'; label: MessageKey }> = [
   { value: 'default', label: 'common.default' },
   ...FRAME_GEN_OVERRIDES.map((v) => ({ value: v, label: v === 'off' ? ('common.off' as const) : ('common.on' as const) })),
@@ -34,7 +35,9 @@ export function TvQuickSettings() {
   const intensity = useIntensity()
   const offsetMs = usePlayer((s) => s.video.globalOffsetMs)
   const setGlobalOffset = usePlayer((s) => s.setGlobalOffset)
-  const rate = usePlayer((s) => s.snapshot.rate)
+  const ownRate = usePlayer((s) => s.snapshot.rate)
+  const baseRate = useTracking((s) => s.playbackBaseRate)
+  const rate = baseRate ?? ownRate
   const chooseRate = usePlayer((s) => s.chooseRate)
   const subtitles = useSettings((s) => s.settings?.subtitles.enabled ?? true)
   const update = useSettings((s) => s.update)
@@ -55,7 +58,7 @@ export function TvQuickSettings() {
       <TvRow kind="number" label={t('tv.quickSettings.volume')} navFirst value={Math.round(volume * 100)} min={0} max={100} step={5} format={(v) => `${v}%`} onChange={(v) => setVolume(v / 100)} />
       <TvRow kind="number" label={t('tv.quickSettings.intensity')} value={Math.round(intensity * 100)} min={0} max={200} step={5} format={(v) => `${v}%`} onChange={(v) => adjustAmplitude(v / 100 - intensity)} />
       <TvRow kind="number" label={t('tv.quickSettings.scriptOffset')} value={offsetMs} min={-5000} max={5000} step={10} holdStep={10} format={(v) => `${v} ms`} onChange={setGlobalOffset} />
-      <TvRow kind="options" label={t('tv.quickSettings.speed')} options={RATE_OPTIONS} value={rate} onChange={chooseRate} />
+      <TvRow kind="number" label={t('tv.quickSettings.speed')} value={rate} min={RATE_GRID_MIN} max={RATE_MAX} step={RATE_STEP} format={(v) => `${v}×`} onChange={(v) => chooseRate(stepRate(rate, v > rate ? 1 : -1))} />
       <TvRow kind="switch" label={t('tv.quickSettings.subtitles')} value={subtitles} onChange={(enabled) => void update((s) => ({ ...s, subtitles: { ...s.subtitles, enabled } }))} />
       <TvRow kind="options" label={t('tv.quickSettings.upscaling')} options={upscalers} value={upscaler} onChange={(u) => setUpscaling({ upscaler: u })} />
       {enhanceCapabilities.frameGen && <TvRow kind="options" label={t('tv.quickSettings.frameGeneration')} options={FRAME_GEN_OPTIONS.map((o) => ({ value: o.value, label: t(o.label) }))} value={frameGen} onChange={(v) => setFrameGen(v === 'default' ? null : v)} />}

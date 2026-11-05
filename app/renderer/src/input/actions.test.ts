@@ -11,7 +11,7 @@ vi.mock('@/engine/client', () => ({ enhanceCapabilities: {} }))
 vi.mock('@/state/gapSkip', () => ({ skipGap: vi.fn() }))
 vi.mock('@/state/devices', () => ({ useDevices: { getState: () => state.devices } }))
 vi.mock('@/state/editor', () => ({ useEditor: { getState: () => state.editor } }))
-vi.mock('@/state/player', () => ({ RATES: [0.5, 0.75, 1, 1.25, 1.5, 2], usePlayer: { getState: () => state.player } }))
+vi.mock('@/state/player', () => ({ usePlayer: { getState: () => state.player } }))
 vi.mock('@/state/tracking', () => ({ useTracking: { getState: () => state.tracking } }))
 vi.mock('@/state/session', () => ({ useSession: { getState: () => ({}) } }))
 vi.mock('@/state/settings', () => ({ useSettings: { getState: () => ({}) } }))
@@ -118,18 +118,18 @@ it('dispatches bookmark shortcuts only on the loaded player', () => {
   expect(state.player.stepBookmark).toHaveBeenCalledTimes(2)
 })
 
-it('steps speed along the rate list and stops at the ends', () => {
+it('steps speed by tenths and stops at the top', () => {
   setBindings({ '[': 'Media.Speed.Down', ']': 'Media.Speed.Up', backspace: 'Media.Speed.Reset' })
   state.ui.screen = 'player'
   dispatch(']')
-  expect(state.player.chooseRate).toHaveBeenLastCalledWith(1.25)
+  expect(state.player.chooseRate).toHaveBeenLastCalledWith(1.1)
   state.player.snapshot.rate = 0.6
   state.tracking.playbackBaseRate = 1.1
   dispatch('[')
   expect(state.player.chooseRate).toHaveBeenLastCalledWith(1)
-  state.tracking.playbackBaseRate = 2
+  state.tracking.playbackBaseRate = 3
   dispatch(']')
-  expect(state.player.chooseRate).toHaveBeenLastCalledWith(2)
+  expect(state.player.chooseRate).toHaveBeenLastCalledWith(3)
   dispatch('backspace')
   expect(state.player.chooseRate).toHaveBeenLastCalledWith(1)
 })

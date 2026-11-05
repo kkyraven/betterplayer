@@ -21,6 +21,7 @@ import { invoke } from '@/ipc'
 import { nextBookmarkTime } from '@/lib/bookmarks'
 import { scrubberMarks } from '@/lib/marks'
 import { fileTitle } from '@/lib/format'
+import { RATE_MAX, RATE_MIN } from '@/lib/rate'
 import { isFree, useAccount } from './account'
 import { t } from './i18n'
 import { useLibrary } from './library'
@@ -41,8 +42,6 @@ export interface PlayerSnapshot {
 }
 
 export type SheetTab = 'video' | 'device' | 'range' | 'projection' | 'queue'
-
-export const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2] as const
 
 export const AUTOPLAY_ORDER = ['off', 'next', 'random'] as const
 export type AutoplayMode = (typeof AUTOPLAY_ORDER)[number]
@@ -70,7 +69,7 @@ function loadPlayback(): Playback {
       repeat: REPEAT_ORDER.find((m) => m === p.repeat) ?? fallback.repeat,
       volume: typeof p.volume === 'number' && Number.isFinite(p.volume) ? Math.max(0, Math.min(1, p.volume)) : fallback.volume,
       muted: typeof p.muted === 'boolean' ? p.muted : fallback.muted,
-      rate: RATES.find((r) => r === p.rate) ?? fallback.rate,
+      rate: typeof p.rate === 'number' && p.rate >= RATE_MIN && p.rate <= RATE_MAX ? p.rate : fallback.rate,
     }
   } catch {
     return fallback

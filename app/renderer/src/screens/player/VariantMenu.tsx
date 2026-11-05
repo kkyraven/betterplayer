@@ -1,6 +1,6 @@
 import * as Popover from '@radix-ui/react-popover'
 import { Check, Layers } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type RefObject } from 'react'
 import { AXIS_NAME, isAxisId, type AxisId } from '@shared/axes'
 import type { ScriptInfo } from 'bp-engine'
 import { cx } from '@/lib/cx'
@@ -19,12 +19,7 @@ export function variantGroups(scripts: ScriptInfo[]): [AxisId, ScriptInfo[]][] {
   return [...byAxis.entries()].filter(([, list]) => list.length > 1)
 }
 
-export function VariantMenu({ groups, overlay }: { groups: [AxisId, ScriptInfo[]][]; overlay: HTMLDivElement | null }) {
-  const t = useT()
-  const selectVariant = usePlayer((s) => s.selectVariant)
-  const [open, setOpen] = useState(false)
-  const trigger = useRef<HTMLButtonElement>(null)
-
+export function useMenuEscape(open: boolean, setOpen: (open: boolean) => void, trigger: RefObject<HTMLElement | null>) {
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent) => {
@@ -34,7 +29,15 @@ export function VariantMenu({ groups, overlay }: { groups: [AxisId, ScriptInfo[]
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [open])
+  }, [open, setOpen, trigger])
+}
+
+export function VariantMenu({ groups, overlay }: { groups: [AxisId, ScriptInfo[]][]; overlay: HTMLDivElement | null }) {
+  const t = useT()
+  const selectVariant = usePlayer((s) => s.selectVariant)
+  const [open, setOpen] = useState(false)
+  const trigger = useRef<HTMLButtonElement>(null)
+  useMenuEscape(open, setOpen, trigger)
 
   const single = groups.length === 1 ? groups[0] : undefined
   const current = single?.[1].find((s) => s.selected) ?? single?.[1][0]

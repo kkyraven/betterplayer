@@ -53,8 +53,8 @@
 .vsep { width: 1px; height: 22px; background: var(--line); margin: 0 6px; }
 .time { font: 500 12px var(--mono); color: var(--text-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .time .t3 { color: var(--text-3); }
-.rate { height: 34px; padding: 0 8px; border-radius: 9px; font: 500 12px var(--mono); color: var(--text-2); }
-.rate:hover { background: var(--glass-light); color: var(--text); }
+.rate { min-width: 52px; height: 34px; padding: 0 8px; border-radius: 9px; font: 500 12px var(--mono); color: var(--text-2); }
+.rate:hover, .rate[data-state='open'] { background: var(--glass-light); color: var(--text); }
 .rate:active { transform: scale(0.97); }
 .vol { width: 72px; height: 34px; margin: 0; accent-color: var(--accent); }
 
@@ -70,6 +70,13 @@
 .varmenu .item .tick { color: var(--accent); display: grid; place-items: center; }
 .varmenu .item .tick svg { width: 14px; height: 14px; }
 .varmenu .glabel { padding: 6px 8px 2px; font: 500 10px var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-3); }
+.speedmenu { display: grid; gap: 8px; width: 252px; padding: 12px; }
+.speedmenu .head { display: flex; justify-content: space-between; align-items: baseline; font-size: 12.5px; color: var(--text-2); }
+.speedmenu .head b { font: 500 13px var(--mono); color: var(--text); }
+.speedmenu .presets { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; }
+.speedmenu .presets button { height: 26px; border-radius: 7px; font: 500 11px var(--mono); color: var(--text-2); background: var(--glass-light); }
+.speedmenu .presets button:hover { background: rgba(var(--ink), 0.1); color: var(--text); }
+.speedmenu .presets button.on { background: var(--accent-soft); color: var(--text); }
 
 .scrubber { position: relative; height: 20px; margin: 2px -14px 0; cursor: pointer; touch-action: none; user-select: none; }
 .scrubber .heat { position: absolute; left: 0; right: 0; bottom: 0; width: 100%; height: 12px; opacity: 0.95; background-color: rgba(255, 255, 255, 0.08); background-repeat: no-repeat; }

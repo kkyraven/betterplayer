@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ControlState } from '@shared/account'
 import { Stepper } from '@/components/ui/Stepper'
 import { useT } from '@/state/i18n'
-import { RATES } from '@/state/player'
+import { RATE_MAX, RATE_MIN, RATE_STEP, stepRate } from '@/lib/rate'
 import { useTogether } from '@/state/together'
 
 const LIVE_EVERY_MS = 40
@@ -32,8 +32,6 @@ export function Controls({ remote }: { remote: ControlState | null }) {
     return () => { window.removeEventListener('blur', release); document.removeEventListener('visibilitychange', hidden); release() }
   }, [release])
   if (!remote) return <div className="st">{t('together.session.connecting')}</div>
-  const found = RATES.findIndex((r) => r >= remote.rate - 0.001)
-  const rateIndex = found < 0 ? RATES.length - 1 : found
   const intensity = remote.intensity
   const live = (value: number) => {
     hold()
@@ -52,7 +50,7 @@ export function Controls({ remote }: { remote: ControlState | null }) {
       )}
       {remote.media && <div className="row">
         <span>{t('together.controls.speed')}</span>
-        <Stepper value={rateIndex} max={RATES.length - 1} step={1} format={(i) => `${RATES[i] ?? 1}×`} label={t('together.controls.speed')} onChange={(i) => command({ cmd: 'rate', rate: RATES[i] ?? 1 })} />
+        <Stepper value={remote.rate} min={RATE_MIN} max={RATE_MAX} step={RATE_STEP} format={(v) => `${v}×`} label={t('together.controls.speed')} onChange={(v) => command({ cmd: 'rate', rate: stepRate(remote.rate, v > remote.rate ? 1 : -1) })} />
       </div>}
       <div className="live">
         <span className="k">

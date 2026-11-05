@@ -7,7 +7,7 @@ import { fmtDuration } from '@/lib/format'
 import { scrubberMarks } from '@/lib/marks'
 import { useT } from '@/state/i18n'
 import * as live from '@/state/live'
-import { RATES, usePlayer } from '@/state/player'
+import { usePlayer } from '@/state/player'
 import { useRemote } from '@/state/remote'
 import { useSession } from '@/state/session'
 import { useSettings } from '@/state/settings'
@@ -17,6 +17,7 @@ import { useUi } from '@/state/ui'
 import { useVr } from '@/state/vr'
 import { Scrubber } from './Scrubber'
 import { SessionStrip } from './SessionStrip'
+import { SpeedMenu } from './SpeedMenu'
 import { VariantMenu, variantGroups } from './VariantMenu'
 
 export function ControlBar({ overlay, onHoverChange }: { overlay: HTMLDivElement | null; onHoverChange: (hovered: boolean) => void }) {
@@ -35,7 +36,6 @@ export function ControlBar({ overlay, onHoverChange }: { overlay: HTMLDivElement
   const seek = usePlayer((s) => s.seek)
   const seekBy = usePlayer((s) => s.seekBy)
   const step = usePlayer((s) => s.step)
-  const chooseRate = usePlayer((s) => s.chooseRate)
   const volume = usePlayer((s) => s.volume)
   const muted = usePlayer((s) => s.muted)
   const setVolume = usePlayer((s) => s.setVolume)
@@ -69,10 +69,6 @@ export function ControlBar({ overlay, onHoverChange }: { overlay: HTMLDivElement
   const stroke = scripts.find((s) => s.axis === 'L0' && s.selected) ?? scripts.find((s) => s.selected) ?? scripts[0]
   const { chapters, bookmarks } = useMemo(() => scrubberMarks(scripts, marks), [scripts, marks])
   const variants = useMemo(() => variantGroups(scripts), [scripts])
-  const nextRate = () => {
-    const i = RATES.findIndex((r) => r >= rate - 0.001)
-    chooseRate(RATES[(i + 1) % RATES.length] ?? 1)
-  }
 
   return (
     <TooltipGroup onHoverChange={onHoverChange} className="bar" onPointerDown={(e) => e.stopPropagation()}>
@@ -111,9 +107,7 @@ export function ControlBar({ overlay, onHoverChange }: { overlay: HTMLDivElement
             aria-label={t('player.controls.volume')}
             onChange={(e) => setVolume(Number(e.target.value) / 100)}
           />
-          <button type="button" className="rate" onClick={nextRate} aria-label={t('player.controls.speed')}>
-            {rate}×
-          </button>
+          <SpeedMenu rate={rate} overlay={overlay} />
           {variants.length > 0 && <VariantMenu groups={variants} overlay={overlay} />}
           <IconButton label={t(`player.controls.autoplay.${autoplay}`)} className={autoplay !== 'off' ? 'on' : undefined} onClick={cycleAutoplay}>
             {autoplay === 'random' ? <Shuffle /> : <ListVideo />}
