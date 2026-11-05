@@ -7,6 +7,8 @@ use std::sync::{
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
+mod speech;
+
 fn err(e: String) -> Error {
     Error::from_reason(e)
 }
@@ -2515,7 +2517,7 @@ impl Engine {
 
     #[napi]
     pub fn vr_view(&self, view: VrView) -> Result<()> {
-        let v = bp_player::VrView::parse(&view.kind, &view.layout, view.fov, view.arc, view.swap_eyes).map_err(vr_err)?;
+        let v = bp_player::VrView::parse(&view.kind, &view.layout, view.fov, view.arc, view.swap_eyes).map_err(vr_err)?.with_ipd(view.ipd);
         self.inner.player.vr_view(v).map_err(vr_err)
     }
 
@@ -3027,6 +3029,7 @@ pub struct VrView {
     pub fov: f64,
     pub arc: Option<f64>,
     pub swap_eyes: bool,
+    pub ipd: Option<f64>,
 }
 
 #[napi(object)]

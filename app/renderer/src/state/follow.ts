@@ -29,6 +29,7 @@ interface FollowStore {
   host: string
   quest: QuestHello | null
   state: FollowState | null
+  reached: boolean
   matched: { path: string; title: string } | null
   halted: FollowHalt | null
   setKind: (kind: FollowKind) => void
@@ -128,7 +129,7 @@ export const useFollow = create<FollowStore>()((set, get) => {
     wasPlaying = true
     const { halted } = get()
     const keep = halted !== null && kind === 'quest' && halted.host === host
-    set({ kind, host, quest, state: engine.followState(), matched: null, halted: keep ? halted : null })
+    set({ kind, host, quest, state: engine.followState(), reached: false, matched: null, halted: keep ? halted : null })
   }
   const automatic = () => get().kind === 'quest' || followedPlay
   const free = (followingIt: boolean) => {
@@ -142,6 +143,7 @@ export const useFollow = create<FollowStore>()((set, get) => {
     ...loadSetup(),
     quest: null,
     state: null,
+    reached: false,
     matched: null,
     halted: null,
     setKind: (kind) => {
@@ -206,7 +208,7 @@ export const useFollow = create<FollowStore>()((set, get) => {
         } else set({ halted: { host, path } })
       }
       wasPlaying = playing
-      set(state ? { state } : { state: null, halted: null })
+      set(state ? { state, reached: get().reached || state.status === 'connected' } : { state: null, halted: null })
     },
   }
 })

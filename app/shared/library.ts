@@ -114,8 +114,8 @@ export interface MediaFilters {
   maxDurationMs?: number
   watched?: 'yes' | 'no'
   minRating?: number
-  tag?: string
   tags?: string[]
+  notTags?: string[]
   hidden?: 'yes'
 }
 
@@ -154,6 +154,13 @@ export interface MediaIndexRow {
   id: number
   title: string
   durationMs: number
+}
+
+export interface MediaScanRow extends MediaIndexRow {
+  addedAt: number
+  rating: number
+  favourite: boolean
+  tags: string[]
 }
 
 export type LibraryChange =

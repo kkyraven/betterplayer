@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { MediaDetail } from '@shared/library'
 import { FLAT } from '@shared/projection'
-import { hereSphereScene, readWrite } from './heresphere'
+import { hereSphereScan, hereSphereScene, readWrite } from './heresphere'
 
 vi.mock('../i18n', () => ({ t: (key: string) => key }))
 
@@ -49,6 +49,13 @@ it('serves marks as timed tags that read back as marks', () => {
     { name: 'Mine', start: 50_000, track: 0 },
   ])
   expect(readWrite({ tags: scene.tags }, detail)).toEqual({ tags: ['pov'], marks: [{ name: 'Mine', startMs: 50_000, endMs: null }] })
+})
+
+it('scans the library with the links the index gives and durations in milliseconds', () => {
+  const rows = [{ id: 3, title: 'clip', durationMs: 120_000, addedAt: Date.UTC(2026, 0, 2), rating: 4, favourite: true, tags: ['pov'] }]
+  expect(hereSphereScan(rows, 'http://pc/k/key').scanData).toEqual([
+    { link: 'http://pc/k/key/heresphere/3', title: 'clip', dateAdded: '2026-01-02', duration: 120_000, rating: 4, isFavorite: true, tags: [{ name: 'pov' }] },
+  ])
 })
 
 it('names the external alpha only for a video with one', () => {

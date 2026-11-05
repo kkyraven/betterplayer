@@ -19,6 +19,7 @@ import {
   type MediaPage,
   type MediaQuery,
   type MediaRow,
+  type MediaScanRow,
   type MediaScript,
   type Playlist,
   type PlaylistEntry,
@@ -797,6 +798,11 @@ export class LibraryDb {
     return { description: row ? text(row, 'description') : '', studio: row ? text(row, 'studio') : '', performers }
   }
 
+  performerNames(limit: number): string[] {
+    return this.stmt(`SELECT p.name, count(DISTINCT m.id) AS n FROM performers p JOIN media_performers mp ON mp.performer_id = p.id JOIN media m ON m.id = mp.media_id
+      WHERE ${SHOWN_SQL} GROUP BY p.name ORDER BY n DESC, p.name LIMIT ?`).all(limit).map((r) => text(r, 'name'))
+  }
+
   setMetadata(id: number, data: { description: string; studio: string; filename: string; performers: ImportedPerformer[] }) {
     const media = this.stmt('SELECT root_id FROM media WHERE id = ?').get(id)
     if (!media) return
@@ -1334,9 +1340,9 @@ export class LibraryDb {
       where.push('m.rating >= ?')
       params.push(f.minRating)
     }
-    if (f.tag) {
-      where.push('EXISTS (SELECT 1 FROM media_tags mt JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = m.id AND t.name = ?)')
-      params.push(f.tag)
+    for (const tag of f.notTags ?? []) {
+      where.push('NOT EXISTS (SELECT 1 FROM media_tags mt JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = m.id AND t.name = ?)')
+      params.push(tag)
     }
     for (const tag of f.tags ?? []) {
       where.push('EXISTS (SELECT 1 FROM media_tags mt JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = m.id AND t.name = ?)')
@@ -1965,6 +1971,16 @@ export class LibraryDb {
     )
       .all(tag)
       .map(toIndexRow)
+  }
+
+  scanRows(): MediaScanRow[] {
+    return this.stmt(
+      `SELECT m.id, m.title, m.duration_ms, m.added_at, m.rating, m.favourite,
+       (SELECT json_group_array(t.name) FROM media_tags mt JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = m.id) AS tag_names
+       FROM media m WHERE ${SHOWN_SQL} ORDER BY m.pinned DESC, m.added_at DESC, m.id DESC`,
+    )
+      .all()
+      .map((r) => ({ ...toIndexRow(r), addedAt: num(r, 'added_at'), rating: num(r, 'rating'), favourite: num(r, 'favourite') !== 0, tags: strings(text(r, 'tag_names')) }))
   }
 
   scriptSource(mediaId: number, axis: AxisId): string | null {

@@ -13,7 +13,8 @@ import { useSettingsNavigation } from '@/state/settingsNavigation'
 import { useUi } from '@/state/ui'
 import { useVr } from '@/state/vr'
 import { HeadsetIcon } from './HeadsetIcon'
-import { followDot, HeadsetRows, STEAMVR, useSteamvrShown } from './HeadsetRows'
+import { followDot } from './followStatus'
+import { HeadsetRows, STEAMVR, useSteamvrShown } from './HeadsetRows'
 
 export function HeadsetsMenu() {
   const t = useT()

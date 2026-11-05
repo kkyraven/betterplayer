@@ -30,6 +30,11 @@ describe('mediaIdFromUrl', () => {
     expect(isRemoteMedia('http://192.168.1.5:8420/media/12')).toBe(true)
   })
 
+  it('reads the id behind a player key', () => {
+    expect(mediaIdFromUrl('http://192.168.1.5:8420/k/abc-_1/media/12')).toBe(12)
+    expect(mediaIdFromUrl('http://192.168.1.5:8420/k/abc/def/media/12')).toBeNull()
+  })
+
   it('is null for files, other routes and other servers', () => {
     expect(mediaIdFromUrl('/videos/a.mp4')).toBeNull()
     expect(mediaIdFromUrl('http://192.168.1.5:8420/thumb/12')).toBeNull()

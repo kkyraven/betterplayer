@@ -5,6 +5,7 @@ import {
   ArrowDown,
   ChevronDown,
   ChevronRight,
+  CircleMinus,
   Disc3,
   Ellipsis,
   EyeOff,
@@ -19,6 +20,7 @@ import {
   Layers,
   Library,
   ListVideo,
+  Minus,
   MoveVertical,
   Orbit,
   Pencil,
@@ -36,6 +38,7 @@ import {
   Trash2,
   Undo2,
   Waves,
+  X,
   Zap,
 } from 'lucide-react'
 import { memo, createContext, useContext, useEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode, type DragEventHandler } from 'react'
@@ -44,6 +47,7 @@ import { CORE_SECTIONS, SECTIONS, type FolderNode, type MediaQuery, type Section
 import { IconButton } from '@/components/ui/IconButton'
 import { Prompt } from '@/components/ui/Prompt'
 import { invoke } from '@/ipc'
+import { bindingLabel } from '@/input/actions'
 import { cx } from '@/lib/cx'
 import { ipcMessage } from '@/lib/errors'
 import { electron, REVEAL_LABEL } from '@/node'
@@ -51,6 +55,7 @@ import { useT } from '@/state/i18n'
 import { useLibrary } from '@/state/library'
 import { useRemote } from '@/state/remote'
 import { useSettings } from '@/state/settings'
+import { tagClick, tagState } from '@/state/tagFilter'
 import { dropKey, useSelect, type DropTarget } from '@/state/select'
 import { ServerDialog } from './ServerDialog'
 import { dropItem, flattenFolders, moveItem, orderedItems, sidebarKey } from './sidebarOrder'
@@ -108,7 +113,6 @@ export function Sidebar() {
   const roots = useLibrary((s) => s.roots)
   const tags = useLibrary((s) => s.tags)
   const filters = useLibrary((s) => s.filters)
-  const setFilters = useLibrary((s) => s.setFilters)
   const openTag = useLibrary((s) => s.openTag)
   const setSection = useLibrary((s) => s.setSection)
   const setPlaylist = useLibrary((s) => s.setPlaylist)
@@ -279,14 +283,15 @@ export function Sidebar() {
   const fill = Math.max(0, TOP_TAGS - pinned.length)
   const tagRow = (t: TagRow) => {
     const isPinned = pinnedTags.includes(t.name)
+    const state = tagState(filters, t.name)
     return (
-      <DropRow key={t.name} contextMenu as="div" target={{ kind: 'tag', name: t.name }} className={cx('sb-item', 'sb-tag', filters.tag === t.name && 'on')}>
-        <button type="button" className="sb-fill" onClick={() => (filters.tag === t.name ? setFilters({ ...filters, tag: undefined }) : openTag(t.name))}>
-          {isPinned ? <Pin /> : <Tag />}
+      <DropRow key={t.name} contextMenu as="div" target={{ kind: 'tag', name: t.name }} className={cx('sb-item', 'sb-tag', state === 'in' && 'on', state === 'out' && 'not')}>
+        <button type="button" className="sb-fill" onClick={(e) => openTag(t.name, tagClick(e))}>
+          {state === 'out' ? <CircleMinus /> : isPinned ? <Pin /> : <Tag />}
           <span className="sb-name">{t.name}</span>
           <span className="n">{t.count}</span>
         </button>
-        <TagMenu name={t.name} count={t.count} pinned={isPinned} onTogglePin={() => togglePin(t.name)} />
+        <TagMenu name={t.name} count={t.count} pinned={isPinned} state={state} onTogglePin={() => togglePin(t.name)} />
       </DropRow>
     )
   }
@@ -575,8 +580,9 @@ function OrderActions({ hidden, first, last, onPin, onMove, onToggle }: { hidden
   </>
 }
 
-function TagMenu({ name, count, pinned, onTogglePin }: { name: string; count: number; pinned: boolean; onTogglePin: () => void }) {
+function TagMenu({ name, count, pinned, state, onTogglePin }: { name: string; count: number; pinned: boolean; state: 'in' | 'out' | undefined; onTogglePin: () => void }) {
   const t = useT()
+  const openTag = useLibrary((s) => s.openTag)
   const renameTag = useLibrary((s) => s.renameTag)
   const deleteTag = useLibrary((s) => s.deleteTag)
   const updateSettings = useSettings((s) => s.update)
@@ -597,6 +603,18 @@ function TagMenu({ name, count, pinned, onTogglePin }: { name: string; count: nu
           {pinned ? <PinOff /> : <Pin />}
           {pinned ? t('library.tag.unpin') : t('library.tag.pin')}
         </DropdownMenu.Item>
+        <DropdownMenu.Separator className="sep" />
+        <DropdownMenu.Item className="item" onSelect={() => openTag(name, 'add')}>
+          {state === 'in' ? <X /> : <Plus />}
+          {state === 'in' ? t('library.tag.removeFromSearch') : t('library.tag.addToSearch')}
+          <span className="right">{bindingLabel('shift+click')}</span>
+        </DropdownMenu.Item>
+        <DropdownMenu.Item className="item" onSelect={() => openTag(name, 'exclude')}>
+          {state === 'out' ? <X /> : <Minus />}
+          {state === 'out' ? t('library.tag.removeFromSearch') : t('library.tag.excludeFromSearch')}
+          <span className="right">{bindingLabel('alt+click')}</span>
+        </DropdownMenu.Item>
+        <DropdownMenu.Separator className="sep" />
         <DropdownMenu.Item className="item" onSelect={() => setAsk('rename')}>
           <Pencil />
           {t('common.rename')}

@@ -633,10 +633,10 @@ impl Overlays {
 
     pub fn place_facing(&mut self, id: u32, centre: [f32; 3]) -> Result<(), String> {
         let live = self.live()?;
-        let eye = head_pose(live.system).map_or([centre[0], centre[1], centre[2] + 1.0], |h| h.position());
+        let head = head_pose(live.system).unwrap_or(Pose::translation(centre[0], centre[1], centre[2] + 1.0));
         let o = live.overlay;
         let p = live.panels.get_mut(id as usize).ok_or_else(|| format!("no headset panel {id}"))?;
-        p.fixed = Some(facing(centre, eye));
+        p.fixed = Some(facing(centre, &head));
         p.attached = None;
         p.follow = None;
         put(o, live.recentre.as_ref(), p)

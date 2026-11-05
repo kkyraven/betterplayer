@@ -19,6 +19,8 @@ import { Audio } from './audio'
 import { GameCapture } from './game'
 import { Chaster } from './chaster'
 import { Models } from './models'
+import { voiceSearch } from './speech'
+import { isVoiceModel } from './speech/models'
 import { findSubtitles, readSubtitles } from './subtitles'
 import { readTags } from './tags'
 import type { Account } from './account'
@@ -46,7 +48,7 @@ export function send<E extends IpcEvent>(win: BrowserWindow, event: E, payload: 
   win.webContents.send(event, payload)
 }
 
-export function registerIpc(win: BrowserWindow, store: SettingsStore, library: Library, remote: RemoteServer, client: RemoteClient, account: Account, updater: Updater, ytdlp: string | null, dom: Dom, vr: VrHost) {
+export function registerIpc(win: BrowserWindow, store: SettingsStore, library: Library, remote: RemoteServer, client: RemoteClient, account: Account, updater: Updater, ytdlp: string | null, dom: Dom, vr: VrHost, enginePath: string) {
   function handle<C extends IpcChannel>(channel: C, handler: Handler<C>) {
     handlers.set(channel, handler as (...args: never[]) => unknown)
     ipcMain.handle(channel, (event: IpcMainInvokeEvent, ...args: Parameters<IpcContract[C]>) => {
@@ -169,11 +171,15 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   })
 
   const bundledModels = app.isPackaged ? join(process.resourcesPath, 'models') : join(app.getAppPath(), 'models')
-  const models = new Models(app.getPath('userData'), bundledModels, (p) => send(win, 'models:progress', p))
+  const models = new Models(app.getPath('userData'), bundledModels, (p) => {
+    send(win, 'models:progress', p)
+    voice.files.progress(p)
+  })
   handle('models:dir', () => models.dir)
   handle('models:catalog', () => kinkyravenModels())
   handle('models:status', (files) => models.status(files))
   handle('models:download', async (id, file) => {
+    if (isVoiceModel(id)) return voice.files.fetch(id, file)
     await models.download(id, file.url ? file : { ...file, url: await account.modelLink(file.file) })
     library.wakeTagger()
   })
@@ -186,6 +192,14 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   })
   handle('models:remove', (file) => models.remove(file))
   handle('models:cancel', (id) => models.cancel(id))
+
+  const voice = voiceSearch(enginePath, models, library)
+  handle('speech:model', () => voice.api.model())
+  handle('speech:download', () => voice.api.download())
+  handle('speech:chunk', (session, seq, pcm) => voice.api.chunk(session, seq, pcm))
+  handle('speech:end', (session) => voice.api.end(session))
+  handle('speech:cancel', (session) => voice.api.cancel(session))
+  remote.setSpeech(voice.api)
 
   const audio = new Audio(app.getPath('userData'), ytdlp)
   handle('audio:decode', (source) => audio.decode(source))
@@ -324,6 +338,7 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
     if (!win.isDestroyed() && !client.active) send(win, event, payload)
     remote.broadcast(event, payload)
     if (event === 'library:changed') vr.libraryChanged()
+    if (event === 'library:changed') voice.vocabulary.changed()
   })
   client.setEmitter((event, payload) => {
     if (!win.isDestroyed()) send(win, event, payload)
@@ -608,7 +623,7 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   handle('remote:playing', () => client.playing)
   handle('player:control', (command) => send(win, 'player:control', command))
   handle('vr:launch', () => launchSteamvr())
-  handle('vr:start', () => vr.start())
+  handle('vr:start', (options) => vr.start(options?.intro ?? false))
   handle('vr:stop', () => vr.stop())
   handle('vr:state', (state) => vr.setState(state))
   handle('vr:panelState', () => vr.state)

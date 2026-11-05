@@ -414,7 +414,7 @@ export interface ModelFileStatus {
 export interface ModelInfo {
   id: string
   label: string
-  kind: ModelKind | 'tagger' | 'skin'
+  kind: ModelKind | 'tagger' | 'skin' | 'speech' | 'vad'
   version: string
   files: ModelFileInfo[]
   bundled: boolean

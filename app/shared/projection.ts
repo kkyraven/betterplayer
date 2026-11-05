@@ -12,7 +12,16 @@ export interface Projection {
   fov: number
   arc?: number
   swapEyes: boolean
+  ipd?: number
 }
+
+export const IPD_MAX = 3
+
+export function stepIpd(p: Projection, tenths: number): Projection {
+  return { ...p, ipd: Math.max(-IPD_MAX * 10, Math.min(IPD_MAX * 10, Math.round((p.ipd ?? 0) * 10) + tenths)) / 10 }
+}
+
+export const ipdText = (deg: number) => (deg === 0 ? '0°' : `${deg > 0 ? '+' : '−'}${Math.abs(deg).toFixed(1)}°`)
 
 export const FLAT: Projection = { kind: 'flat', layout: 'mono', fov: 190, swapEyes: false }
 
@@ -45,6 +54,7 @@ export function readProjection(raw: unknown): Projection | undefined {
   if (!kind || !layout) return undefined
   const p: Projection = { kind, layout, fov: typeof r.fov === 'number' ? r.fov : 190, swapEyes: r.swapEyes === true }
   if (finite(r.arc) && r.arc > 0) p.arc = r.arc
+  if (finite(r.ipd) && r.ipd !== 0) p.ipd = Math.round(Math.max(-IPD_MAX, Math.min(IPD_MAX, r.ipd)) * 10) / 10
   return p
 }
 

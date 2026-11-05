@@ -932,7 +932,8 @@ impl Renderer {
             gl::Viewport(0, 0, w as i32, h as i32);
             self.portals.bind(head);
             for (i, eye) in self.eyes.iter().enumerate() {
-                let v = eye_view(&self.recentre, &self.offset, head, &eye.to_head);
+                let half = self.view.ipd / 2.0;
+                let v = eye_view(&self.recentre, &self.offset, head, &eye.to_head).turned(if i == 0 { half } else { -half });
                 let [l, r, t, b] = eye.tangents;
                 let pixel = (r - l) / w as f32;
                 gl::Uniform4f(p.tangents, l, r, t, b);

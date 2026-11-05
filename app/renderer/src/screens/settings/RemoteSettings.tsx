@@ -8,6 +8,21 @@ import { SettingsAdvanced } from './SettingsSection'
 import { useT } from '@/state/i18n'
 import { useSettings } from '@/state/settings'
 
+function Addresses({ urls, hint }: { urls: string[]; hint: string }) {
+  return (
+    <div className="prow">
+      <span className="urls">
+        {urls.map((url) => (
+          <span key={url} className="val">
+            {url}
+          </span>
+        ))}
+        <span className="sub">{hint}</span>
+      </span>
+    </div>
+  )
+}
+
 export function RemoteSettings() {
   const t = useT()
   const remote = useSettings((s) => s.settings?.remote)
@@ -81,16 +96,10 @@ export function RemoteSettings() {
           )}
         </div>
         {remote?.enabled && !needsPassword && status?.running && status.urls.length > 0 && (
-          <div className="prow">
-            <span className="urls">
-              {status.urls.map((url) => (
-                <span key={url} className="val">
-                  {url.replace('http://', 'http://bp:••••@')}
-                </span>
-              ))}
-              <span className="sub">{t('settings.sharing.enterAddress')}</span>
-            </span>
-          </div>
+          <>
+            <Addresses urls={status.urls.map((url) => `${url}/heresphere`)} hint={t('settings.sharing.enterHereSphere')} />
+            <Addresses urls={status.urls.map((url) => url.replace('http://', 'http://bp:••••@'))} hint={t('settings.sharing.enterDeoVr')} />
+          </>
         )}
       </div>
       <SettingsAdvanced page="sharing" error={portError ? t('settings.sharing.invalidPort') : undefined} custom={remote?.port !== undefined && remote.port !== REMOTE_PORT_DEFAULT}>

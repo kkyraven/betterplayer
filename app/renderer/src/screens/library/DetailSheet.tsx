@@ -16,6 +16,7 @@ import { useT } from '@/state/i18n'
 import { useLibrary } from '@/state/library'
 import { usePlayer } from '@/state/player'
 import { useVideoSettings } from '@/state/settings'
+import { tagClick } from '@/state/tagFilter'
 import { openMediaMenu, renameMedia } from './MediaMenu'
 
 
@@ -88,7 +89,7 @@ export function DetailSheet() {
           <div className="tags">
             {detail.tags.map((name) => (
               <span key={name} className="chip">
-                <button type="button" onClick={() => openTag(name)}>
+                <button type="button" onClick={(e) => openTag(name, tagClick(e))}>
                   {name}
                 </button>
                 <button type="button" className="x" aria-label={t('library.detail.removeTag', { name })} title={t('common.remove')} onClick={() => void setTags(detail.id, detail.tags.filter((x) => x !== name))}>

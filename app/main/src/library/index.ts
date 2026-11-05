@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url'
 import { net } from 'electron'
 import type { AxisId } from '@shared/axes'
 import { isMediaPath, isVideoPath, type GeneratedResult, type GeneratedScriptRow, type IpcEvent, type IpcEvents } from '@shared/ipc'
-import type { DropResult, FolderNode, LibraryChange, LibraryCounts, LibraryRoot, MediaDetail, MediaIndexRow, MediaMark, MediaPage, MediaQuery, MediaRow, Playlist, ScanProgress, Tag, TagUndo } from '@shared/library'
+import type { DropResult, FolderNode, LibraryChange, LibraryCounts, LibraryRoot, MediaDetail, MediaIndexRow, MediaMark, MediaPage, MediaQuery, MediaRow, MediaScanRow, Playlist, ScanProgress, Tag, TagUndo } from '@shared/library'
 import type { MatcherReport, MatcherResolveResult, OrphanSet } from '@shared/matcher'
 import type { ScriptSet } from '@shared/peer'
 import { isUrl, type RemoteLoad, type ServerInput } from '@shared/remote'
@@ -591,6 +591,10 @@ export class Library {
     return this.db.tags()
   }
 
+  performerNames(limit: number): string[] {
+    return this.db.performerNames(limit)
+  }
+
   renameTag(from: string, to: string): string {
     const affected = this.db.remoteMediaIdsWithTag(from)
     const name = this.db.renameTag(from, to)
@@ -848,6 +852,10 @@ export class Library {
 
   tagIndex(tag: string): MediaIndexRow[] {
     return this.db.tagIndexRows(tag)
+  }
+
+  scanRows(): MediaScanRow[] {
+    return this.db.scanRows()
   }
 
   scriptFile(id: number, axis: AxisId): string | null {

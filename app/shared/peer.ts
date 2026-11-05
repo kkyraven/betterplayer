@@ -48,7 +48,7 @@ export const sourceBase = (source: string) => `http://${source}`
 export const basicAuth = (password: string) => `Basic ${btoa(`bp:${password}`)}`
 export const mediaUrl = (base: string, id: number) => `${base}/media/${id}`
 
-const MEDIA_URL = /^https?:\/\/[^/]+\/media\/(\d+)$/
+const MEDIA_URL = /^https?:\/\/[^/]+(?:\/k\/[^/]+)?\/media\/(\d+)$/
 
 export function mediaIdFromUrl(path: string): number | null {
   const m = MEDIA_URL.exec(path)

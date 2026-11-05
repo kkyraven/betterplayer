@@ -7,6 +7,7 @@ import type { SearchInfo } from '@shared/search'
 import { invoke, on } from '@/ipc'
 import { t } from '@/state/i18n'
 import { useSettings } from '@/state/settings'
+import { clickTag, retargetTags, tagState, type TagClick } from '@/state/tagFilter'
 import { useUi } from '@/state/ui'
 import type { GridPosition } from '@/screens/library/virtualGrid'
 
@@ -82,7 +83,7 @@ interface LibraryState {
   setSearch: (search: string) => void
   setSort: (sort: Sort, desc?: boolean) => void
   setFilters: (filters: MediaFilters) => void
-  openTag: (name: string) => void
+  openTag: (name: string, click?: TagClick) => void
   setView: (view: View) => void
   setGridSize: (px: number) => void
   setSidebarOpen: (open: boolean) => void
@@ -309,7 +310,7 @@ export const useLibrary = create<LibraryState>()((set, get) => {
           else listsStale = true
         }
         else if (change.kind === 'tags') {
-          if (get().search.trim() || get().filters.tag) {
+          if (get().search.trim() || get().filters.tags || get().filters.notTags) {
             structuralChange()
             return
           }
@@ -460,8 +461,11 @@ export const useLibrary = create<LibraryState>()((set, get) => {
       set({ filters })
       requery()
     },
-    openTag: (name) => {
-      set((s) => ({ section: 'all', folder: null, playlistId: null, playlistError: null, ...(s.playlistId !== null ? { view: storedView() } : {}), ...SECTION_SORT.all, filters: { ...s.filters, tag: name } }))
+    openTag: (name, click = 'only') => {
+      const s = get()
+      const filters = clickTag(s.filters, name, click)
+      if (s.playlistId !== null || (click === 'only' && filters.tags)) set({ section: 'all', folder: null, playlistId: null, playlistError: null, ...(s.playlistId !== null ? { view: storedView() } : {}), ...SECTION_SORT.all, filters })
+      else set({ filters })
       requery()
     },
     setView: (view) => {
@@ -557,10 +561,10 @@ export const useLibrary = create<LibraryState>()((set, get) => {
       const before = get().tags
       const name = await invoke('library:renameTag', from, to)
       const { filters, setFilters } = get()
-      if (filters.tag === from && name !== from) {
-        if (before.some((tag) => tag.name === name)) setFilters({ ...filters, tag: name })
+      if (tagState(filters, from) && name !== from) {
+        if (before.some((tag) => tag.name === name)) setFilters(retargetTags(filters, [from], name))
         else {
-          set({ filters: { ...filters, tag: name } })
+          set({ filters: retargetTags(filters, [from], name) })
           void get().query('shown')
         }
       }
@@ -570,7 +574,7 @@ export const useLibrary = create<LibraryState>()((set, get) => {
     deleteTag: async (name) => {
       await invoke('library:deleteTag', name)
       const { filters, setFilters } = get()
-      if (filters.tag === name) setFilters({ ...filters, tag: undefined })
+      if (tagState(filters, name)) setFilters(retargetTags(filters, [name], undefined))
       await get().refresh()
     },
     excludeFolder: async (folder) => {

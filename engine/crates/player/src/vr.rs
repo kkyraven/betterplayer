@@ -5,6 +5,7 @@ pub struct VrView {
     pub fov: f32,
     pub arc: f32,
     pub swap_eyes: bool,
+    pub ipd: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,9 +23,11 @@ pub enum VrLayout {
     Ou,
 }
 
+const IPD_MAX: f64 = 3.0;
+
 impl Default for VrView {
     fn default() -> VrView {
-        VrView { kind: VrKind::Flat, layout: VrLayout::Mono, fov: 190.0, arc: 180.0, swap_eyes: false }
+        VrView { kind: VrKind::Flat, layout: VrLayout::Mono, fov: 190.0, arc: 180.0, swap_eyes: false, ipd: 0.0 }
     }
 }
 
@@ -47,7 +50,12 @@ impl VrView {
         if !fov.is_finite() || !arc.is_finite() {
             return Err("fov or arc is not a number".into());
         }
-        Ok(VrView { kind, layout, fov: fov.clamp(60.0, 360.0) as f32, arc: arc.clamp(60.0, 360.0) as f32, swap_eyes })
+        Ok(VrView { kind, layout, fov: fov.clamp(60.0, 360.0) as f32, arc: arc.clamp(60.0, 360.0) as f32, swap_eyes, ipd: 0.0 })
+    }
+
+    pub fn with_ipd(self, ipd: Option<f64>) -> VrView {
+        let ipd = ipd.filter(|d| d.is_finite() && self.layout != VrLayout::Mono).map_or(0.0, |d| d.clamp(-IPD_MAX, IPD_MAX) as f32);
+        VrView { ipd, ..self }
     }
 }
 
@@ -139,13 +147,23 @@ mod tests {
     #[test]
     fn views_parse_the_apps_projection_names() {
         let v = VrView::parse("fisheye", "sbs", 200.0, None, true).unwrap();
-        assert_eq!(v, VrView { kind: VrKind::Fisheye, layout: VrLayout::Sbs, fov: 200.0, arc: 180.0, swap_eyes: true });
+        assert_eq!(v, VrView { kind: VrKind::Fisheye, layout: VrLayout::Sbs, fov: 200.0, arc: 180.0, swap_eyes: true, ipd: 0.0 });
         assert_eq!(VrView::parse("equirect180", "sbs", 190.0, Some(200.0), false).unwrap().arc, 200.0);
         assert_eq!(VrView::parse("equirect360", "mono", 190.0, None, false).unwrap().kind, VrKind::Equirect360);
         assert!(VrView::parse("cubemap", "mono", 190.0, None, false).is_err());
         assert!(VrView::parse("flat", "tb", 190.0, None, false).is_err());
         assert!(VrView::parse("flat", "mono", f64::NAN, None, false).is_err());
         assert!(VrView::parse("equirect180", "mono", 190.0, Some(f64::NAN), false).is_err());
+    }
+
+    #[test]
+    fn ipd_adjust_stays_in_reach_and_is_none_for_mono() {
+        let sbs = VrView::parse("equirect180", "sbs", 190.0, None, false).unwrap();
+        assert_eq!(sbs.with_ipd(Some(0.4)).ipd, 0.4);
+        assert_eq!(sbs.with_ipd(Some(-9.0)).ipd, -3.0);
+        assert_eq!(sbs.with_ipd(Some(f64::NAN)).ipd, 0.0);
+        assert_eq!(sbs.with_ipd(None).ipd, 0.0);
+        assert_eq!(VrView::parse("equirect360", "mono", 190.0, None, false).unwrap().with_ipd(Some(1.0)).ipd, 0.0);
     }
 
     #[test]

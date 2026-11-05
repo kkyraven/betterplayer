@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/player", "crates/vr", "crates/devices", "crates/script", "crates/axes", "crates/tracking", "crates/detect", "crates/beat", "crates/model", "crates/hero", "crates/core", "crates/napi"]
+members = ["crates/player", "crates/vr", "crates/devices", "crates/script", "crates/axes", "crates/tracking", "crates/detect", "crates/beat", "crates/model", "crates/hero", "crates/core", "crates/speech", "crates/napi"]
 
 [workspace.package]
 edition = "2024"
@@ -20,6 +20,7 @@ bp-beat = { path = "crates/beat" }
 bp-model = { path = "crates/model" }
 bp-hero = { path = "crates/hero" }
 bp-core = { path = "crates/core" }
+bp-speech = { path = "crates/speech" }
 
 [profile.release]
 debug = 1

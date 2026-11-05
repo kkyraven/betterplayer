@@ -1,6 +1,9 @@
+import { useEffect, useState } from 'react'
 import { isFree, isPremium, useAccount } from '@/state/account'
 import { entitledMusicModel, isSupporterModel, type ModelInfo } from '@shared/tracking'
+import { VOICE_MODELS } from '@shared/speech'
 import { Segmented } from '@/components/ui/Segmented'
+import { on } from '@/ipc'
 import { models } from '@/engine/client'
 import { t, useT } from '@/state/i18n'
 import { useSettings } from '@/state/settings'
@@ -19,6 +22,14 @@ function statusText(s: { status: string; error?: string | null; provider?: strin
   if (s.status === 'error') return t('settings.models.failed', { error: s.error ?? '' })
   if (s.status === 'ready') return t('settings.models.ready')
   return null
+}
+
+function VoiceModelRows() {
+  const [arrived, setArrived] = useState(0)
+  useEffect(() => on('models:progress', (p) => {
+    if (p.done === p.total && VOICE_MODELS.some((m) => m.id === p.id)) setArrived((n) => n + 1)
+  }), [])
+  return <ModelDownloads key={arrived} models={VOICE_MODELS} />
 }
 
 export function ModelPanel() {
@@ -94,6 +105,12 @@ export function ModelPanel() {
             )
           }}
         />
+      </div>
+      <div className="panel">
+        <div className="prow">
+          <span className="lbl">{t('vr.voice.title')}</span>
+        </div>
+        <VoiceModelRows />
       </div>
       <SettingsAdvanced page="models">
         <div className="panel">

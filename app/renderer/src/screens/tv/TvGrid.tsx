@@ -42,7 +42,7 @@ export function TvGrid({ source }: { source: TvGridSource }) {
       playlistId: source.playlistId,
       sort,
       desc: sort !== 'name',
-      filters: source.tag ? { tag: source.tag } : {},
+      filters: source.tag ? { tags: [source.tag] } : {},
       limit: PAGE,
       offset,
     }),

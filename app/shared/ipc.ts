@@ -15,6 +15,7 @@ import type { PlayerCommand, PlayingState, RemoteSourceStatus } from './peer'
 import type { QuestCensor, QuestConnectResult, QuestHeadset, QuestHello, QuestPairPrompt, QuestPinResult, QuestToyCommand, QuestToys } from './quest'
 import type { VrCommand, VrDeckState, VrHand, VrPlayerState, VrRay } from './vr'
 import type { PortalDevOp, PortalToPanel, PortalToScene, PortalUp } from './portals'
+import type { SpeechFinal, SpeechModelState, SpeechReply } from './speech'
 import type { RemoteLoad, ServerInput } from './remote'
 import type { PerVideoSettings, Settings } from './settings'
 import type { ResolvedProjection } from './projection'
@@ -203,7 +204,7 @@ export interface IpcContract {
   'quest:firewall': () => boolean
   'quest:allowFirewall': () => boolean
   'vr:launch': () => void
-  'vr:start': () => void
+  'vr:start': (options?: { intro: boolean }) => void
   'vr:stop': () => void
   'vr:state': (state: VrPlayerState) => void
   'vr:panelState': () => VrDeckState | null
@@ -289,6 +290,11 @@ export interface IpcContract {
   'models:import': (files: ModelFileInfo[]) => string[] | null
   'models:remove': (file: string) => void
   'models:cancel': (id: string) => void
+  'speech:model': () => SpeechModelState
+  'speech:download': () => void
+  'speech:chunk': (session: string, seq: number, pcm: Int16Array) => SpeechReply
+  'speech:end': (session: string) => SpeechFinal
+  'speech:cancel': (session: string) => void
   'audio:decode': (source: string) => string
   'audio:window': (source: string, startMs: number, durationMs: number, requestId: string) => { path: string; startMs: number; endMs: number }
   'audio:cancelWindow': (requestId: string) => void

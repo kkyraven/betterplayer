@@ -26,6 +26,19 @@ it('preserves a renamed metadata title through rescans and resets it without cha
   }
 })
 
+it('scans shown videos with their tags, rating and favourite', () => {
+  const db = new LibraryDb(':memory:')
+  const rootId = db.addRoot('/fictional').id
+  const base = { rootId, folder: '', size: 1, mtime: 1, width: 1920, height: 1080, codec: 'hevc', projection: 'flat' as const, durationMs: 60_000 }
+  const id = db.upsertMedia({ ...base, path: '/fictional/a.mp4', title: 'a' }, 5)
+  const hidden = db.upsertMedia({ ...base, path: '/fictional/b.mp4', title: 'b' }, 5)
+  db.setTags(id, ['pov', 'vr'])
+  db.setRating(id, 4)
+  db.setFavourite([id], true)
+  db.setHidden([hidden], true)
+  expect(db.scanRows()).toEqual([{ id, title: 'a', durationMs: 60_000, addedAt: 5, rating: 4, favourite: true, tags: ['pov', 'vr'] }])
+})
+
 describe('resetTags', () => {
   it('marks local videos pending again and skips server rows and still images', () => {
     const db = new LibraryDb(':memory:')
@@ -185,7 +198,7 @@ describe('suggestions', () => {
   })
 })
 
-it('filters by every one of several exact tags (headset chips)', () => {
+it('filters by every one of several exact tags and none of the excluded ones', () => {
   const db = new LibraryDb(':memory:')
   try {
     const rootId = db.addRoot('/fictional').id
@@ -195,10 +208,12 @@ it('filters by every one of several exact tags (headset chips)', () => {
       return id
     }
     const both = add(1, ['rain', 'night'])
-    add(2, ['rain'])
-    add(3, ['rainy', 'night'])
-    const page = db.query({ section: 'all', sort: 'name', desc: false, filters: { tags: ['rain', 'night'] }, limit: 10, offset: 0 })
-    expect(page.rows.map((r) => r.id)).toEqual([both])
+    const rain = add(2, ['rain'])
+    const rainy = add(3, ['rainy', 'night'])
+    const ids = (filters: { tags?: string[]; notTags?: string[] }) => db.query({ section: 'all', sort: 'name', desc: false, filters, limit: 10, offset: 0 }).rows.map((r) => r.id)
+    expect(ids({ tags: ['rain', 'night'] })).toEqual([both])
+    expect(ids({ tags: ['rain'], notTags: ['night'] })).toEqual([rain])
+    expect(ids({ notTags: ['rain'] })).toEqual([rainy])
   } finally {
     db.close()
   }
@@ -279,4 +294,29 @@ it('adds the VR facts columns to v22 rows as not captured, and a changed file dr
       expect(migrated.stamp(media.path)).toMatchObject({ vrProbe: '{"stereo":"sbs"}', vrLook: '' })
     } finally { migrated.close() }
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+describe('performerNames', () => {
+  it('lists names by how many shown videos they are in, one name across roots counting once', () => {
+    const db = new LibraryDb(':memory:')
+    try {
+      const base = { folder: '', size: 1, mtime: 1, durationMs: 1000, width: 100, height: 100, codec: '', projection: 'flat' as const }
+      const a = db.addRoot('/fictional-a').id
+      const b = db.addRoot('/fictional-b').id
+      const add = (rootId: number, path: string, names: string[]) => {
+        const id = db.upsertMedia({ ...base, rootId, path, title: path }, 1)
+        db.setMetadata(id, { description: '', studio: '', filename: '', performers: names.map((name) => ({ key: '', name, aliases: [] })) })
+        return id
+      }
+      add(a, '/fictional-a/1.mp4', ['Ana Example', 'Bo Sample'])
+      add(a, '/fictional-a/2.mp4', ['Bo Sample'])
+      add(b, '/fictional-b/3.mp4', ['Ana Example'])
+      const hidden = add(b, '/fictional-b/4.mp4', ['Cy Hidden', 'Bo Sample'])
+      db.setHidden([hidden], true)
+      expect(db.performerNames(10)).toEqual(['Ana Example', 'Bo Sample'])
+      expect(db.performerNames(1)).toEqual(['Ana Example'])
+    } finally {
+      db.close()
+    }
+  })
 })

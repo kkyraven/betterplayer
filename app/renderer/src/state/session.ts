@@ -91,7 +91,7 @@ function queryFor(ref: Exclude<SourceRef, { kind: 'video' }>, base: MediaQuery):
     case 'folder':
       return { ...base, folder: { rootId: ref.rootId, folder: ref.folder } }
     case 'tag':
-      return { ...base, filters: { ...base.filters, tag: ref.name } }
+      return { ...base, filters: { ...base.filters, tags: [ref.name] } }
     case 'section':
       return { ...base, section: ref.section }
     case 'playlist':

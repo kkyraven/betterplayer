@@ -72,7 +72,7 @@ impl Recentre {
             let s = up.signum();
             ((s * m[0][1]).atan2(s * m[2][1]), 0.0)
         };
-        let pitch = if look > RECLINE_FROM { look.min(RECLINE_MAX) } else { 0.0 };
+        let pitch = if look.abs() > RECLINE_FROM { look.clamp(-RECLINE_MAX, RECLINE_MAX) } else { 0.0 };
         let roll = if roll.abs() > ROLL_FROM { roll.clamp(-ROLL_MAX, ROLL_MAX) } else { 0.0 };
         Recentre { origin: head.position(), heading, pitch, roll }
     }
@@ -174,12 +174,21 @@ fn on_picture(t: [f32; 2]) -> Option<[f32; 2]> {
     t.iter().all(|c| (0.0..=1.0).contains(c)).then_some(t)
 }
 
-pub fn facing(centre: [f32; 3], eye: [f32; 3]) -> Pose {
-    let to_eye = [eye[0] - centre[0], 0.0, eye[2] - centre[2]];
-    let z = if to_eye[0].hypot(to_eye[2]) < 1e-4 { [0.0, 0.0, 1.0] } else { normalised(to_eye) };
-    let x = [z[2], 0.0, -z[0]];
+pub fn facing(centre: [f32; 3], head: &Pose) -> Pose {
+    let to_eye = sub(head.position(), centre);
+    let z = if dot(to_eye, to_eye) < 1e-8 { head.rotate([0.0, 0.0, 1.0]) } else { normalised(to_eye) };
+    let square = |v: [f32; 3]| {
+        let d = dot(v, z);
+        sub(v, [z[0] * d, z[1] * d, z[2] * d])
+    };
+    let y = [head.rotate([0.0, 1.0, 0.0]), head.rotate([0.0, 0.0, 1.0])]
+        .into_iter()
+        .map(square)
+        .find(|v| dot(*v, *v) > 0.01)
+        .map_or([0.0, 1.0, 0.0], normalised);
+    let x = [y[1] * z[2] - y[2] * z[1], y[2] * z[0] - y[0] * z[2], y[0] * z[1] - y[1] * z[0]];
     let [cx, cy, cz] = centre;
-    Pose([[x[0], 0.0, z[0], cx], [x[1], 1.0, z[1], cy], [x[2], 0.0, z[2], cz]])
+    Pose([[x[0], y[0], z[0], cx], [x[1], y[1], z[1], cy], [x[2], y[2], z[2], cz]])
 }
 
 pub fn hit(pose: &Pose, ray: &Ray, width: f32, height: f32) -> Option<(f32, f32)> {
@@ -245,6 +254,22 @@ pub fn eye_view(recentre: &Recentre, offset: &Offset, head: &Pose, eye_to_head: 
     EyeView { rotation, position: [m[0][3], m[1][3], -m[2][3]] }
 }
 
+impl EyeView {
+    pub fn turned(self, degrees: f32) -> EyeView {
+        if degrees == 0.0 {
+            return self;
+        }
+        let (s, c) = degrees.to_radians().sin_cos();
+        let turn = |v: [f32; 3]| [c * v[0] + s * v[2], v[1], c * v[2] - s * v[0]];
+        let mut rotation = self.rotation;
+        for col in rotation.chunks_exact_mut(3) {
+            let v = turn([col[0], col[1], col[2]]);
+            col.copy_from_slice(&v);
+        }
+        EyeView { rotation, position: turn(self.position) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,9 +303,9 @@ mod tests {
     }
 
     #[test]
-    fn lying_back_tips_content_up_to_the_gaze_and_looking_down_never_does() {
+    fn looking_far_up_or_down_tips_content_to_the_gaze() {
         let deg = f32::to_radians;
-        for (up, pitch) in [(45.0, 45.0), (15.0, 0.0), (21.0, 21.0), (-40.0, 0.0), (85.0, 80.0), (90.0, 80.0), (-90.0, 0.0)] {
+        for (up, pitch) in [(45.0, 45.0), (15.0, 0.0), (21.0, 21.0), (-15.0, 0.0), (-40.0, -40.0), (85.0, 80.0), (90.0, 80.0), (-90.0, -80.0)] {
             let head = Pose::translation(0.2, 0.9, 0.4).then(&Pose::yaw(2.5)).then(&Pose::pitch(deg(up)));
             let r = Recentre::from_head(&head);
             assert!((r.pitch - deg(pitch)).abs() < 1e-4, "looking {up}: pitch {}", r.pitch.to_degrees());
@@ -348,11 +373,10 @@ mod tests {
         let eye = [0.0, 1.6, 0.0];
         let ray = Ray::from_pose(&Pose::translation(0.1, 1.3, -0.3).then(&Pose::yaw(0.2)));
         let centre = ray.at(0.8);
-        let ring = facing(centre, eye);
+        let ring = facing(centre, &Pose::translation(eye[0], eye[1], eye[2]));
         let z = [ring.0[0][2], ring.0[1][2], ring.0[2][2]];
-        let to_eye = normalised([eye[0] - centre[0], 0.0, eye[2] - centre[2]]);
-        assert!(close(&z, &to_eye), "faces the eye: {z:?}");
-        assert_eq!(ring.0[1][1], 1.0, "upright");
+        assert!(close(&z, &normalised(sub(eye, centre))), "faces the eye, tipped up to it: {z:?}");
+        assert!(ring.0[1][0].abs() < 1e-6 && ring.0[1][1] > 0.9, "level, its top up");
         let (u, v) = hit(&ring, &ray, 0.5, 0.5).unwrap();
         assert!((u - 0.5).abs() < 1e-4 && (v - 0.5).abs() < 1e-4, "the centre: {u} {v}");
         let up_right = Ray { origin: ray.origin, direction: normalised(sub(add(centre, [ring.0[0][0] * 0.1, 0.1, ring.0[2][0] * 0.1]), ray.origin)) };
@@ -365,6 +389,24 @@ mod tests {
         let (u, v) = plane_hit(&ring, &wide, 0.5, 0.5).unwrap();
         assert!((u - 2.5).abs() < 1e-3 && (v - 0.5).abs() < 1e-3, "{u} {v}");
         assert_eq!(plane_hit(&ring, &back, 0.5, 0.5), None);
+    }
+
+    #[test]
+    fn a_ring_straight_overhead_faces_down_with_its_top_at_the_top_of_the_view() {
+        let deg = f32::to_radians;
+        let axis = |p: &Pose, c: usize| [p.0[0][c], p.0[1][c], p.0[2][c]];
+        let head = Pose::translation(0.0, 1.6, 0.0).then(&Pose::yaw(deg(90.0))).then(&Pose::pitch(deg(90.0)));
+        let ring = facing([0.0, 2.4, 0.0], &head);
+        assert!(close(&axis(&ring, 2), &[0.0, -1.0, 0.0]), "faces down: {ring:?}");
+        assert!(close(&axis(&ring, 1), &head.rotate([0.0, 1.0, 0.0])), "top at the top of the view: {ring:?}");
+        for centre in [[0.2, 2.4, 0.0], [0.0, 2.4, 0.2], [0.0, 2.4, -0.2]] {
+            let tilted = head.then(&Pose::roll(deg(30.0)));
+            let ring = facing(centre, &tilted);
+            assert!(dot(axis(&ring, 1), tilted.rotate([0.0, 1.0, 0.0])) > 0.95, "{centre:?}: {ring:?}");
+        }
+        let side = Pose::translation(0.0, 0.5, 0.0).then(&Pose::roll(deg(-90.0)));
+        let ring = facing([0.0, 0.3, -0.8], &side);
+        assert!(axis(&ring, 1)[0] > 0.95, "{ring:?}");
     }
 
     #[test]
@@ -407,6 +449,17 @@ mod tests {
         let v = eye_view(&Recentre::from_head(&head), &Offset::default(), &head, &Pose::IDENTITY);
         assert!(close(&look(&v, [0.0, 0.0, 1.0]), &[0.0, 0.258_819, 0.965_925_8]));
         assert!(close(&look(&v, [1.0, 0.0, 0.0]), &[1.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn a_turned_eye_sees_its_picture_moved_left_and_keeps_up() {
+        let eye = Pose::translation(-0.032, 0.0, 0.0);
+        let v = eye_view(&Recentre::default(), &Offset::default(), &Pose::IDENTITY, &eye);
+        assert_eq!(v.turned(0.0), v);
+        let t = v.turned(90.0);
+        assert!(close(&look(&t, [0.0, 0.0, 1.0]), &[1.0, 0.0, 0.0]));
+        assert!(close(&look(&t, [0.0, 1.0, 0.0]), &[0.0, 1.0, 0.0]));
+        assert!(close(&t.position, &[0.0, 0.0, 0.032]));
     }
 
     #[test]

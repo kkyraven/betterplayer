@@ -4,6 +4,7 @@ import { invoke } from '@/ipc'
 import { t } from '@/state/i18n'
 import { useLibrary } from '@/state/library'
 import { useSettings } from '@/state/settings'
+import { retargetTags, tagState } from '@/state/tagFilter'
 
 export interface TagResult {
   label: string
@@ -26,7 +27,7 @@ const tagName = (name: string) => name.trim().toLowerCase()
 
 function retarget(names: string[], into: string | undefined) {
   const { filters, setFilters } = useLibrary.getState()
-  if (filters.tag && names.includes(filters.tag)) setFilters({ ...filters, tag: into })
+  if (names.some((name) => tagState(filters, name))) setFilters(retargetTags(filters, names, into))
 }
 
 function pinInto(names: string[], into: string) {

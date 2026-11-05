@@ -119,7 +119,7 @@ describe('local library search', () => {
     const rain = add('Rain'); db.setTags(rain, ['outdoor', 'rain'])
     expect(ids('tag:outdoor tag:nature -tag:rain')).toEqual([coast])
     expect(ids('coast OR rain')).toHaveLength(2)
-    expect(ids('coast OR rain', { filters: { tag: 'nature' } })).toEqual([coast])
+    expect(ids('coast OR rain', { filters: { tags: ['nature'] } })).toEqual([coast])
     expect(ids('"coast rain"')).toEqual([])
     expect(ids('coast duration:broken')).toEqual([])
   })

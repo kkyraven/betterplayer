@@ -1,0 +1,264 @@
+{
+ "constants": {
+  "height": 0.34,
+  "distance": 2,
+  "drop": 0.15,
+  "approach": 0.15,
+  "back": 0.15,
+  "ms": {
+   "headIn": [
+    100,
+    350
+   ],
+   "draw": [
+    300,
+    1350
+   ],
+   "headOut": [
+    1350,
+    1650
+   ],
+   "cap": [
+    1300,
+    1600
+   ],
+   "glowUp": [
+    1200,
+    1500
+   ],
+   "glowDown": [
+    1500,
+    2000
+   ],
+   "settle": 1750,
+   "leave": [
+    1800,
+    2150
+   ],
+   "buzz": 1550,
+   "hold": 1750,
+   "holdMax": 4000,
+   "shelf": 2000,
+   "stagger": 60,
+   "portal": 450,
+   "label": [
+    150,
+    500
+   ],
+   "chrome": [
+    350,
+    700
+   ],
+   "end": 2800,
+   "skip": 250
+  },
+  "glow": {
+   "from": 0.45,
+   "peak": 1,
+   "rest": 0.3
+  },
+  "settle": 0.05
+ },
+ "box": {
+  "x": -31,
+  "y": -45,
+  "w": 188,
+  "h": 201,
+  "scale": 4,
+  "width": 752,
+  "height": 804,
+  "metres": 0.5558260869565218
+ },
+ "logo": [
+  {
+   "ms": 0,
+   "draw": 0,
+   "head": 0,
+   "cap": 0,
+   "glow": 0.45,
+   "opacity": 1,
+   "distance": 2.15
+  },
+  {
+   "ms": 200,
+   "draw": 0,
+   "head": 0.4,
+   "cap": 0,
+   "glow": 0.45,
+   "opacity": 1,
+   "distance": 2.1042250728862975
+  },
+  {
+   "ms": 600,
+   "draw": 0.0932944606413994,
+   "head": 1,
+   "cap": 0,
+   "glow": 0.45,
+   "opacity": 1,
+   "distance": 2.0425667638483964
+  },
+  {
+   "ms": 1000,
+   "draw": 0.8518518518518519,
+   "head": 1,
+   "cap": 0,
+   "glow": 0.45,
+   "opacity": 1,
+   "distance": 2.011807580174927
+  },
+  {
+   "ms": 1350,
+   "draw": 1,
+   "head": 1,
+   "cap": 0.42129629629629617,
+   "glow": 0.7250000000000001,
+   "opacity": 1,
+   "distance": 2.0017912536443148
+  },
+  {
+   "ms": 1500,
+   "draw": 1,
+   "head": 0.5,
+   "cap": 0.9629629629629629,
+   "glow": 1,
+   "opacity": 1,
+   "distance": 2.0004373177842565
+  },
+  {
+   "ms": 1700,
+   "draw": 1,
+   "head": 0,
+   "cap": 1,
+   "glow": 0.45120000000000005,
+   "opacity": 1,
+   "distance": 2.000003498542274
+  },
+  {
+   "ms": 1900,
+   "draw": 1,
+   "head": 0,
+   "cap": 1,
+   "glow": 0.3056000000000001,
+   "opacity": 0.9067055393586005,
+   "distance": 2.0139941690962098
+  },
+  {
+   "ms": 2100,
+   "draw": 1,
+   "head": 0,
+   "cap": 1,
+   "glow": 0.30000000000000004,
+   "opacity": 0.011661807580174988,
+   "distance": 2.1482507288629735
+  },
+  {
+   "ms": 2300,
+   "draw": 1,
+   "head": 0,
+   "cap": 1,
+   "glow": 0.30000000000000004,
+   "opacity": 0,
+   "distance": 2.15
+  }
+ ],
+ "ranks": [
+  {
+   "az": -24.350706293059986,
+   "row": 0,
+   "rank": 1
+  },
+  {
+   "az": -8.116902097686662,
+   "row": 0,
+   "rank": 0
+  },
+  {
+   "az": 8.116902097686662,
+   "row": 1,
+   "rank": 0.5
+  },
+  {
+   "az": 24.350706293059986,
+   "row": 1,
+   "rank": 1.5
+  }
+ ],
+ "enter": [
+  {
+   "rank": 0,
+   "quick": false,
+   "keyframe": {
+    "from": 0,
+    "to": 1,
+    "startMs": 1000,
+    "durationMs": 450,
+    "ease": "out"
+   }
+  },
+  {
+   "rank": 1.5,
+   "quick": false,
+   "keyframe": {
+    "from": 0,
+    "to": 1,
+    "startMs": 1090,
+    "durationMs": 450,
+    "ease": "out"
+   }
+  },
+  {
+   "rank": 1,
+   "quick": true,
+   "keyframe": {
+    "from": 0,
+    "to": 1,
+    "startMs": 1000,
+    "durationMs": 250,
+    "ease": "out"
+   }
+  }
+ ],
+ "labels": [
+  {
+   "now": 1100,
+   "rank": 0,
+   "quick": false,
+   "value": 0
+  },
+  {
+   "now": 1300,
+   "rank": 0.5,
+   "quick": false,
+   "value": 0.34285714285714286
+  },
+  {
+   "now": 1500,
+   "rank": 1.5,
+   "quick": false,
+   "value": 0.7428571428571429
+  },
+  {
+   "now": 1100,
+   "rank": 1,
+   "quick": true,
+   "value": 0.4
+  }
+ ],
+ "chrome": [
+  {
+   "now": 1400,
+   "quick": false,
+   "value": 0.14285714285714285
+  },
+  {
+   "now": 1600,
+   "quick": false,
+   "value": 0.7142857142857143
+  },
+  {
+   "now": 1100,
+   "quick": true,
+   "value": 0.4
+  }
+ ]
+}

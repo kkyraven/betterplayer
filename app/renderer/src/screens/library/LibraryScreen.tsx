@@ -132,7 +132,7 @@ function Grid() {
   const gridRef = useRef<HTMLDivElement>(null)
   const { range, scrollToIndex } = useVirtualGrid(scrollRef, gridRef, rows, `${view}:${gridSize}`, listId, libraryGridPosition)
   useTypeAhead(gridRef, scrollToIndex)
-  const title = playlistId !== null ? (playlists.find((p) => p.id === playlistId)?.name ?? t('library.playlist.label')) : folder ? (folder.folder.split('/').pop() || folders.find((f) => f.rootId === folder.rootId)?.name || t('library.folder.fallback')) : section === 'all' && filters.tag ? `#${filters.tag}` : t(SECTION_TITLES[section])
+  const title = playlistId !== null ? (playlists.find((p) => p.id === playlistId)?.name ?? t('library.playlist.label')) : folder ? (folder.folder.split('/').pop() || folders.find((f) => f.rootId === folder.rootId)?.name || t('library.folder.fallback')) : section === 'all' && filters.tags ? filters.tags.map((name) => `#${name}`).join(' ') : t(SECTION_TITLES[section])
   const isGrid = view === 'grid'
   const density = gridSize < 200 ? 'compact' : 'comfortable'
   const onKey = (e: KeyboardEvent<HTMLDivElement>) => {

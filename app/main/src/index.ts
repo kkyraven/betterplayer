@@ -1,4 +1,4 @@
-import { app, BrowserWindow, crashReporter, dialog, Menu, nativeTheme, protocol, screen } from 'electron'
+import { app, BrowserWindow, crashReporter, dialog, Menu, nativeTheme, protocol, screen, session, type WebContents } from 'electron'
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { delimiter, join, resolve } from 'node:path'
 import { isMediaPath } from '@shared/ipc'
@@ -117,7 +117,7 @@ function createWindow(store: SettingsStore, library: Library, remote: RemoteServ
 
   watchNativeTheme(store, win)
   const vr = new VrHost(win, enginePath, store, vrPreview)
-  registerIpc(win, store, library, remote, client, account, updater, ytdlp, dom, vr)
+  registerIpc(win, store, library, remote, client, account, updater, ytdlp, dom, vr, enginePath)
   let reloadedAt = 0
   win.webContents.on('render-process-gone', (_event, details) => {
     logProcessExit('renderer', details)
@@ -170,6 +170,14 @@ function createWindow(store: SettingsStore, library: Library, remote: RemoteServ
   if (!app.isPackaged && devUrl) void win.loadURL(devUrl)
   else void win.loadFile(join(__dirname, '../renderer/index.html')).catch((error: unknown) => logEvent({ processType: 'renderer', reason: 'load-failed', message: String(error) }))
   return win
+}
+
+function allowOwnMic() {
+  const devUrl = !app.isPackaged ? process.env.ELECTRON_RENDERER_URL : undefined
+  const ownPage = (url: string) => url.startsWith('file://') || (devUrl !== undefined && url.startsWith(new URL(devUrl).origin))
+  const own = (contents: WebContents | null, url: string) => contents !== null && BrowserWindow.fromWebContents(contents) !== null && ownPage(url)
+  session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) => callback(permission !== 'media' || own(contents, details.requestingUrl)))
+  session.defaultSession.setPermissionCheckHandler((contents, permission, origin) => permission !== 'media' || own(contents, origin))
 }
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'thumb', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true } }])
@@ -227,6 +235,7 @@ if (!app.requestSingleInstanceLock()) {
       { role: 'viewMenu', submenu: [{ role: 'reload' }, { role: 'forceReload' }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'togglefullscreen' }] },
       { role: 'windowMenu' },
     ]))
+    allowOwnMic()
     const userData = app.getPath('userData')
     logEvent({ processType: 'main', reason: 'start', os: process.getSystemVersion(), arch: process.arch, packaged: app.isPackaged, userData })
     const store = new SettingsStore(join(userData, 'settings.json'))

@@ -16,13 +16,13 @@ beforeEach(() => {
     return []
   })
   useTagManager.setState({ tags: [{ name: 'cowgirl', count: 2 }, { name: 'riding', count: 1 }], blocked: [], history: [], busy: false })
-  useLibrary.setState({ filters: { tag: 'cowgirl' } })
+  useLibrary.setState({ filters: { tags: ['cowgirl'] } })
 })
 
 it('names a merge into an existing tag a merge and a new name a rename, and the filter follows', async () => {
   expect(await useTagManager.getState().merge(['cowgirl'], ' Riding ')).toEqual({ label: 'Merged cowgirl into riding', ok: true })
   expect(ipc.invoke).toHaveBeenCalledWith('library:mergeTags', ['cowgirl'], 'riding')
-  expect(useLibrary.getState().filters.tag).toBe('riding')
+  expect(useLibrary.getState().filters.tags).toEqual(['riding'])
   expect((await useTagManager.getState().merge(['cowgirl'], 'on top'))?.label).toBe('Renamed cowgirl to on top')
   expect(await useTagManager.getState().merge(['riding'], 'riding')).toBeNull()
 })

@@ -295,6 +295,7 @@ dependencies = [
  "bp-devices",
  "bp-player",
  "bp-script",
+ "bp-speech",
  "bp-vr",
  "napi",
  "napi-build",
@@ -340,6 +341,16 @@ dependencies = [
  "serde",
  "serde_json",
  "zip",
+]
+
+[[package]]
+name = "bp-speech"
+version = "0.0.1"
+dependencies = [
+ "ort",
+ "serde",
+ "serde_json",
+ "windows",
 ]
 
 [[package]]

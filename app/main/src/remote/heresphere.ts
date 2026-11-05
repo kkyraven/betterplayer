@@ -1,5 +1,5 @@
 import { t } from '../i18n'
-import type { MediaDetail, MediaIndexRow, MediaMark } from '@shared/library'
+import type { MediaDetail, MediaIndexRow, MediaMark, MediaScanRow } from '@shared/library'
 import { lensDegrees, type Projection, type ProjectionKind } from '@shared/projection'
 import { isTimed, tagMark, type SceneTag } from '../library/servers/heresphere'
 
@@ -29,6 +29,10 @@ export interface HereSphereScene {
   writeFavorite: boolean
   writeRating: boolean
   writeTags: boolean
+}
+
+export interface HereSphereScan {
+  scanData: { link: string; title: string; dateAdded: string; duration: number; rating: number; isFavorite: boolean; tags: { name: string }[] }[]
 }
 
 export interface HereSphereWrite {
@@ -62,6 +66,20 @@ export function hereSphereIndex(sections: { name: string; rows: MediaIndexRow[] 
     library: sections
       .filter((s) => s.rows.length > 0)
       .map((s) => ({ name: s.name, list: s.rows.map((row) => `${base}/heresphere/${row.id}`) })),
+  }
+}
+
+export function hereSphereScan(rows: MediaScanRow[], base: string): HereSphereScan {
+  return {
+    scanData: rows.map((row) => ({
+      link: `${base}/heresphere/${row.id}`,
+      title: row.title,
+      dateAdded: isoDate(row.addedAt),
+      duration: row.durationMs,
+      rating: row.rating,
+      isFavorite: row.favourite,
+      tags: row.tags.map((name) => ({ name })),
+    })),
   }
 }
 

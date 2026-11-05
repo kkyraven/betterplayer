@@ -3,6 +3,7 @@ import type { HeadsetToyCommand, HeadsetToys } from './headsetToys'
 import type { Projection, ProjectionSource } from './projection'
 import type { PassthroughSettings, ResolvedPassthrough } from './passthrough'
 import type { VrMovablePanel, VrPanelOffset } from './settings'
+import { INTRO_BOX, VR_INTRO } from './vrIntro'
 
 export interface VrPlayerState {
   title: string
@@ -101,8 +102,11 @@ export type VrCommand =
   | { kind: 'tracking' }
   | { kind: 'pick'; hand?: VrHand }
   | { kind: 'panelOffset'; panel: VrMovablePanel; offset: VrPanelOffset }
+  | { kind: 'intro'; on: boolean }
+  | { kind: 'introSkip' }
+  | { kind: 'introFrame'; ms: number; at: number; moving: boolean }
 
-export type VrPanelId = 'deck' | 'ring' | 'legend'
+export type VrPanelId = 'deck' | 'ring' | 'legend' | 'intro'
 
 export interface VrPlacement {
   metres: number
@@ -121,6 +125,7 @@ export const VR_PANELS: Record<VrPanelId, VrPanelSpec> = {
   deck: { width: 1280, height: 440, metres: 0.8, distance: 0.8, drop: 0.38, pitch: 25, curvature: 0 },
   ring: { width: 960, height: 960, metres: 0.5, distance: 0.8, drop: 0, pitch: 0, curvature: 0 },
   legend: { width: 1300, height: 800, metres: 0.355, distance: 0, drop: 0, pitch: 0, curvature: 0 },
+  intro: { width: INTRO_BOX.width, height: INTRO_BOX.height, metres: INTRO_BOX.metres, distance: VR_INTRO.distance, drop: VR_INTRO.drop, pitch: 0, curvature: 0 },
 }
 
 export const VR_WHEEL_STICK = { light: 0.5, release: 0.35 } as const

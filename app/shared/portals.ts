@@ -380,7 +380,8 @@ export function diveFrame(t: Transition, nowMs: number, dim: number): DiveFrame 
 }
 
 export type ChipKind = 'text' | 'tag' | 'vr' | '2d' | 'fav' | 'under' | 'over' | 'fastest'
-export interface Chip { id: string; kind: ChipKind; label: string; n?: number }
+export interface Chip { id: string; kind: ChipKind; label: string; n?: number; unsure?: boolean; alts?: ChipAlt[] }
+export interface ChipAlt { kind: ChipKind; label: string; n?: number }
 
 const FILLER = new Set(['with', 'in', 'on', 'the', 'and', 'show', 'me', 'videos', 'video', 'first', 'a', 'of', 'for', 'find', 'tag'])
 
@@ -553,8 +554,10 @@ export type PortalUp =
   | { kind: 'offer'; action: 'show' | 'hide' | 'purchased' }
   | { kind: 'buzz'; buzz: 'hover' | 'pick' | 'error' }
   | { kind: 'hide' }
+  | { kind: 'duck'; on: boolean }
   | { kind: 'status'; status: PortalStatus }
   | { kind: 'back' }
+  | { kind: 'ready' }
 export type PortalToScene =
   | { kind: 'scene'; scene: PortalSceneWorld }
   | { kind: 'warm'; warm: PortalWarm | null }
@@ -563,12 +566,16 @@ export type PortalToScene =
   | { kind: 'offer'; action: 'show' | 'hide' | 'purchased' }
   | { kind: 'devShortcut'; name: 'back' }
   | { kind: 'censor' }
+  | { kind: 'duck'; on: boolean }
+export interface PortalIntro { shelfAt: number | null; quick: boolean }
 export type PortalToPanel =
   | { kind: 'status'; status: PortalStatus }
   | { kind: 'back' }
   | { kind: 'summon'; atMs: number }
   | { kind: 'changed' }
+  | { kind: 'intro'; intro: PortalIntro | null }
   | { kind: 'dev'; op: PortalDevOp }
+  | { kind: 'say'; pcm: Int16Array }
 export type PortalDevOp =
   | { op: 'hover'; key: string | null } | { op: 'trigger' } | { op: 'back' }
   | { op: 'scroll'; row: number; steps: number }
@@ -577,3 +584,4 @@ export type PortalDevOp =
   | { op: 'hold'; on: boolean }
   | { op: 'trace' }
   | { op: 'frames'; since: number }
+  | { op: 'say'; wav: string }

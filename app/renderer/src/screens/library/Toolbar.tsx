@@ -13,6 +13,7 @@ import { ipcMessage } from '@/lib/errors'
 import { invoke } from '@/ipc'
 import { useT } from '@/state/i18n'
 import { GRID_SIZE, useLibrary, type View } from '@/state/library'
+import { clickTag, retargetTags, tagState } from '@/state/tagFilter'
 import { useUi } from '@/state/ui'
 import { usePlayer } from '@/state/player'
 
@@ -91,14 +92,30 @@ export function Toolbar({ title }: { title: string }) {
     if (e.key === 'Escape') {
       setSearch('')
       e.currentTarget.blur()
-    } else if (e.key === 'Enter' && search.startsWith('#')) {
-      const name = search.slice(1).trim().toLowerCase()
+    } else if (e.key === 'Enter' && /^-?#/.test(search)) {
+      const exclude = search.startsWith('-')
+      const name = search.slice(exclude ? 2 : 1).trim().toLowerCase()
       if (tags.some((tag) => tag.name === name)) {
-        patch({ tag: name })
+        if (tagState(filters, name) !== (exclude ? 'out' : 'in')) setFilters(clickTag(filters, name, exclude ? 'exclude' : 'add'))
         setSearch('')
       }
-    } else if (e.key === 'Backspace' && search === '' && filters.tag) patch({ tag: undefined })
+    } else if (e.key === 'Backspace' && search === '') {
+      const last = filters.notTags?.at(-1) ?? filters.tags?.at(-1)
+      if (last) setFilters(retargetTags(filters, [last], undefined))
+    }
   }
+  const tagChip = (name: string, out: boolean) => (
+    <span key={`${out}:${name}`} className={cx('chip on tagf', out && 'not')}>
+      <button type="button" title={t(out ? 'library.tag.addToSearch' : 'library.tag.excludeFromSearch')} onClick={() => setFilters(clickTag(filters, name, out ? 'add' : 'exclude'))}>
+        {out ? '−' : ''}#{name}
+      </button>
+      <button type="button" className="x" aria-label={t('library.tag.remove', { name })} title={t('common.remove')} onClick={() => setFilters(retargetTags(filters, [name], undefined))}>
+        <X />
+      </button>
+    </span>
+  )
+  const tagChips = (filters.tags?.length ?? 0) + (filters.notTags?.length ?? 0)
+  const tagPrefix = search.startsWith('-') ? '-#' : '#'
 
   return (
     <>
@@ -111,7 +128,7 @@ export function Toolbar({ title }: { title: string }) {
         </DropdownMenu.Root>
       </div>
     </div>}
-    <div className={cx('lib-toolbar', playlistId !== null && 'playlist-toolbar', search.trim() && 'searching')}>
+    <div className={cx('lib-toolbar', playlistId !== null && 'playlist-toolbar', (search.trim() || tagChips > 1) && 'searching')}>
       <IconButton label={sidebarOpen ? t('library.toolbar.hideSidebar') : t('library.toolbar.showSidebar')} className="lib-sidebar-toggle" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(!sidebarOpen)}>
         <PanelLeft />
       </IconButton>
@@ -122,16 +139,16 @@ export function Toolbar({ title }: { title: string }) {
       <div className="spacer" />
       <label className="search">
         <Search />
-        {filters.tag && (
-          <button type="button" className="chip on tagf" title={t('common.remove')} onClick={() => patch({ tag: undefined })}>
-            #{filters.tag}
-            <X />
-          </button>
+        {tagChips > 0 && (
+          <span className="tagfs">
+            {filters.tags?.map((name) => tagChip(name, false))}
+            {filters.notTags?.map((name) => tagChip(name, true))}
+          </span>
         )}
-        <input ref={searchRef} aria-label={t('library.toolbar.search')} maxLength={SEARCH_MAX_LENGTH} placeholder={filters.tag ? '' : t('library.toolbar.search')} value={search} list={search.startsWith('#') ? 'search-tags' : undefined} onChange={(e) => setSearch(e.target.value)} onKeyDown={onSearchKey} />
+        <input ref={searchRef} aria-label={t('library.toolbar.search')} maxLength={SEARCH_MAX_LENGTH} placeholder={tagChips ? '' : t('library.toolbar.search')} value={search} list={/^-?#/.test(search) ? 'search-tags' : undefined} onChange={(e) => setSearch(e.target.value)} onKeyDown={onSearchKey} />
         <datalist id="search-tags">
           {tags.map((tag) => (
-            <option key={tag.name} value={`#${tag.name}`} />
+            <option key={tag.name} value={`${tagPrefix}${tag.name}`} />
           ))}
         </datalist>
         <span className="kbd">/</span>
@@ -168,7 +185,22 @@ export function Toolbar({ title }: { title: string }) {
             <FilterGroup label={t('library.filter.type')} value={filters.type} options={[['2d', t('library.section.2d')], ['vr', t('library.section.vr')]]} onChange={(type) => patch({ type })} />
             <FilterGroup label={t('library.filter.watched')} value={filters.watched} options={[['yes', t('library.filter.watched')], ['no', t('library.filter.unwatched')]]} onChange={(watched) => patch({ watched })} />
             <FilterGroup label={t('library.sort.rating')} value={filters.minRating === undefined ? undefined : String(filters.minRating)} options={[['3', '3+'], ['4', '4+'], ['5', '5']]} onChange={(v) => patch({ minRating: v === undefined ? undefined : Number(v) })} />
-            {tags.length > 0 && <FilterGroup label={t('library.filter.tag')} value={filters.tag} options={tags.map((tag) => [tag.name, tag.name])} onChange={(tag) => patch({ tag })} />}
+            {tags.length > 0 && (
+              <div className="filter-group">
+                <div className="eyebrow">{t('library.filter.tag')}</div>
+                <div className="filter-chips">
+                  {tags.map(({ name }) => {
+                    const on = tagState(filters, name) === 'in'
+                    return (
+                      <button key={name} type="button" className={cx('chip', on && 'on')} aria-pressed={on} onClick={() => setFilters(clickTag(filters, name, 'add'))}>
+                        {on && <Check />}
+                        {name}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
             <FilterGroup label={t('library.filter.excluded')} value={filters.hidden} options={[['yes', t('library.filter.excludedVideos')]]} onChange={(hidden) => patch({ hidden })} />
             {active > 0 && (
               <Button variant="ghost" onClick={() => setFilters({})}>

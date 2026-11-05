@@ -208,6 +208,15 @@ describe('lens', () => {
     expect(readProjection({ ...old, arc: 'wide' })).toEqual(old)
   })
 
+  it('reads IPD adjust in tenths within its reach, and none for 0', () => {
+    const p = vr('equirect180', 'sbs')
+    expect(readProjection({ ...p, ipd: 0.4 })?.ipd).toBe(0.4)
+    expect(readProjection({ ...p, ipd: -0.123 })?.ipd).toBe(-0.1)
+    expect(readProjection({ ...p, ipd: 9 })?.ipd).toBe(3)
+    expect(readProjection({ ...p, ipd: 0 })).toEqual(p)
+    expect(readProjection({ ...p, ipd: 'wide' })).toEqual(p)
+  })
+
   it('sets a fisheye fov and a 180 arc, and has none for flat and 360', () => {
     expect(withLens(vr('fisheye', 'sbs'), 200)).toEqual(vr('fisheye', 'sbs', 200))
     expect(lensDegrees(withLens(vr('equirect180', 'sbs'), 200))).toBe(200)

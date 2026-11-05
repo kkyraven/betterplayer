@@ -1,8 +1,6 @@
 import { Download, X } from 'lucide-react'
 import type { ReactNode } from 'react'
-import type { FollowState } from 'bp-engine'
 import { ITCH_URL } from '@shared/account'
-import type { Translate } from '@shared/i18n'
 import type { QuestHeadset } from '@shared/quest'
 import { Button } from '@/components/ui/Button'
 import { IconButton } from '@/components/ui/IconButton'
@@ -16,19 +14,10 @@ import { useT } from '@/state/i18n'
 import { usePlayer } from '@/state/player'
 import { useQuestConnect } from '@/state/questHeadsets'
 import { useVr } from '@/state/vr'
+import { followDot, followStatus } from './followStatus'
 import { HeadsetIcon } from './HeadsetIcon'
 
 export const STEAMVR = 'SteamVR'
-
-export function followStatus(t: Translate, state: FollowState, matched: boolean): string {
-  if (state.status === 'error') return state.error ?? t('common.error')
-  if (state.status !== 'connected') return t('common.connecting')
-  if (!state.path) return t('settings.headsets.nothingOpen')
-  if (!matched) return t('settings.headsets.noScript')
-  return state.playing ? t('settings.headsets.playing') : t('settings.headsets.paused')
-}
-
-export const followDot = (state: FollowState, matched: boolean) => (state.status === 'error' ? 'danger' : state.status !== 'connected' || (state.path && !matched) ? 'warn' : '')
 
 export const useSteamvrShown = () => useVr((s) => (s.supported && platform === 'win32') || s.available || s.active || s.starting)
 
@@ -41,6 +30,7 @@ export function HeadsetRows({ quest, manage = false, onAction }: { quest: QuestH
   const followHost = useFollow((s) => s.host)
   const followName = useFollow((s) => s.quest?.name)
   const matched = useFollow((s) => s.matched)
+  const reached = useFollow((s) => s.reached)
   const stopFollowing = useFollow((s) => s.stop)
   const steamvr = useSteamvrShown()
   const vrAvailable = useVr((s) => s.available)
@@ -61,7 +51,7 @@ export function HeadsetRows({ quest, manage = false, onAction }: { quest: QuestH
       icon={followKind === 'quest' ? <HeadsetIcon name={followedQuest?.name ?? followName ?? FOLLOW_LABELS.quest} /> : <VrGogglesIcon />}
       dot={followDot(follow, matched !== null)}
       name={followKind === 'quest' ? (followedQuest?.name ?? followName ?? FOLLOW_LABELS.quest) : FOLLOW_LABELS[followKind]}
-      status={[followStatus(t, follow, matched !== null), follow.path && (matched?.title ?? fileTitle(follow.path))].filter(Boolean).join(' · ')}
+      status={[followStatus(t, follow, matched !== null, reached), follow.path && (matched?.title ?? fileTitle(follow.path))].filter(Boolean).join(' · ')}
     >
       {manage ? (
         <Button onClick={stopFollowing}>{t('settings.headsets.stopFollowing')}</Button>
