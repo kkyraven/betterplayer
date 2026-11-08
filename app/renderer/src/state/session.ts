@@ -22,7 +22,7 @@ import { ipcMessage } from '@/lib/errors'
 import { planSession, sessionElapsedMs } from '@/session/plan'
 import { intensityAt } from '@/session/pacing'
 import { toyScale, type SessionIssue } from '@/session/rules'
-import { useDevices } from './devices'
+import { isEngineOutput, useDevices } from './devices'
 import { t } from './i18n'
 import * as live from './live'
 import { usePlayer } from './player'
@@ -107,6 +107,7 @@ const scales = new Map<number, number>()
 function applyToyOutput(run: SessionRun | null, elapsedMs = 0) {
   const intensity = run ? intensityAt(run.phases, elapsedMs) : null
   for (const output of useDevices.getState().outputs) {
+    if (!isEngineOutput(output)) continue
     const scale = run && output.config.id ? toyScale(run.setup.toys, output.config.id, elapsedMs / run.totalMs, intensity) : 1
     if (scales.get(output.id) === scale) continue
     if (!engine.setOutputSessionScale(output.id, scale)) throw new Error(t('session.error.toyOutput', { name: output.config.name ?? output.config.kind }))

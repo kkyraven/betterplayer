@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { BeatState, HeroState, ModelState, TrackAxis, TrackOptions, TrackState, ZoneMatch, ZoneRule } from 'bp-engine'
 import { CAPTURE_WIDTH, type BrowserTab, type Region, type RegionBox } from '@shared/browser'
+import type { MediaRow } from '@shared/library'
 import type { PerVideoSettings } from '@shared/settings'
 import {
   CUT_THRESHOLD,
@@ -66,7 +67,12 @@ import { usePlayer } from './player'
 import { pushParams } from './params'
 import { useSettings } from './settings'
 
-export type TrackSource = 'browser' | 'player' | 'game'
+export type TrackSource = 'browser' | 'player' | 'game' | 'headset'
+
+export interface HeadsetVideo {
+  media: MediaRow
+  scripted: readonly TrackAxisId[]
+}
 
 export interface GameStart {
   axes: TrackAxesConfig
@@ -123,6 +129,8 @@ interface TrackingStore {
   start: (source: TrackSource, game?: GameStart) => Promise<void>
   autoStart: () => Promise<void>
   stop: () => void
+  followHeadset: (video: HeadsetVideo | null) => Promise<void>
+  switchHeadset: (on: boolean) => void
   flushSave: () => Promise<void>
   pressCrosshair: () => Promise<void>
   allVideos: () => Promise<void>
@@ -303,10 +311,11 @@ export function targetLabel(cls: string | undefined): string | null {
 }
 
 interface Subject {
-  side: 'player' | 'browser'
+  side: 'player' | 'browser' | 'headset'
   key: string | null
   memory: TrackingSettings | undefined
   music: Omit<MusicInput, 'notMusic'> | null
+  scripted?: ReadonlySet<TrackAxisId>
   faptapPage: boolean
   manual: boolean
   tab?: BrowserTab
@@ -336,6 +345,7 @@ export const useTracking = create<TrackingStore>()((set, get) => {
   let pressed: { input: VideoResolveInput; started: boolean } | null = null
   let undo: AllVideosChange['undo'] | null = null
   let toastId = 0
+  let headsetReads = 0
 
   const anyBeat = () => Object.values(get().axes).some((a) => a.source === 'beat' || a.source === 'ai-music')
   const anyMusic = () => Object.values(get().axes).some((a) => a.source === 'ai-music')
@@ -524,7 +534,7 @@ export const useTracking = create<TrackingStore>()((set, get) => {
     const region = source === 'game' ? { region: { ...FULL_REGION }, regionSource: 'pick' as const } : {}
     set({ source, key, axes, beat: null, beatError: null, hero: null, zoneMatches: [], ...fields, ...region })
     pushBeatOptions()
-    engine.trackStart(options(defaults(), get().sensitivity, get().pace), rows(axes), source === 'player')
+    engine.trackStart(options(defaults(), get().sensitivity, get().pace), rows(axes), source === 'player' || source === 'headset')
     set({ state: engine.trackState() })
     syncModels()
     pushRegion()
@@ -584,7 +594,7 @@ export const useTracking = create<TrackingStore>()((set, get) => {
   const inputFor = (sub: Subject, manual: boolean, video: TrackingSettings | undefined, hold: boolean): VideoResolveInput => {
     const rules = defaults()
     const music = musicMatters(rules, manual ? true : video?.on) ? signalOf(sub) : null
-    return { side: sub.side, rules, video, scripted: scriptedOn(sub.side), music, manual, hold, faptapPage: sub.faptapPage }
+    return { side: sub.side, rules, video, scripted: sub.scripted ?? scriptedOn(sub.side), music, manual, hold, faptapPage: sub.faptapPage }
   }
   const current = (sub: Subject) => inputFor(sub, sub.manual, sub.memory, sub.side === 'player' && get().hold)
   const startsAlone = (sub: Subject) => resolve(inputFor(sub, false, sub.memory && withOn(sub.memory, undefined), false)).start
@@ -645,6 +655,14 @@ export const useTracking = create<TrackingStore>()((set, get) => {
     const memory = convertLegacy(stored, { side: 'browser', rules: defaults(), scripted: new Set(), title: tab?.title ?? '', faptapPage })
     return { side: 'browser', key, memory, music: null, faptapPage, manual: true, tab }
   }
+  const headsetSubject = async ({ media, scripted }: HeadsetVideo): Promise<Subject> => {
+    const key = media.path
+    const [video, sidecar] = await Promise.all([invoke('video:get', key), invoke('hero:sidecar', key)])
+    const set = new Set(scripted)
+    const memory = convertLegacy(video?.tracking, { side: 'player', rules: defaults(), scripted: set, title: media.title })
+    const music = { heroFile: sidecar !== null, tags: media.tags, folders: musicFolders(key, media.folder), title: media.title }
+    return { side: 'headset', key, memory, music, faptapPage: false, manual: false, scripted: set }
+  }
 
   useSettings.subscribe((s, prev) => {
     const a = s.settings?.tracking
@@ -694,6 +712,27 @@ export const useTracking = create<TrackingStore>()((set, get) => {
       adopt(sub)
       rerun()
       if (pressedEarly && get().source !== 'player') await get().pressCrosshair()
+    },
+    followHeadset: async (video) => {
+      const read = ++headsetReads
+      if (!video) {
+        if (subject?.side === 'headset') get().stop()
+        return
+      }
+      await loadSettings()
+      const sub = await headsetSubject(video)
+      if (read !== headsetReads) return
+      adopt(sub)
+      rerun()
+    },
+    switchHeadset: (on) => {
+      const sub = subject?.side === 'headset' ? subject : null
+      if (!sub || (get().source === 'headset') === on) return
+      const alone = startsAlone(sub)
+      sub.manual = on
+      if (!on) halt()
+      setOn(sub, on ? (alone ? undefined : true) : alone ? false : undefined)
+      rerun()
     },
     start: async (source, game) => {
       await loadSettings()
@@ -963,7 +1002,7 @@ export const useTracking = create<TrackingStore>()((set, get) => {
       const sub = subject
       if (!sub?.memory || !hasOverrides(sub.memory)) return
       keep(sub, withoutOverrides(sub.memory))
-      if (sub.side === 'browser') save('browser', sub.key, sub.memory)
+      if (sub.side !== 'player') save(sub.side, sub.key, sub.memory)
       if (get().source === sub.side) {
         set({ sensitivity: defaults().sensitivity })
         pushOptions()

@@ -2,15 +2,18 @@
 // Copyright (c) 2026 KinkyRaven. All rights reserved. This file is not licensed under LICENSE.txt; no permission is granted to use, copy, modify or distribute it.
 
 import type { AdvancedPain } from '@shared/dom-pain'
-import { DOM_LEVEL_MAX, DOM_MEMORY_KINDS, type DomAiSettings, type ChatTool, type DomMemory, type DomProfile, type DomYou, type PleasurePain } from '@shared/dom'
+import { DOM_LEVEL_MAX, DOM_MEMORY_KINDS, DOM_REPLIES, type DomAiSettings, type ChatTool, type DomMemory, type DomProfile, type DomYou, type PleasurePain } from '@shared/dom'
 
 const fn = (name: string, description: string, properties: Record<string, unknown> = {}, required: string[] = []): ChatTool => ({
   type: 'function',
   function: { name, description, parameters: { type: 'object', properties, required } },
 })
 
-export function domTools(dom: DomProfile, pp: PleasurePain, ai?: Partial<Pick<DomAiSettings, 'tagEditing' | 'viewVideo'>>, pain?: AdvancedPain): ChatTool[] {
+export const suggestReplies = (): ChatTool => fn('suggest_replies', `Offers the user ${DOM_REPLIES} short replies to what you just said, in their voice, which they pick instead of typing. The last one asks you to ease off. Never go near their hard limits.`, { replies: { type: 'array', items: { type: 'string', description: 'At most four words.' }, minItems: DOM_REPLIES, maxItems: DOM_REPLIES } }, ['replies'])
+
+export function domTools(dom: DomProfile, pp: PleasurePain, ai?: Partial<Pick<DomAiSettings, 'tagEditing' | 'viewVideo'>>, pain?: AdvancedPain, replies = false): ChatTool[] {
   return [
+    ...(replies ? [suggestReplies()] : []),
     fn('top_videos', 'The 20 videos the user has watched most: id, title, minutes, duration_seconds and top tags.'),
     fn('search_videos', 'Searches the user\'s library by title, tag or performer. Up to 20 results.', { query: { type: 'string' } }, ['query']),
     fn('play_video', 'Starts a video or timestamp range now, replacing what plays. Times are absolute seconds in the video.', { id: { type: 'integer' }, start_seconds: { type: 'number', minimum: 0 }, end_seconds: { type: 'number', exclusiveMinimum: 0 } }, ['id']),
@@ -75,11 +78,12 @@ function about(you: DomYou): string[] {
   return facts.length ? ['', 'About the user:', ...facts] : []
 }
 
-export function domSystemPrompt(dom: DomProfile, pp: PleasurePain, you: DomYou, toys: string[], memories: DomMemory[]): string {
+export function domSystemPrompt(dom: DomProfile, pp: PleasurePain, you: DomYou, toys: string[], memories: DomMemory[], replies = false): string {
   const lines = [
     `You are ${dom.name || 'the dom'}, an pro dominant with full control of the user's sex toys (${toys.length ? toys.join(', ') : 'none connected'}) and the porn they are made to watch.`,
     'Act on your own dominant will. Keep them watching and keep pushing further: choose what they watch, queue the next video before the current one ends, and notice when they pause or ask for anything.',
     'Use your tools every turn; talking alone is not enough. Keep messages short, one to three sentences, spoken directly to the user.',
+    ...(replies ? ['The user wears a VR headset and has no keyboard, and reads you as a subtitle, so keep to one or two short sentences. Whenever you speak, also call suggest_replies.'] : []),
     ...(pp.enabled ? [`You hold pleasure and pain from 0 to ${DOM_LEVEL_MAX}. 0 is pure pleasure; each step up hurts more, and ${DOM_LEVEL_MAX} is max pain. Raise it, drop it, keep changing it, hold it for a few seconds; the user set what each end feels like.`] : []),
     ...about(you),
     '',

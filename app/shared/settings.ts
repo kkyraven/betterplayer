@@ -146,7 +146,7 @@ export interface AxisSettings {
   extendRange: boolean
 }
 
-export const OUTPUT_KINDS = ['serial', 'udp', 'tcp', 'websocket', 'buttplug', 'ble', 'ossm', 'coyote', 'handy', 'howl', 'toy', 'openshock', 'pishock'] as const
+export const OUTPUT_KINDS = ['serial', 'udp', 'tcp', 'websocket', 'buttplug', 'ble', 'ossm', 'coyote', 'handy', 'howl', 'toy', 'openshock', 'pishock', 'audio'] as const
 export type OutputKind = (typeof OUTPUT_KINDS)[number]
 
 export interface VibrationSettings {
@@ -250,6 +250,12 @@ export interface EstimSettings {
 
 export function defaultEstim(): EstimSettings {
   return { contrast: 0, volumeFloor: RESTIM_DEFAULT_VOLUME_FLOOR, volumeMax: 1, volumeBoost: { enabled: false, axis: 'L1', amount: 0.2 }, params: false }
+}
+
+export interface EstimAudioVideo {
+  file?: string | null
+  swap?: boolean
+  swapChannels?: boolean
 }
 
 export const PARAM_AXES = ['C0', 'P0', 'P1', 'P2', 'P3'] as const satisfies readonly AxisId[]
@@ -363,6 +369,7 @@ export interface OutputConfig {
   port?: number
   url?: string
   device?: string
+  label?: string
   address?: string
   featureAxes?: Record<string, AxisId | null>
   featureLevels?: Record<string, FeatureLevel>
@@ -375,6 +382,7 @@ export interface OutputConfig {
   params?: Partial<Record<ParamAxisId, ParamSourceSettings>>
   vibration?: VibrationSettings
   delayMs?: number
+  volume?: number
   token?: string
   shocker?: string
   username?: string
@@ -395,6 +403,7 @@ export interface PerVideoSettings {
   frameGen?: FrameGenOverride
   params?: Partial<Record<ParamAxisId, ParamSourceSettings>>
   passthrough?: PassthroughSettings
+  estimAudio?: EstimAudioVideo
 }
 
 export type Shortcuts = Record<string, string>

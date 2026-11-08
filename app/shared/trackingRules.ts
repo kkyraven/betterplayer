@@ -14,7 +14,7 @@ import {
   type TrackSource,
 } from './tracking'
 
-export type TrackSide = 'player' | 'browser' | 'game'
+export type TrackSide = 'player' | 'browser' | 'game' | 'headset'
 
 export type RuleSource = TrackFill | 'ai-music'
 
@@ -25,6 +25,7 @@ export type RulePatch = Partial<Rules>
 const SHIPPED_FILL_AXES: readonly TrackAxisId[] = TRACK_AXIS_IDS.filter((id) => defaultTrackAxes()[id].source !== 'off')
 
 const GAME_FOREIGN_SOURCES: readonly TrackSource[] = ['faptap', 'hero', 'ai-music']
+const HEADSET_FOREIGN_SOURCES: readonly TrackSource[] = [...PLAYER_ONLY_SOURCES, ...BROWSER_STROKE_SOURCES, 'hero']
 
 const record = <T>(value: (id: TrackAxisId) => T) => Object.fromEntries(TRACK_AXIS_IDS.map((id) => [id, value(id)])) as Record<TrackAxisId, T>
 
@@ -39,6 +40,7 @@ export function musicMatters(rules: Pick<TrackingDefaults, 'fill' | 'musicFill'>
 
 export function usableSource(side: TrackSide, id: TrackAxisId, source: TrackSource): TrackSource {
   if (side === 'game') return GAME_FOREIGN_SOURCES.includes(source) ? 'video' : source
+  if (side === 'headset') return HEADSET_FOREIGN_SOURCES.includes(source) ? 'ai-motion' : source
   if (side === 'browser') return PLAYER_ONLY_SOURCES.includes(source) || (source === 'faptap' && id !== 'L0') ? 'ai-motion' : source
   return BROWSER_STROKE_SOURCES.includes(source) ? 'ai-motion' : source
 }
@@ -84,7 +86,7 @@ export function musicFolders(path: string, libraryFolder: string | null | undefi
 }
 
 export interface VideoResolveInput {
-  side: 'player' | 'browser'
+  side: 'player' | 'browser' | 'headset'
   rules: Rules
   video: Pick<TrackingSettings, 'own' | 'on' | 'zones'> | undefined
   scripted: ReadonlySet<TrackAxisId>
@@ -114,7 +116,7 @@ type Table = Pick<Resolved, 'axes' | 'auto' | 'picked' | 'start'>
 
 const anyOn = (axes: Record<TrackAxisId, { source: TrackSource }>) => TRACK_AXIS_IDS.some((id) => axes[id].source !== 'off')
 
-const classified = (input: VideoResolveInput) => (input.side === 'player' && input.rules.musicFill !== 'same' ? input.music : null)
+const classified = (input: VideoResolveInput) => (input.side !== 'browser' && input.rules.musicFill !== 'same' ? input.music : null)
 
 function table(input: VideoResolveInput): Table {
   const { side, rules, scripted, manual, hold, faptapPage } = input

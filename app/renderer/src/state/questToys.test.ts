@@ -22,10 +22,12 @@ vi.mock('./follow', async () => ({ useFollow: (await import('zustand')).create((
 vi.mock('./devices', async () => ({
   useDevices: (await import('zustand')).create(() => ({ outputs: [], states: {}, reconnect: vi.fn() })),
   outputName: (config: { name?: string }) => config.name ?? '',
+  audioOutputOf: () => undefined,
 }))
 vi.mock('./estim', () => ({ setEstim: vi.fn(), volumeHeld: () => false }))
 vi.mock('./player', async () => ({ usePlayer: (await import('zustand')).create(() => ({ snapshot: { flagsVersion: 0 } })) }))
 vi.mock('./settings', async () => ({ useSettings: (await import('zustand')).create(() => ({ settings: null })) }))
+vi.mock('./tracking', async () => ({ useTracking: (await import('zustand')).create(() => ({ source: null as string | null, key: null as string | null, switchHeadset: vi.fn() })) }))
 
 const DEFAULTS = { ...Object.fromEntries(AXIS_IDS.map((id) => [id, defaultAxisSettings(id)])), L0: { ...defaultAxisSettings('L0'), amplitude: 0.8 } } as Settings['axesDefault']
 const amplitude = (value: number) => ({ ...defaultAxisSettings('L0'), amplitude: value })
@@ -68,7 +70,7 @@ describe('startQuestToys', () => {
     useFollow.setState({ kind: 'quest', host: QUEST, state: PLAYING })
     useFollow.setState({ matched: { path: TWELVE, title: 'Twelve' } })
     await settle()
-    expect(published()?.video).toEqual({ mediaId: 12, intensity: 1.5, offsetMs: 40, range: { min: 0, max: 1 } })
+    expect(published()?.video).toEqual({ mediaId: 12, intensity: 1.5, offsetMs: 40, range: { min: 0, max: 1 }, tracking: false })
     expect(lastToys()?.[2]).toBe(QUEST)
 
     send({ kind: 'intensity', mediaId: 12, value: 1, host: '192.168.1.41' })
@@ -81,7 +83,7 @@ describe('startQuestToys', () => {
     expect(native.setAxis).toHaveBeenCalledWith('L0', amplitude(1.2))
     expect(native.setAxis).toHaveBeenCalledWith('R0', { ...defaultAxisSettings('R0'), amplitude: 0.7 })
     expect(native.setGlobalOffsetMs).toHaveBeenCalledWith(-100)
-    expect(published()?.video).toEqual({ mediaId: 12, intensity: 1.2, offsetMs: -100, range: { min: 0, max: 1 } })
+    expect(published()?.video).toEqual({ mediaId: 12, intensity: 1.2, offsetMs: -100, range: { min: 0, max: 1 }, tracking: false })
 
     saved[TWELVE] = { ...saved[TWELVE]!, position: 20_000 }
     expect(invoke).not.toHaveBeenCalledWith('video:set', TWELVE, expect.anything())
@@ -105,5 +107,30 @@ describe('startQuestToys', () => {
     await settle()
     expect(published()?.video).toBeNull()
     vi.useRealTimers()
+  })
+
+  it("shows Track motion on the followed video and passes the followed Quest's switch to the tracker", async () => {
+    const { useFollow } = await import('./follow')
+    const { useTracking } = await import('./tracking')
+    const { startQuestToys } = await import('./questToys')
+    startQuestToys()
+    useFollow.setState({ kind: 'quest', host: QUEST, state: PLAYING })
+    useFollow.setState({ matched: { path: TWELVE, title: 'Twelve' } })
+    await settle()
+    useTracking.setState({ source: 'headset', key: TWELVE })
+    expect(published()?.video?.tracking).toBe(true)
+
+    send({ kind: 'tracking', mediaId: 12, on: false, host: '192.168.1.41' })
+    send({ kind: 'tracking', mediaId: 13, on: false, host: QUEST })
+    expect(useTracking.getState().switchHeadset).not.toHaveBeenCalled()
+    send({ kind: 'tracking', mediaId: 12, on: false, host: QUEST })
+    expect(useTracking.getState().switchHeadset).toHaveBeenCalledWith(false)
+    useTracking.setState({ source: null, key: null })
+    expect(published()?.video?.tracking).toBe(false)
+
+    useFollow.setState({ matched: { path: 'http://stash:9999/scene/5/stream', title: 'Stashed' } })
+    await settle()
+    expect(published()?.video?.mediaId).toBe(12)
+    expect(published()?.video?.tracking).toBeUndefined()
   })
 })

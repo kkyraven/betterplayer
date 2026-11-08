@@ -6,14 +6,16 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { networkInterfaces } from 'node:os'
 import { join } from 'node:path'
 import { isAxisId } from '@shared/axes'
-import type { IpcEvent, IpcEvents, RemoteStatus } from '@shared/ipc'
-import { QUEST_ANSWER_MS, QUEST_DISCOVERY_PORT, type QuestBeacon, type QuestCensor, type QuestConnectResult, type QuestPassthrough, type QuestSampled, type QuestToys } from '@shared/quest'
+import type { IpcEvent, IpcEvents, QuestFrameWant, RemoteStatus } from '@shared/ipc'
+import type { VrDom } from '@shared/dom'
+import { QUEST_ANSWER_MS, QUEST_DISCOVERY_PORT, QUEST_DOM_WAIT_MS, QUEST_SCENE_MISSING, type QuestBeacon, type QuestCensor, type QuestConnectResult, type QuestDom, type QuestDomCommand, type QuestPassthrough, type QuestSampled, type QuestToys } from '@shared/quest'
 import { readPassthrough, type ResolvedPassthrough } from '@shared/passthrough'
 import type { MediaDetail, MediaRow } from '@shared/library'
 import type { ResolvedProjection } from '@shared/projection'
 import { isUrl } from '@shared/remote'
 import { IDLE_PLAYING, isForwarded, type ForwardedChannel, type PlayingState } from '@shared/peer'
 import { REMOTE_PORT_DEFAULT, type Settings } from '@shared/settings'
+import { findEstimAudio } from '../estimAudio'
 import type { Library } from '../library'
 import type { SpeechApi } from '../speech'
 import { deoIndex, deoScene } from './deovr'
@@ -24,14 +26,15 @@ import { authorised, keyMatches, passwordMatches, postedPassword, splitKey, urlK
 import { answerProbes, invite, nudge } from './discovery'
 import { firewallBlocks } from './firewall'
 import { QuestPairing, readPairRequest } from './pairing'
-import { inbound, outbound, permitted } from './paths'
+import { inbound, outbound, permitted, whyMissing } from './paths'
 import { servePortal } from './portal'
 import { vpnName } from './vpn'
-import { peerHost, questBeacon, questScene, readHello, readPosition, readSample, readToyCommand, resumePosition } from './quest'
+import { peerHost, questBeacon, questScene, readDomRequest, readHello, readPosition, readSample, readToyCommand, resumePosition } from './quest'
+import { frameSplitter, QuestStreams, streamArgs, trackFrames } from './questStream'
 
 export type RemoteApi = (channel: ForwardedChannel, args: unknown[]) => Promise<unknown>
 
-export type HeadsetEvent = 'headset:hello' | 'headset:bye' | 'headset:stop' | 'headset:toys' | 'headset:play'
+export type HeadsetEvent = 'headset:hello' | 'headset:bye' | 'headset:stop' | 'headset:toys' | 'headset:play' | 'headset:dom' | 'headset:domAsk' | 'headset:frame' | 'headset:feedFailed'
 export type HeadsetEmit = <E extends HeadsetEvent>(event: E, data: IpcEvents[E]) => void
 
 type StreamEvent = { event: 'playing'; data: PlayingState } | { event: 'library:changed'; data: IpcEvents['library:changed'] } | { event: 'library:progress'; data: IpcEvents['library:progress'] }
@@ -41,7 +44,18 @@ export const NUDGE_MS = 3_000
 
 const QUEST_KEY_WAIT_MS = 2_000
 
+const QUEST_MUSIC = /\.(mp3|m4a|aac|flac|ogg|oga|opus|wav)$/i
+
 const CONTENT_TYPES: Record<string, string> = {
+  mp3: 'audio/mpeg',
+  aac: 'audio/aac',
+  mka: 'audio/x-matroska',
+  m4a: 'audio/mp4',
+  ogg: 'audio/ogg',
+  oga: 'audio/ogg',
+  opus: 'audio/ogg',
+  wav: 'audio/wav',
+  flac: 'audio/flac',
   mp4: 'video/mp4',
   m4v: 'video/mp4',
   mkv: 'video/x-matroska',
@@ -226,8 +240,14 @@ export class RemoteServer {
   private playing: PlayingState = IDLE_PLAYING
   private toys: QuestToys = { outputs: [], video: null, estim: [] }
   private toysHost: string | null = null
+  private dom: { state: VrDom; commands: QuestDomCommand[]; host: string | null } = { state: { doms: [], session: null, note: null }, commands: [], host: null }
+  private domVersion = 0
+  private domAsked = false
+  private readonly domWaits = new Set<() => void>()
   private vrFreeMs: () => number | undefined = () => undefined
   private readonly streams = new Set<ServerResponse>()
+  private frameWant: QuestFrameWant | null = null
+  private encodeRuns = 0
   private heartbeat: NodeJS.Timeout | null = null
   private nudges: NodeJS.Timeout | null = null
   private masks: string | null = null
@@ -240,6 +260,7 @@ export class RemoteServer {
     private readonly library: Library,
     private readonly forcedPort?: number,
     readonly pairing = new QuestPairing(),
+    private readonly encodes = new QuestStreams(),
   ) {}
 
   setEmitter(emit: (status: RemoteStatus) => void) {
@@ -253,6 +274,21 @@ export class RemoteServer {
   setToys(toys: QuestToys, host: string | null) {
     this.toys = toys
     this.toysHost = host
+  }
+
+  setDom(state: VrDom, commands: QuestDomCommand[], host: string | null) {
+    this.dom = { state, commands, host }
+    this.domVersion++
+    for (const wake of [...this.domWaits]) wake()
+  }
+
+  wantFrames(want: QuestFrameWant | null) {
+    this.frameWant = want
+  }
+
+  async reencoded(mediaId: number): Promise<boolean> {
+    const row = this.library.media(mediaId)
+    return row !== null && !isUrl(row.path) && (await this.encodes.plan(row)) !== null
   }
 
   setVrLimit(limit: () => number | undefined) {
@@ -315,6 +351,7 @@ export class RemoteServer {
   }
 
   stop() {
+    for (const wake of [...this.domWaits]) wake()
     const server = this.server
     this.server = null
     this.pairing.endRequests()
@@ -326,6 +363,7 @@ export class RemoteServer {
     this.nudges = null
     for (const res of this.streams) res.end()
     this.streams.clear()
+    this.encodes.endAll()
     if (!server) return
     server.closeAllConnections()
     server.close()
@@ -376,6 +414,14 @@ export class RemoteServer {
   private playerBase(req: IncomingMessage): string {
     const own = OWN_CLIENTS.test(req.headers['user-agent'] ?? '') || this.pairing.headsetFor(req.headers.authorization) !== null
     return this.serving && !own ? `${this.base(req)}/k/${this.key}` : this.base(req)
+  }
+
+  private async swappedMusic(row: MediaRow): Promise<string | null | undefined> {
+    const estim = isUrl(row.path) ? undefined : this.library.videoSettings(row.path)?.estimAudio
+    if (!estim?.swap) return undefined
+    if (estim.file === null) return null
+    if (estim.file && (await stat(estim.file).catch(() => null))?.isFile()) return estim.file
+    return findEstimAudio(row.path)
   }
 
   private questPassthrough(req: IncomingMessage, row: MediaRow, passthrough: ResolvedPassthrough): QuestPassthrough {
@@ -525,12 +571,23 @@ export class RemoteServer {
     if (name === 'scene' && action === undefined) {
       const row = this.row(id)
       if (!row) return sendJson(res, 404, { error: 'not found' })
+      const missing = await whyMissing(row.path, this.library.roots())
+      if (missing) return sendJson(res, 404, { error: QUEST_SCENE_MISSING[missing] })
       const vrFreeMs = this.vrFreeMs()
       if (vrFreeMs !== undefined && row.durationMs > vrFreeMs) return sendJson(res, 402, { error: 'supporter', vrFreeMs })
       const settings = this.library.videoSettings(row.path)
-      const [projection, passthrough] = await Promise.all([this.projection(row), this.library.passthrough(row.path, settings?.passthrough, QUEST_KEY_WAIT_MS)])
-      return sendJson(res, 200, questScene(row, projection, settings?.position ?? 0, this.base(req), this.questPassthrough(req, row, passthrough)))
+      const [projection, passthrough, plan] = await Promise.all([this.projection(row), this.library.passthrough(row.path, settings?.passthrough, QUEST_KEY_WAIT_MS), isUrl(row.path) ? null : this.encodes.plan(row)])
+      const stream = plan ? { url: `${this.base(req)}/quest/stream/${row.id}`, width: plan.width, height: plan.height, fps: plan.fps } : undefined
+      const music = await this.swappedMusic(row)
+      const audio = music === undefined ? undefined : { url: music && QUEST_MUSIC.test(music) ? `${this.base(req)}/quest/audio/${row.id}` : null }
+      return sendJson(res, 200, questScene(row, projection, settings?.position ?? 0, this.base(req), this.questPassthrough(req, row, passthrough), stream, audio))
     }
+    if (name === 'audio' && action === undefined && req.method !== 'POST') {
+      const row = this.row(id)
+      const music = row ? await this.swappedMusic(row) : undefined
+      return music ? serveFile(req, res, music, contentType(music)) : sendJson(res, 404, { error: 'not found' })
+    }
+    if (name === 'stream' && action === undefined && req.method !== 'POST') return this.feed(req, res, id)
     if (name === 'censor' && id === undefined && req.method !== 'POST') return this.censor === undefined ? sendJson(res, 503, { error: 'not ready' }) : sendJson(res, 200, this.censor)
     if ((name === 'mask' || name === 'censor') && action !== undefined && req.method !== 'POST') {
       const row = this.row(id)
@@ -543,6 +600,7 @@ export class RemoteServer {
       const followed = this.toysHost !== null && peerHost(req.socket.remoteAddress) === this.toysHost
       return sendJson(res, 200, followed ? this.toys : { ...this.toys, video: null, estim: [] })
     }
+    if (name === 'dom' && id === undefined && req.method !== 'POST') return this.domPoll(req, res)
     if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' })
     if (name === 'scene' && action === 'position') {
       const row = this.row(id)
@@ -580,6 +638,8 @@ export class RemoteServer {
       return sendJson(res, 200, {})
     }
     if (name === 'bye' && id === undefined) {
+      const headset = this.pairing.headsetFor(req.headers.authorization)
+      if (headset) this.encodes.end(headset.id)
       this.headset('headset:bye', { host })
       return sendJson(res, 200, {})
     }
@@ -593,7 +653,95 @@ export class RemoteServer {
       this.headset('headset:toys', { ...command, host })
       return sendJson(res, 200, {})
     }
+    if (name === 'dom' && id === undefined) {
+      const request = readDomRequest(await readBody(req))
+      if (!request) return sendJson(res, 400, { error: 'bad request' })
+      this.headset('headset:dom', { ...request, host })
+      return sendJson(res, 200, {})
+    }
     return sendJson(res, 404, { error: 'not found' })
+  }
+
+  private async feed(req: IncomingMessage, res: ServerResponse, id: string | undefined): Promise<number> {
+    const headset = this.pairing.headsetFor(req.headers.authorization)
+    if (!headset) return sendJson(res, 403, { error: 'headsets only' })
+    const row = this.row(id)
+    if (!row || isUrl(row.path)) return sendJson(res, 404, { error: 'not found' })
+    const vrFreeMs = this.vrFreeMs()
+    if (vrFreeMs !== undefined && row.durationMs > vrFreeMs) return sendJson(res, 402, { error: 'supporter', vrFreeMs })
+    const range = req.headers.range?.trim()
+    if (range && !/^bytes=0-$/.test(range)) {
+      res.writeHead(416, { 'Content-Length': '0' })
+      res.end()
+      return 416
+    }
+    const plan = await this.encodes.plan(row)
+    if (!plan) return sendJson(res, 404, { error: 'not found' })
+    const headers = { 'Content-Type': 'video/mp2t', 'Cache-Control': 'no-store', 'Accept-Ranges': 'none' }
+    if (req.method === 'HEAD') {
+      res.writeHead(200, headers)
+      res.end()
+      return 200
+    }
+    const query = Number(new URL(req.url ?? '/', 'http://library').searchParams.get('t') ?? 0)
+    const t = Number.isFinite(query) ? Math.max(0, query) : 0
+    const host = peerHost(req.socket.remoteAddress)
+    const run = ++this.encodeRuns
+    const { width, height, bytes, fps } = trackFrames(plan)
+    const wanted = () => this.frameWant?.host === host && this.frameWant.mediaId === row.id
+    const frames = frameSplitter(bytes, t, fps, wanted, (frame, timeMs) => this.headset('headset:frame', { run, timeMs, width, height, bytes: frame }))
+    const music = await this.swappedMusic(row)
+    const encode = await this.encodes.open(headset.id, row, streamArgs(row.path, t, plan, music), frames).catch(() => null)
+    const failed = () => this.headset('headset:feedFailed', { host, mediaId: row.id })
+    if (!encode) {
+      failed()
+      return sendJson(res, 503, { error: 'busy' })
+    }
+    if (res.destroyed) {
+      encode.kill()
+      return CLIENT_GONE
+    }
+    res.writeHead(200, headers)
+    encode.stdout.pipe(res, { end: false })
+    res.on('close', () => encode.kill())
+    void encode.exited.then((code) => {
+      if (code === 0) {
+        res.end()
+        return
+      }
+      if (typeof code === 'number') {
+        this.log(req, 500, `ffmpeg exited with ${code}: ${encode.stderr().trim().split('\n').pop() ?? ''}`)
+        if (!encode.produced()) failed()
+      }
+      res.destroy()
+    })
+    return 200
+  }
+
+  private async domPoll(req: IncomingMessage, res: ServerResponse): Promise<number> {
+    if (!this.domAsked) {
+      this.domAsked = true
+      this.headset('headset:domAsk', { host: peerHost(req.socket.remoteAddress) })
+    }
+    const since = Number(new URL(req.url ?? '/', 'http://library').searchParams.get('since') ?? NaN)
+    if (since === this.domVersion) {
+      await new Promise<void>((done) => {
+        const wake = () => {
+          clearTimeout(timer)
+          this.domWaits.delete(wake)
+          res.off('close', wake)
+          done()
+        }
+        const timer = setTimeout(wake, QUEST_DOM_WAIT_MS)
+        this.domWaits.add(wake)
+        res.on('close', wake)
+      })
+    }
+    if (res.destroyed) return CLIENT_GONE
+    const { state, commands, host } = this.dom
+    const mine = host !== null && peerHost(req.socket.remoteAddress) === host
+    const answer: QuestDom = mine ? { ...state, version: this.domVersion, commands } : { doms: host === null ? state.doms : [], session: null, note: null, version: this.domVersion, commands: [] }
+    return sendJson(res, 200, answer)
   }
 
   private async speak(req: IncomingMessage, res: ServerResponse, session: string | undefined, action: string | undefined): Promise<number> {
@@ -613,12 +761,13 @@ export class RemoteServer {
     }
     if (method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' })
     if (action === 'end') return sendJson(res, 200, await speech.end(session))
-    const seq = Number(new URL(req.url ?? '/', 'http://library').searchParams.get('seq') ?? NaN)
+    const params = new URL(req.url ?? '/', 'http://library').searchParams
+    const seq = Number(params.get('seq') ?? NaN)
     if (!Number.isSafeInteger(seq) || seq < 0) return sendJson(res, 400, { error: 'bad request' })
     const pcm = await readPcm(req)
     if (pcm === 'too large') return sendJson(res, 413, { error: 'too large' })
     if (!pcm) return sendJson(res, 400, { error: 'bad request' })
-    return sendJson(res, 200, await speech.chunk(session, seq, pcm))
+    return sendJson(res, 200, await speech.chunk(session, seq, pcm, params.get('kind') === 'reply' ? 'reply' : 'search'))
   }
 
   private async pair(req: IncomingMessage, res: ServerResponse): Promise<number> {

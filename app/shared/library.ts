@@ -18,6 +18,8 @@ export interface LibraryRoot {
   error: string
 }
 
+export type MissingFile = 'drive' | 'file'
+
 export interface MediaRow {
   id: number
   rootId: number

@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, Bluetooth, Check, CloudLightning, Globe, Plug, Radio, RefreshCw, Smartphone, Usb, Zap, type LucideIcon } from 'lucide-react'
+import { ArrowLeft, ArrowRight, AudioLines, Bluetooth, Check, CloudLightning, Globe, Plug, Radio, RefreshCw, Smartphone, Usb, Zap, type LucideIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import type { BleDevice, ProbedPort, ToyScanState } from 'bp-engine'
 import type { MessageKey } from '@shared/i18n'
@@ -10,10 +10,11 @@ import { Modal } from '@/components/ui/Modal'
 import { Segmented } from '@/components/ui/Segmented'
 import { bleScan, listPorts, probeSerial, toyDevices, toyScan } from '@/engine/client'
 import { cx } from '@/lib/cx'
-import { outputName, testMove, useDevices } from '@/state/devices'
+import { audioOutputOf, outputName, testMove, useDevices } from '@/state/devices'
 import { t, useT } from '@/state/i18n'
 import { isOwnIntiface, useIntifaceStatus } from '@/state/intiface'
 import { useUi } from '@/state/ui'
+import { useSoundOutputs } from './EstimAudioRows'
 import { featureSummary, ossmText, statusDot, statusText } from './status'
 import { watchSocket } from './socketProbe'
 import './DeviceWizard.css'
@@ -21,7 +22,7 @@ import { PiShockConnect } from './PiShockConnect'
 
 const INTIFACE_URL = 'ws://127.0.0.1:12345'
 
-type Tile = 'serial' | 'bluetooth' | 'network' | 'restim' | 'intiface' | 'handy' | 'howl' | 'openshock' | 'pishock'
+type Tile = 'serial' | 'bluetooth' | 'network' | 'restim' | 'intiface' | 'handy' | 'howl' | 'openshock' | 'pishock' | 'audio'
 
 const TILES: ReadonlyArray<{ id: Tile; icon: LucideIcon; name: MessageKey; sub: MessageKey }> = [
   { id: 'serial', icon: Usb, name: 'devices.wizard.tile.serial', sub: 'devices.wizard.tile.serialSub' },
@@ -33,6 +34,7 @@ const TILES: ReadonlyArray<{ id: Tile; icon: LucideIcon; name: MessageKey; sub: 
   { id: 'howl', icon: Smartphone, name: 'devices.wizard.tile.howl', sub: 'devices.wizard.tile.howlSub' },
   { id: 'pishock', icon: CloudLightning, name: 'devices.wizard.tile.pishock', sub: 'common.supporterOnly' },
   { id: 'openshock', icon: CloudLightning, name: 'devices.wizard.tile.openshock', sub: 'devices.wizard.tile.openshockSub' },
+  { id: 'audio', icon: AudioLines, name: 'estimAudio.name', sub: 'devices.wizard.tile.audioSub' },
 ]
 
 export function DeviceWizard() {
@@ -49,13 +51,16 @@ export function DeviceWizard() {
 function Wizard({ onClose }: { onClose: () => void }) {
   const t = useT()
   const add = useDevices((s) => s.add)
+  const hasAudio = useDevices((s) => audioOutputOf(s.outputs) !== undefined)
   const intiface = useIntifaceStatus()
   const [tile, setTile] = useState<Tile>('serial')
   const [addedId, setAddedId] = useState<number | null>(null)
   const step = addedId === null ? 1 : 2
 
   const connect = async (config: OutputConfig) => {
-    setAddedId(await add(config))
+    const id = await add(config)
+    if (config.kind === 'audio') onClose()
+    else setAddedId(id)
   }
 
   return (
@@ -75,7 +80,7 @@ function Wizard({ onClose }: { onClose: () => void }) {
             <p>{t('devices.wizard.pickHow')}</p>
           </div>
           <div className="tiles" role="radiogroup" aria-label={t('devices.wizard.connection')}>
-            {TILES.map((option) => (
+            {TILES.filter((option) => option.id !== 'audio' || !hasAudio).map((option) => (
               <button key={option.id} type="button" role="radio" aria-checked={tile === option.id} className={cx('tile', tile === option.id && 'on')} onClick={() => setTile(option.id)}>
                 <span className="ic">
                   <option.icon />
@@ -92,6 +97,7 @@ function Wizard({ onClose }: { onClose: () => void }) {
           {tile === 'howl' && <HowlPanel onConnect={connect} />}
           {tile === 'openshock' && <OpenShockConnect onConnect={connect} />}
           {tile === 'pishock' && <PiShockConnect onConnect={connect} />}
+          {tile === 'audio' && <AudioPanel onConnect={connect} />}
           {tile === 'restim' && <SocketPanel key="restim" label="restim" defaultUrl={RESTIM_URL} config={(url) => ({ kind: 'websocket', profile: 'restim', url, name: 'restim' })} onConnect={connect} />}
           {tile === 'intiface' && <SocketPanel key="intiface" label="Intiface Central" defaultUrl={INTIFACE_URL} config={(url) => ({ kind: 'buttplug', profile: 'stroker', url })} onConnect={connect} isOwn={(url) => isOwnIntiface(url, intiface)} />}
           <div className="ft">
@@ -365,6 +371,32 @@ function OpenShockConnect({ onConnect }: { onConnect: (c: OutputConfig) => Promi
         </Row>
       ))}
       {shockers !== null && rows.length === 0 && <Row name={t('devices.wizard.noShockers')} sub="" dot="idle" />}
+    </div>
+  )
+}
+
+function AudioPanel({ onConnect }: { onConnect: (c: OutputConfig) => Promise<void> }) {
+  const t = useT()
+  const devices = useSoundOutputs()
+  const [adding, setAdding] = useState(false)
+  const add = (config: OutputConfig) => {
+    setAdding(true)
+    onConnect(config).catch((error: unknown) => {
+      console.warn('estim audio', error)
+      setAdding(false)
+    })
+  }
+  return (
+    <div className="panel">
+      {devices === null && <Row name={t('devices.wizard.checking')} sub="" dot="warn" />}
+      {devices?.map((d) => (
+        <Row key={d.name} name={d.description} sub="" status={t('devices.wizard.found')} dot="" ok>
+          <Button variant="primary" disabled={adding} onClick={() => add({ kind: 'audio', profile: 'stroker', device: d.name, label: d.description })}>
+            {t('devices.wizard.connect')}
+          </Button>
+        </Row>
+      ))}
+      {devices?.length === 0 && <Row name={t('devices.wizard.noDevice')} sub="" dot="idle" />}
     </div>
   )
 }

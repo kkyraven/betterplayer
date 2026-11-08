@@ -44,6 +44,7 @@ function setup(text = 'VR under twenty minutes', hold = false) {
     voice: voice.engine,
     vocabulary: () => ({ tags: ['Beach'], prompt: 'Beach, VR' }),
     corrections,
+    replyPrompt: async () => 'red, Vale',
     now: () => clock,
   })
   let seq = 0
@@ -55,11 +56,28 @@ function setup(text = 'VR under twenty minutes', hold = false) {
     }
     return reply!
   }
-  return { speech, voice, corrections, say }
+  return { speech, voice, corrections, say, chunks: () => seq++ }
 }
 
 afterEach(() => {
   vi.useRealTimers()
+})
+
+describe('a reply to the AI Dom', () => {
+  it('keeps the words as said, makes no chips, and primes Whisper with the safeword', async () => {
+    const { speech, voice, corrections, chunks } = setup('Please, slow down.')
+    for (let i = 0; i < 12; i++) await speech.chunk('r1', chunks(), chunk(LOUD), 'reply')
+    const final = await speech.end('r1')
+    expect(final).toEqual({ words: [{ text: 'Please,', filter: false }, { text: 'slow', filter: false }, { text: 'down.', filter: false }], chips: [], text: 'Please, slow down.' })
+    expect(voice.calls.at(-1)?.prompt).toBe('red, Vale')
+    expect(corrections).not.toHaveBeenCalled()
+  })
+
+  it('leaves a search as it was', async () => {
+    const { speech, say } = setup()
+    await say(1000, LOUD)
+    expect((await speech.end('s1')).text).toBeUndefined()
+  })
 })
 
 describe('Speech', () => {
@@ -148,6 +166,7 @@ describe('Speech', () => {
       voice: fakeVoice(() => '').engine,
       vocabulary: () => ({ tags: [], prompt: '' }),
       corrections: async () => [],
+      replyPrompt: async () => '',
     })
     await expect(speech.chunk('s1', 0, chunk(0))).rejects.toThrow('no model')
     expect((await speech.chunk('s1', 1, chunk(0))).end).toBe('silent')

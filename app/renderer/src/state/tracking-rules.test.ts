@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ScriptInfo } from 'bp-engine'
-import type { MediaDetail } from '@shared/library'
+import type { MediaDetail, MediaRow } from '@shared/library'
 import { defaultSettings, type PerVideoSettings } from '@shared/settings'
 import { defaultHeroMusic, defaultTrackAxes, defaultTrackingDefaults, defaultZoneEffects, heroFileText, newZone, TRACK_AXIS_IDS, type TrackAxesConfig, type TrackAxisId, type TrackingDefaults, type TrackingSettings, type TrackSource } from '@shared/tracking'
 
@@ -64,6 +64,7 @@ vi.mock('./player', async () => {
   return { usePlayer }
 })
 
+import { invoke } from '@/ipc'
 import { usePlayer } from './player'
 import { useSettings } from './settings'
 import { afterOverridesReset, needsFrames, useTracking } from './tracking'
@@ -303,6 +304,31 @@ describe('per-video memory', () => {
     afterOverridesReset()
     expect(writes).not.toHaveBeenCalled()
     expect(useTracking.getState().axes.L0.source).toBe('beat')
+  })
+})
+
+describe('a followed Quest video', () => {
+  const media = { path: 'C:/videos/quest.mp4', title: 'Clip', tags: [], folder: '' } as Pick<MediaRow, 'path' | 'title' | 'tags' | 'folder'> as MediaRow
+
+  it('tracks by the rules ahead of the clock, and the Quest switch stops it as the crosshair does', async () => {
+    await useTracking.getState().followHeadset({ media, scripted: [] })
+    expect(useTracking.getState()).toMatchObject({ source: 'headset', key: media.path })
+    expect(native.trackStart).toHaveBeenCalledWith(expect.anything(), expect.anything(), true)
+    expect(sources()).toEqual(filled('ai-motion'))
+    useTracking.getState().switchHeadset(false)
+    expect(useTracking.getState().source).toBeNull()
+    await useTracking.getState().flushSave()
+    expect(invoke).toHaveBeenCalledWith('video:set', media.path, expect.objectContaining({ tracking: expect.objectContaining({ on: false }) }))
+  })
+
+  it('waits beside a full set of scripts for the switch, and stops when the follow moves on', async () => {
+    await useTracking.getState().followHeadset({ media, scripted: ['L0', 'L1', 'L2', 'R1', 'R2'] })
+    expect(native.trackStart).not.toHaveBeenCalled()
+    useTracking.getState().switchHeadset(true)
+    expect(useTracking.getState().source).toBe('headset')
+    expect(sources()).toEqual({ ...filled('off'), L0: 'ai-motion' })
+    await useTracking.getState().followHeadset(null)
+    expect(useTracking.getState().source).toBeNull()
   })
 })
 

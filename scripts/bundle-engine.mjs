@@ -2,7 +2,7 @@
 import { bundleLinux } from './bundle-linux.mjs'
 import { bundleWindowsTools } from './bundle-windows-tools.mjs'
 import { execFileSync } from 'node:child_process'
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -117,6 +117,9 @@ switch (process.platform) {
     console.log(`bundle-engine: bundled ${dlls.join(', ')}`)
     const dlss5 = join(engine, 'dlss5')
     if (existsSync(dlss5)) {
+      const required = ['host/nvngx.dll', 'host/dxgi.dll', 'host/renodx-dlss5.addon64', 'host/nvngx_dlssnr.dll', 'dlss/nvngx_dlss.dll']
+      const bad = required.filter((rel) => !existsSync(join(dlss5, rel)) || statSync(join(dlss5, rel)).size < 4096)
+      if (bad.length) fail(`engine/dlss5/ is missing ${bad.join(', ')} or holds Git LFS pointers; run git lfs pull`)
       const skip = /[\\/]ReShade\.(ini|log\d*)$/i
       cpSync(dlss5, join(out, 'dlss5'), { recursive: true, filter: (src) => !skip.test(src) })
       console.log('bundle-engine: bundled dlss5/')

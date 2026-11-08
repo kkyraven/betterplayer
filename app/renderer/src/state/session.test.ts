@@ -2,10 +2,12 @@ import { t } from './i18n'
 import { beforeEach, expect, it, vi } from 'vitest'
 import type { MediaRow } from '@shared/library'
 import { defaultSessionSetup, type SessionRun } from '@shared/session'
+const OWN_ID = 0x80000000
 const m = vi.hoisted(() => ({
   invoke: vi.fn<(channel: string, ...args: unknown[]) => Promise<unknown>>(),
   time: 0,
-  scale: vi.fn(() => true),
+  scale: vi.fn((id: number, _scale: number) => id < 0x80000000),
+  outputs: [] as { id: number; config: { id: string; name?: string; kind: string } }[],
   open: vi.fn(async (_path: string, _seconds?: number) => {}),
   close: vi.fn(),
   pause: vi.fn(),
@@ -15,7 +17,7 @@ const m = vi.hoisted(() => ({
 vi.mock('@/ipc', () => ({ invoke: m.invoke }))
 vi.mock('@/engine/client', () => ({ engine: { setOutputSessionScale: m.scale, setAxis: vi.fn() } }))
 vi.mock('./usage', () => ({ track: vi.fn() }))
-vi.mock('./devices', () => ({ useDevices: { subscribe: vi.fn(), getState: () => ({ outputs: [{ id: 7, config: { id: 'toy-1', name: 'Toy', kind: 'serial' } }] }) } }))
+vi.mock('./devices', () => ({ isEngineOutput: (o: { id: number }) => o.id < 0x80000000, useDevices: { subscribe: vi.fn(), getState: () => ({ outputs: m.outputs }) } }))
 vi.mock('./live', () => ({ subscribe: vi.fn(), get: () => ({ timeMs: m.time }) }))
 vi.mock('./player', () => ({ usePlayer: { getState: () => ({ ...m.player, open: m.open, close: m.close, pause: m.pause, prepare: vi.fn(async () => {}) }) } }))
 vi.mock('./settings', () => ({ useSettings: { getState: () => ({ settings: null }) } }))
@@ -84,6 +86,7 @@ beforeEach(async () => {
     return null
   })
   m.time = 0
+  m.outputs = [{ id: 7, config: { id: 'toy-1', name: 'Toy', kind: 'serial' } }]
   m.player.path = null
   m.open.mockReset().mockImplementation(async (path) => {
     m.player.path = path
@@ -149,6 +152,14 @@ it('records before opening and applies toy rules using session time across clips
   expect(m.scale).toHaveBeenLastCalledWith(7, 1)
   expect(m.pause).toHaveBeenCalled()
   expect(m.invoke).toHaveBeenCalledWith('session:finish', 10, false)
+})
+it('scales only the outputs the engine owns, so estim audio never stops a session', async () => {
+  m.outputs.push({ id: OWN_ID, config: { id: 'audio-1', kind: 'audio' } })
+  await useSession.getState().replay(4)
+  expect(useSession.getState().stage).toBe('running')
+  expect(useSession.getState().error).toBeNull()
+  expect(m.scale).toHaveBeenLastCalledWith(7, 0)
+  expect(m.scale).not.toHaveBeenCalledWith(OWN_ID, expect.anything())
 })
 it('holds tracking before each clip opens when the session does not track, and lets go at the end', async () => {
   const run = recording()

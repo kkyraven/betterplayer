@@ -4,12 +4,14 @@ import type { OutputState } from 'bp-engine'
 import { defaultAxisSettings, defaultEstim, type PerVideoSettings, type Settings } from '@shared/settings'
 
 const setEstim = vi.hoisted(() => vi.fn())
-const held = vi.hoisted(() => ({ volume: false }))
+const held = vi.hoisted(() => ({ volume: false, audio: false }))
 vi.mock('@/engine/client', () => ({ engine: {} }))
 vi.mock('./estim', () => ({ setEstim, volumeHeld: () => held.volume }))
+vi.mock('./estimAudio', () => ({ estimAudioLive: () => held.audio }))
 vi.mock('./devices', async () => ({
-  useDevices: (await import('zustand')).create(() => ({ outputs: [], states: {}, reconnect: vi.fn(), setStrength: vi.fn(async () => undefined) })),
+  useDevices: (await import('zustand')).create(() => ({ outputs: [], states: {}, reconnect: vi.fn(), setStrength: vi.fn(async () => undefined), setVolume: vi.fn() })),
   outputName: (config: { name?: string }) => config.name ?? '',
+  audioOutputOf: (outputs: { config: { kind: string } }[]) => outputs.find((o) => o.config.kind === 'audio'),
 }))
 vi.mock('./settings', async () => ({ useSettings: (await import('zustand')).create(() => ({ settings: null })) }))
 
@@ -46,6 +48,7 @@ describe('applyDeviceCommand', () => {
     vi.resetModules()
     setEstim.mockClear()
     held.volume = false
+    held.audio = false
   })
 
   it('raises an estim level one step for each up and lowers it no further than asked, never up', async () => {
@@ -100,5 +103,37 @@ describe('applyDeviceCommand', () => {
     expect(estimLevels().map((l) => l.kind)).toEqual(['coyote'])
     applyDeviceCommand({ kind: 'restimVolume', change: 'up' })
     expect(setEstim).not.toHaveBeenCalled()
+  })
+
+  it("steps the estim audio device's volume by 1% while it plays a file, and only lowers it otherwise", async () => {
+    const { useSettings } = await import('./settings')
+    const { useDevices } = await import('./devices')
+    useSettings.setState({ settings: { estim: defaultEstim() } as Settings })
+    const { applyDeviceCommand, estimLevels } = await import('./headsetToys')
+    useDevices.setState({ outputs: [], states: {} })
+    const setVolume = vi.mocked(useDevices.getState().setVolume)
+    setVolume.mockClear()
+    held.audio = true
+    expect(estimLevels()).toEqual([])
+    applyDeviceCommand({ kind: 'audioVolume', change: 0.3 })
+    expect(setVolume).not.toHaveBeenCalled()
+
+    held.audio = false
+    const audio = { id: 0x80000000, config: { kind: 'audio' as const, profile: 'stroker' as const, device: 'wasapi/{x}', volume: 0.42 } }
+    useDevices.setState({ outputs: [audio], states: {} })
+    expect(estimLevels()).toEqual([])
+    applyDeviceCommand({ kind: 'audioVolume', change: 'up' })
+    expect(setVolume).not.toHaveBeenCalled()
+    applyDeviceCommand({ kind: 'audioVolume', change: 0.3 })
+    expect(setVolume).toHaveBeenLastCalledWith(audio.id, 0.3)
+    held.audio = true
+    expect(estimLevels()).toEqual([{ kind: 'audio', volume: 0.42 }])
+    applyDeviceCommand({ kind: 'audioVolume', change: 'up' })
+    expect(setVolume).toHaveBeenLastCalledWith(audio.id, 0.43)
+    setVolume.mockClear()
+    applyDeviceCommand({ kind: 'audioVolume', change: 0.9 })
+    expect(setVolume).not.toHaveBeenCalled()
+    useDevices.setState({ outputs: [{ ...audio, config: { ...audio.config, volume: undefined } }] })
+    expect(estimLevels()).toEqual([{ kind: 'audio', volume: 1 }])
   })
 })

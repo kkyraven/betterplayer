@@ -55,4 +55,6 @@ export interface SpeechWord { text: string; filter: boolean }
 
 export interface SpeechReply { words: SpeechWord[]; end: 'none' | 'speech' | 'silent' }
 
-export interface SpeechFinal { words: SpeechWord[]; chips: Chip[] }
+export type SpeechKind = 'search' | 'reply'
+
+export interface SpeechFinal { words: SpeechWord[]; chips: Chip[]; text?: string }

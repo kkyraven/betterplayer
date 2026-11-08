@@ -8,6 +8,7 @@ import { VR_LENS } from '@shared/vr'
 import { DetectionFields } from '@/components/estim/DetectionFields'
 import { LiveMarker } from '@/components/player/LiveMarker'
 import { Button } from '@/components/ui/Button'
+import { Prompt } from '@/components/ui/Prompt'
 import { TooltipGroup } from '@/components/ui/TooltipGroup'
 import { IconButton } from '@/components/ui/IconButton'
 import { Segmented } from '@/components/ui/Segmented'
@@ -15,12 +16,15 @@ import { Slider } from '@/components/ui/Slider'
 import { Switch } from '@/components/ui/Switch'
 import { engine, enhanceCapabilities } from '@/engine/client'
 import { fmtSpeed } from '@/lib/format'
+import { statusText } from '@/screens/devices/status'
+import { pickEstimAudioFile, useEstimAudio } from '@/state/estimAudio'
 import { useT } from '@/state/i18n'
-import { hasRestimOutput, outputName, useDevices } from '@/state/devices'
+import { audioOutputOf, hasRestimOutput, outputName, useDevices, type ConfiguredOutput } from '@/state/devices'
 import { effectiveParam } from '@/state/params'
 import { useSettings } from '@/state/settings'
 import { usePlayer, useScriptedAxes, type SheetTab } from '@/state/player'
 import { useUi } from '@/state/ui'
+import { isUrl } from '@shared/remote'
 import { QueueSheet } from './QueueSheet'
 
 const TABS: ReadonlyArray<{ value: SheetTab; label: MessageKey }> = [
@@ -91,6 +95,7 @@ function VideoTab() {
       </div>
       {enhanceCapabilities.frameGen && <FrameGenGroup />}
       <ScriptsGroup />
+      <EstimAudioGroup />
       {shown.map((a) => (
         <AxisSection key={a.id} id={a.id} name={t(a.name)} />
       ))}
@@ -295,6 +300,86 @@ function VideoFooter() {
   )
 }
 
+const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path
+
+function EstimAudioGroup() {
+  const t = useT()
+  const output = useDevices((s) => audioOutputOf(s.outputs)?.config)
+  const path = usePlayer((s) => s.path)
+  const choices = usePlayer((s) => s.video.estimAudio)
+  const setEstimAudio = usePlayer((s) => s.setEstimAudio)
+  const found = useEstimAudio((s) => (s.current && s.current.media === path ? s.current.found : null))
+  const [confirming, setConfirming] = useState<string | null>(null)
+  if ((!output && !choices) || !path || isUrl(path)) return null
+  const file = choices?.file === null ? null : (choices?.file ?? found)
+  const link = async () => {
+    const picked = await pickEstimAudioFile(path)
+    if (picked && usePlayer.getState().path === path) setEstimAudio({ file: picked })
+  }
+  return (
+    <div className="grp">
+      <div className="lbl">
+        {t('estimAudio.name')}
+        <button type="button" className="act" onClick={() => void link()}>
+          {t('estimAudio.link')}
+        </button>
+      </div>
+      {file && (
+        <div className="script-row" data-tooltip={file}>
+          <span className="name">{fileName(file)}</span>
+          <IconButton label={t('common.remove')} size="sm" onClick={() => setEstimAudio({ file: choices?.file ? undefined : null })}>
+            <X />
+          </IconButton>
+        </div>
+      )}
+      <div className="tog-row">
+        {t('estimAudio.swap')} <Switch checked={choices?.swap === true} onCheckedChange={(on) => (on ? setConfirming(path) : setEstimAudio({ swap: false }))} label={t('estimAudio.swap')} />
+      </div>
+      <div className="tog-row">
+        {t('estimAudio.swapChannels')} <Switch checked={choices?.swapChannels === true} onCheckedChange={(swapChannels) => setEstimAudio({ swapChannels })} label={t('estimAudio.swapChannels')} />
+      </div>
+      <Prompt
+        open={confirming === path}
+        onOpenChange={(open) => setConfirming(open ? path : null)}
+        title={t('estimAudio.swapTitle')}
+        body={output ? t('estimAudio.swapBody', { device: output.name ?? output.label ?? outputName(output) }) : undefined}
+        confirmLabel={t('estimAudio.swapConfirm')}
+        onConfirm={() => setEstimAudio({ swap: true })}
+      />
+    </div>
+  )
+}
+
+function EstimAudioOutput({ output }: { output: ConfiguredOutput }) {
+  const t = useT()
+  const setVolume = useDevices((s) => s.setVolume)
+  const { status, error } = useEstimAudio((s) => s.state)
+  const state = useDevices((s) => s.states[output.id])
+  const volume = Math.round((output.config.volume ?? 1) * 100)
+  const meta =
+    status === 'playing' ? t('devices.output.playing')
+    : status === 'ready' ? t('devices.status.connected')
+    : status === 'idle' ? t('estimAudio.noFile')
+    : status === 'error' ? (error ?? t('devices.status.error'))
+    : statusText(state)
+  return (
+    <div className="grp">
+      <div className="script-row">
+        <span className={`dot ${status === 'playing' || status === 'ready' ? '' : status === 'idle' ? 'idle' : 'warn'}`} />
+        <span className="name">{outputName(output.config)}</span>
+        <span className="meta">{meta}</span>
+      </div>
+      <div className="rng">
+        <span className="k">{t('axis.EV')}</span>
+        <div className="track-wrap">
+          <Slider label={t('axis.EV')} value={[volume]} max={100} step={1} onValueChange={([v]) => setVolume(output.id, (v ?? 0) / 100)} />
+        </div>
+        <span className="v">{volume}%</span>
+      </div>
+    </div>
+  )
+}
+
 function DeviceTab() {
   const t = useT()
   const outputs = useDevices((s) => s.outputs)
@@ -304,6 +389,7 @@ function DeviceTab() {
     <>
       {outputs.length === 0 && <p className="muted">{t('player.sideSheet.noDevices')}</p>}
       {outputs.map((o) => {
+        if (o.config.kind === 'audio') return <EstimAudioOutput key={o.id} output={o} />
         const st = states[o.id]
         return (
           <div key={o.id} className="script-row">

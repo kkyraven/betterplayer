@@ -7,6 +7,7 @@ import { useFollow } from '@/state/follow'
 import { autoSkipGap } from '@/state/gapSkip'
 import * as live from '@/state/live'
 import { useDom } from '@/state/dom'
+import { useEstimAudio } from '@/state/estimAudio'
 import { useSession } from '@/state/session'
 import { useTracking } from '@/state/tracking'
 import { useUi } from '@/state/ui'
@@ -79,6 +80,9 @@ export function startEngineEvents(): () => void {
       }
     }
     if (!previous || !sameOutputs(previous.outputs, state.outputs)) useDevices.getState().setStates(state.outputs)
+    const estimAudio = engine.estimAudioState()
+    useEstimAudio.getState().update(estimAudio)
+    useDevices.getState().setAudioState(estimAudio)
     if (state.following || useFollow.getState().state) useFollow.getState().update(state.following ? engine.followState() : null)
     for (const input of engine.takeInputs()) onDeviceInput(input.output, input.name)
     if (useTracking.getState().source) {

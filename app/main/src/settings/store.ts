@@ -5,6 +5,7 @@ import { dirname } from 'node:path'
 import { AXIS_IDS, axisRecord, isAxisId, type AxisId } from '@shared/axes'
 import { DEFAULT_MODEL_SIZE, detectorId, sizeOf } from '@shared/censor'
 import { CORE_SECTIONS, SECTIONS, type Section } from '@shared/library'
+import { readEstimAudioVideo } from '@shared/estimAudio'
 import { readProjection } from '@shared/projection'
 import { PASSTHROUGH_MODELS, readPassthrough } from '@shared/passthrough'
 import { normaliseSource } from '@shared/peer'
@@ -363,12 +364,12 @@ function readParams(raw: unknown): Partial<Record<ParamAxisId, ParamSourceSettin
 function readOutput(raw: unknown): OutputConfig | null {
   if (!isObject(raw)) return null
   const kind = OUTPUT_KINDS.find((k) => k === raw.kind)
-  if (!kind) return null
+  if (!kind || (kind === 'audio' && !str(raw.device))) return null
   const guessed = kind === 'websocket' && str(raw.url)?.includes(':12346') ? 'restim' : 'stroker'
   return {
     kind,
     id: str(raw.id),
-    profile: oneOf(raw.profile, OUTPUT_PROFILES, guessed),
+    profile: kind === 'audio' ? 'stroker' : oneOf(raw.profile, OUTPUT_PROFILES, guessed),
     name: str(raw.name),
     path: str(raw.path),
     baud: typeof raw.baud === 'number' ? raw.baud : undefined,
@@ -376,6 +377,7 @@ function readOutput(raw: unknown): OutputConfig | null {
     port: typeof raw.port === 'number' ? raw.port : undefined,
     url: str(raw.url),
     device: str(raw.device),
+    label: str(raw.label),
     address: str(raw.address),
     featureAxes: readFeatureAxes(raw.featureAxes),
     featureLevels: readFeatureLevels(raw.featureLevels),
@@ -388,6 +390,7 @@ function readOutput(raw: unknown): OutputConfig | null {
     params: readParams(raw.params),
     vibration: readVibration(raw.vibration),
     delayMs: typeof raw.delayMs === 'number' && raw.delayMs !== 0 ? Math.max(-OUTPUT_DELAY_MAX, Math.min(OUTPUT_DELAY_MAX, Math.round(raw.delayMs))) : undefined,
+    volume: typeof raw.volume === 'number' && Number.isFinite(raw.volume) ? Math.round(Math.max(0, Math.min(1, raw.volume)) * 100) / 100 : undefined,
     token: str(raw.token),
     shocker: str(raw.shocker),
     username: str(raw.username),
@@ -442,6 +445,7 @@ export function readPerVideo(raw: unknown): PerVideoSettings {
     frameGen: FRAME_GEN_OVERRIDES.find((o) => o === r.frameGen),
     params: readParams(r.params),
     passthrough: readPassthrough(r.passthrough),
+    estimAudio: readEstimAudioVideo(r.estimAudio),
   }
 }
 
@@ -533,7 +537,9 @@ function readCurrent(data: Json): Settings {
   const port = Math.round(num(remote.port, REMOTE_PORT_DEFAULT))
   const intifacePort = Math.round(num(intiface.port, INTIFACE_PORT_DEFAULT))
   const recent = Array.isArray(general.recent) ? general.recent.filter((p): p is string => typeof p === 'string') : []
-  const outputs = Array.isArray(devices.outputs) ? devices.outputs.map(readOutput).filter((o) => o !== null) : []
+  const saved = Array.isArray(devices.outputs) ? devices.outputs.map(readOutput).filter((o) => o !== null) : []
+  const audio = saved.findIndex((o) => o.kind === 'audio')
+  const outputs = saved.filter((o, i) => o.kind !== 'audio' || i === audio)
   const trackAxes = readTrackAxes(tracking.axes, defaultTrackAxes())
   const motionDefault = bool(tracking.motionDefault, true)
   const derived = legacyFill(trackAxes, motionDefault)
@@ -633,7 +639,7 @@ function readJson(file: string): unknown {
 }
 
 export function isEmptyPerVideo(v: PerVideoSettings): boolean {
-  return v.globalOffsetMs === 0 && Object.keys(v.axes).length === 0 && v.variants === undefined && v.position === undefined && v.projection === undefined && v.tracking === undefined && v.frameGen === undefined && v.params === undefined && v.passthrough === undefined
+  return v.globalOffsetMs === 0 && Object.keys(v.axes).length === 0 && v.variants === undefined && v.position === undefined && v.projection === undefined && v.tracking === undefined && v.frameGen === undefined && v.params === undefined && v.passthrough === undefined && v.estimAudio === undefined
 }
 
 function writeAtomicSync(file: string, text: string) {

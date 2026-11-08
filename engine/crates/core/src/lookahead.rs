@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -34,6 +35,15 @@ impl Behind {
 }
 const RUNS_KEPT: usize = 24;
 const FRAME_WAIT: Duration = Duration::from_millis(100);
+const FED_QUEUE: usize = 32;
+
+pub struct FedFrame {
+    pub run: u32,
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub time_ms: f64,
+}
 
 #[derive(Default)]
 pub struct Store {
@@ -97,6 +107,8 @@ pub struct Lookahead {
     store: Arc<Mutex<Store>>,
     model_store: Arc<Mutex<Store>>,
     stop: Arc<AtomicBool>,
+    fed: Option<SyncSender<(FedFrame, bool)>>,
+    gap: AtomicBool,
 }
 
 impl Lookahead {
@@ -127,6 +139,53 @@ impl Lookahead {
             store,
             model_store,
             stop,
+            fed: None,
+            gap: AtomicBool::new(false),
+        }
+    }
+
+    pub fn fed(shared: Arc<Shared>, path: String) -> Lookahead {
+        let store = Arc::new(Mutex::new(Store::default()));
+        let model_store = Arc::new(Mutex::new(Store::default()));
+        let (tx, rx) = std::sync::mpsc::sync_channel(FED_QUEUE);
+        let (s, m) = (store.clone(), model_store.clone());
+        let spawned = std::thread::Builder::new()
+            .name("bp-lookahead-fed".into())
+            .spawn(move || {
+                let mut frames = FrameTracker::new(shared, s, m);
+                track_fed(rx, &mut |f| match f {
+                    Fed::Restart => frames.restart(),
+                    Fed::Frame(f) => {
+                        frames.frame(&f.bytes, f.width as usize, f.height as usize, f.time_ms)
+                    }
+                })
+            });
+        if let Err(e) = spawned {
+            eprintln!("bp-core: lookahead thread: {e}");
+        }
+        Lookahead {
+            path,
+            store,
+            model_store,
+            stop: Arc::new(AtomicBool::new(false)),
+            fed: Some(tx),
+            gap: AtomicBool::new(false),
+        }
+    }
+
+    pub fn is_fed(&self) -> bool {
+        self.fed.is_some()
+    }
+
+    pub fn feed(&self, frame: FedFrame) {
+        let Some(tx) = &self.fed else {
+            return;
+        };
+        let gap = self.gap.load(Ordering::Relaxed);
+        match tx.try_send((frame, gap)) {
+            Ok(()) => self.gap.store(false, Ordering::Relaxed),
+            Err(TrySendError::Full(_)) => self.gap.store(true, Ordering::Relaxed),
+            Err(TrySendError::Disconnected(_)) => {}
         }
     }
 
@@ -149,6 +208,22 @@ impl Drop for Lookahead {
     }
 }
 
+enum Fed<'a> {
+    Restart,
+    Frame(&'a FedFrame),
+}
+
+fn track_fed(rx: Receiver<(FedFrame, bool)>, track: &mut dyn FnMut(Fed)) {
+    let mut run = None;
+    for (frame, gap) in rx {
+        if gap || run != Some(frame.run) {
+            run = Some(frame.run);
+            track(Fed::Restart);
+        }
+        track(Fed::Frame(&frame));
+    }
+}
+
 struct Restart {
     at: Instant,
     target_ms: f64,
@@ -159,8 +234,8 @@ fn run(
     shared: &Arc<Shared>,
     path: &str,
     hwdec: Option<String>,
-    store: &Mutex<Store>,
-    model_store: &Mutex<Store>,
+    store: &Arc<Mutex<Store>>,
+    model_store: &Arc<Mutex<Store>>,
     stop: &AtomicBool,
 ) -> Result<(), String> {
     let size = Arc::new(Mutex::new((0u32, 0u32)));
@@ -181,34 +256,13 @@ fn run(
     )?;
     player.load(path, None)?;
 
-    let mut tracker = Tracker::new(*shared.track_options.lock().unwrap());
-    let mut feed: Option<MotionFeed> = None;
-    let auto_box: Arc<Mutex<AutoRegion>> = Arc::new(Mutex::new(AutoRegion::default()));
-    let latest: Arc<Mutex<Option<BoxRun>>> = Arc::new(Mutex::new(None));
-    let detect = shared.detector_model.lock().unwrap().clone().map(|model| {
-        let d = Detect::start({
-            let (auto_box, latest, shared) = (auto_box.clone(), latest.clone(), shared.clone());
-            move |v| {
-                let padding = shared.detect_options.lock().unwrap().padding;
-                let mut b = auto_box.lock().unwrap();
-                *b = next_auto_region(*b, v.found, v.after_cut, v.time_ms, padding);
-                *latest.lock().unwrap() = Some(box_run(&v));
-            }
-        });
-        d.load(Some(model));
-        d
-    });
-
+    let mut frames = FrameTracker::new(shared.clone(), store.clone(), model_store.clone());
     let mut fitted = (0u32, 0u32);
     let mut fps = 0.0;
     let mut last_time: Option<f64> = None;
     let mut paused = true;
     let mut restart: Option<Restart> = None;
     let mut behind = Behind::default();
-    let mut cuts_seen = 0;
-    let mut last_detect_ms = f64::NEG_INFINITY;
-    let mut gray = Vec::new();
-    let mut rgb = Vec::new();
 
     while !stop.load(Ordering::Relaxed) {
         if !loaded.load(Ordering::Relaxed) {
@@ -249,13 +303,8 @@ fn run(
             player.seek(from / 1000.0)?;
             player.play()?;
             paused = false;
-            store.lock().unwrap().begin();
-            model_store.lock().unwrap().begin();
-            tracker = Tracker::new(*shared.track_options.lock().unwrap());
-            feed = None;
+            frames.restart();
             last_time = None;
-            cuts_seen = 0;
-            last_detect_ms = f64::NEG_INFINITY;
             restart = Some(Restart {
                 at: Instant::now(),
                 target_ms: pos,
@@ -296,57 +345,125 @@ fn run(
         let slot = player.slot(frame.index);
         let bytes = unsafe { slot.as_slice() };
         let (w, h) = player.size();
-        let (w, h) = (w as usize, h as usize);
-        if bytes.len() < w * h * 4 {
-            continue;
+        frames.frame(bytes, w as usize, h as usize, time);
+    }
+    Ok(())
+}
+
+struct FrameTracker {
+    shared: Arc<Shared>,
+    store: Arc<Mutex<Store>>,
+    model_store: Arc<Mutex<Store>>,
+    tracker: Tracker,
+    feed: Option<MotionFeed>,
+    auto_box: Arc<Mutex<AutoRegion>>,
+    latest: Arc<Mutex<Option<BoxRun>>>,
+    detect: Option<Detect>,
+    cuts_seen: u64,
+    last_detect_ms: f64,
+    gray: Vec<u8>,
+    rgb: Vec<u8>,
+}
+
+impl FrameTracker {
+    fn new(
+        shared: Arc<Shared>,
+        store: Arc<Mutex<Store>>,
+        model_store: Arc<Mutex<Store>>,
+    ) -> FrameTracker {
+        let auto_box: Arc<Mutex<AutoRegion>> = Arc::new(Mutex::new(AutoRegion::default()));
+        let latest: Arc<Mutex<Option<BoxRun>>> = Arc::new(Mutex::new(None));
+        let detect = shared.detector_model.lock().unwrap().clone().map(|model| {
+            let d = Detect::start({
+                let (auto_box, latest, shared) = (auto_box.clone(), latest.clone(), shared.clone());
+                move |v| {
+                    let padding = shared.detect_options.lock().unwrap().padding;
+                    let mut b = auto_box.lock().unwrap();
+                    *b = next_auto_region(*b, v.found, v.after_cut, v.time_ms, padding);
+                    *latest.lock().unwrap() = Some(box_run(&v));
+                }
+            });
+            d.load(Some(model));
+            d
+        });
+        let tracker = Tracker::new(*shared.track_options.lock().unwrap());
+        FrameTracker {
+            tracker,
+            shared,
+            store,
+            model_store,
+            feed: None,
+            auto_box,
+            latest,
+            detect,
+            cuts_seen: 0,
+            last_detect_ms: f64::NEG_INFINITY,
+            gray: Vec::new(),
+            rgb: Vec::new(),
         }
-        bgra_to_gray(bytes, w * h, &mut gray);
+    }
+
+    fn restart(&mut self) {
+        self.store.lock().unwrap().begin();
+        self.model_store.lock().unwrap().begin();
+        self.tracker = Tracker::new(*self.shared.track_options.lock().unwrap());
+        self.feed = None;
+        self.cuts_seen = 0;
+        self.last_detect_ms = f64::NEG_INFINITY;
+    }
+
+    fn frame(&mut self, bytes: &[u8], w: usize, h: usize, time: f64) {
+        if bytes.len() < w * h * 4 {
+            return;
+        }
+        let shared = &self.shared;
+        bgra_to_gray(bytes, w * h, &mut self.gray);
 
         let options = *shared.track_options.lock().unwrap();
-        if options != tracker.options() {
-            tracker.set_options(options);
+        if options != self.tracker.options() {
+            self.tracker.set_options(options);
         }
         let region = {
             let r = shared.region.lock().unwrap();
             match r.source {
-                RegionSource::Auto if detect.is_some() => auto_box.lock().unwrap().region,
+                RegionSource::Auto if self.detect.is_some() => self.auto_box.lock().unwrap().region,
                 RegionSource::Auto => r.auto.region,
                 RegionSource::Centre => None,
                 RegionSource::Pick(p) => Some(p),
             }
         };
-        if region != tracker.region() {
-            tracker.set_region(region);
+        if region != self.tracker.region() {
+            self.tracker.set_region(region);
         }
-        let sample = tracker.push(&gray, w, h, time);
-        if tracker.phase() == Phase::Tracking {
+        let sample = self.tracker.push(&self.gray, w, h, time);
+        if self.tracker.phase() == Phase::Tracking {
             if let Some(s) = sample {
-                store.lock().unwrap().push(s.time_ms, s.motion);
+                self.store.lock().unwrap().push(s.time_ms, s.motion);
             }
         }
         match shared.motion_loaded().filter(|_| shared.motion_wanted()) {
             Some(loaded) => {
-                if feed.as_ref().is_none_or(|f| !f.same(&loaded)) {
-                    feed = Some(MotionFeed::new(loaded, options, Cadence::LOOKAHEAD));
+                if self.feed.as_ref().is_none_or(|f| !f.same(&loaded)) {
+                    self.feed = Some(MotionFeed::new(loaded, options, Cadence::LOOKAHEAD));
                 }
-                let f = feed.as_mut().unwrap();
+                let f = self.feed.as_mut().unwrap();
                 f.set_options(options);
                 let pace = shared.pace();
                 let energy = crate::energies(&shared.track_axes.lock().unwrap());
-                let detection = *latest.lock().unwrap();
+                let detection = *self.latest.lock().unwrap();
                 match f.push(
-                    &gray,
+                    &self.gray,
                     w,
                     h,
                     time,
-                    &tracker,
+                    &self.tracker,
                     sample,
                     detection.as_ref(),
                     time,
                     pace,
                 ) {
                     Ok(heads) => {
-                        let mut st = model_store.lock().unwrap();
+                        let mut st = self.model_store.lock().unwrap();
                         for h in heads {
                             let motion = f.live(&h, pace, &energy);
                             st.push(h.time_ms, motion);
@@ -356,25 +473,25 @@ fn run(
                     Err(e) => eprintln!("bp-core: lookahead model: {e}"),
                 }
             }
-            None => feed = None,
+            None => self.feed = None,
         }
 
-        if let Some(d) = detect.as_ref().filter(|d| d.ready()) {
+        if let Some(d) = self.detect.as_ref().filter(|d| d.ready()) {
             if shared.region.lock().unwrap().source == RegionSource::Auto {
                 let interval = shared.detect_options.lock().unwrap().interval_ms;
-                let cuts = tracker.cuts();
-                let after_cut = cuts != cuts_seen;
-                cuts_seen = cuts;
-                if after_cut || time - last_detect_ms >= interval {
-                    last_detect_ms = time;
-                    bgra_to_rgb(bytes, w * h, &mut rgb);
+                let cuts = self.tracker.cuts();
+                let after_cut = cuts != self.cuts_seen;
+                self.cuts_seen = cuts;
+                if after_cut || time - self.last_detect_ms >= interval {
+                    self.last_detect_ms = time;
+                    bgra_to_rgb(bytes, w * h, &mut self.rgb);
                     let floor = if after_cut {
                         None
                     } else {
-                        auto_box.lock().unwrap().floor(time)
+                        self.auto_box.lock().unwrap().floor(time)
                     };
                     d.put(
-                        &rgb,
+                        &self.rgb,
                         w,
                         h,
                         after_cut,
@@ -386,7 +503,6 @@ fn run(
             }
         }
     }
-    Ok(())
 }
 
 pub(crate) fn silent_player(
@@ -676,5 +792,39 @@ mod tests {
             "the older run still serves earlier times"
         );
         assert_eq!(s.newest(), Some((1800.0, 3000.0)));
+    }
+
+    #[test]
+    fn fed_frames_fill_runs_at_their_times() {
+        let frame = |run, time_ms| FedFrame {
+            run,
+            bytes: Vec::new(),
+            width: WIDTH,
+            height: 192,
+            time_ms,
+        };
+        let (tx, rx) = std::sync::mpsc::sync_channel(FED_QUEUE);
+        for f in [
+            (frame(1, 60_000.0), false),
+            (frame(1, 60_016.0), false),
+            (frame(2, 5_000.0), false),
+            (frame(2, 5_016.0), false),
+            (frame(2, 5_500.0), true),
+        ] {
+            tx.send(f).unwrap();
+        }
+        drop(tx);
+        let mut s = Store::default();
+        track_fed(rx, &mut |f| match f {
+            Fed::Restart => s.begin(),
+            Fed::Frame(f) => s.push(f.time_ms, m(f.time_ms)),
+        });
+        assert_eq!(
+            s.runs.len(),
+            3,
+            "a new run, as a seek gives, starts a new run, and so does a gap"
+        );
+        assert_eq!(s.value_at(60_008.0), Some(m(60_008.0)));
+        assert_eq!(s.newest(), Some((5_500.0, 5_500.0)));
     }
 }

@@ -1,13 +1,17 @@
 import { create } from 'zustand'
 import type { FollowState } from 'bp-engine'
-import type { IpcEvents, RemoteStatus } from '@shared/ipc'
+import type { IpcEvents, QuestFrameWant, RemoteStatus } from '@shared/ipc'
 import { mediaIdFromUrl } from '@shared/peer'
 import type { QuestHello } from '@shared/quest'
+import { isUrl } from '@shared/remote'
+import { TRACK_AXIS_IDS } from '@shared/tracking'
 import { engine } from '@/engine/client'
 import { invoke, on } from '@/ipc'
 import { fileTitle } from '@/lib/format'
 import { applyVideoToEngine } from './axisDefaults'
+import { clearEstimAudio, loadEstimAudio } from './estimAudio'
 import { usePlayer } from './player'
+import { useTracking } from './tracking'
 import { useVr } from './vr'
 
 export const FOLLOW_KINDS = ['deovr', 'heresphere', 'whirligig'] as const
@@ -39,6 +43,7 @@ interface FollowStore {
   played: (play: IpcEvents['headset:play']) => void
   stop: () => void
   update: (state: FollowState | null) => void
+  feedFailed: (failed: IpcEvents['headset:feedFailed']) => void
 }
 
 function loadSetup(): { kind: FollowKind; host: string } {
@@ -69,6 +74,16 @@ function loadDismissed(now: number): Dismissed {
   return out
 }
 
+let reencoded: QuestFrameWant | null = null
+let framesAsked = 'null'
+
+function syncFrames() {
+  const key = JSON.stringify(reencoded)
+  if (key === framesAsked) return
+  framesAsked = key
+  void invoke('quest:frames', reencoded)
+}
+
 const LOOPBACK = /^(localhost|127(\.\d{1,3}){3}|\[::1\])$/
 
 function onOwnServer(url: string, status: RemoteStatus): boolean {
@@ -88,6 +103,8 @@ export const useFollow = create<FollowStore>()((set, get) => {
   let followedPlay = false
   const streamed = new Map<string, { session: string; at: number }>()
   let dismissed = loadDismissed(Date.now())
+  let lostFeed: QuestFrameWant | null = null
+  let followedFile: string | null = null
   const isDismissed = (host: string, session: string) => {
     const d = dismissed[host]
     return d !== undefined && d.session === session && Date.now() - d.at < DISMISSED_MS
@@ -111,12 +128,28 @@ export const useFollow = create<FollowStore>()((set, get) => {
     if (get().state?.path !== path) return
     const target = local?.path ?? path
     try {
-      const [folders, video] = await Promise.all([invoke('library:scriptFolders', target), local ? invoke('video:get', local.path) : null])
+      const quest = local !== null && get().kind === 'quest'
+      const [folders, video, fed] = await Promise.all([
+        invoke('library:scriptFolders', target),
+        local ? invoke('video:get', local.path) : null,
+        quest ? invoke('quest:reencoded', local.id).catch(() => false) : false,
+      ])
       if (get().state?.path !== path) return
       applyVideoToEngine(video)
-      await engine.loadScripts(target, undefined, folders)
+      if (local) void loadEstimAudio(local.path, () => video?.estimAudio)
+      const host = get().host
+      const feeding = local !== null && fed && !(lostFeed?.host === host && lostFeed.mediaId === local.id)
+      reencoded = local && feeding ? { host, mediaId: local.id } : null
+      followedFile = quest ? local.path : null
+      engine.followFile(followedFile, feeding)
+      syncFrames()
+      const info = await engine.loadScripts(target, undefined, folders)
       if (get().state?.path !== path) return
       set({ matched: local ? { path: local.path, title: local.title } : null })
+      if (local && get().kind === 'quest' && !isUrl(local.path)) {
+        const scripted = TRACK_AXIS_IDS.filter((id) => info.scripts.some((s) => s.axis === id && s.selected))
+        void useTracking.getState().followHeadset({ media: local, scripted })
+      }
     } catch {
       set({ matched: null })
     }
@@ -125,7 +158,9 @@ export const useFollow = create<FollowStore>()((set, get) => {
     if (usePlayer.getState().path) usePlayer.getState().close()
     followedPlay = played
     engine.follow(kind, host.trim() || '127.0.0.1', quest?.port)
+    clearEstimAudio()
     lastPath = undefined
+    lostFeed = null
     wasPlaying = true
     const { halted } = get()
     const keep = halted !== null && kind === 'quest' && halted.host === host
@@ -184,8 +219,12 @@ export const useFollow = create<FollowStore>()((set, get) => {
       streamed.delete(key)
       const wasAutomatic = automatic()
       followedPlay = false
+      reencoded = null
+      void useTracking.getState().followHeadset(null)
+      syncFrames()
       engine.unfollow()
       engine.unload()
+      clearEstimAudio()
       applyVideoToEngine(null)
       set({ state: null, matched: null, halted: null, ...(wasAutomatic ? { ...loadSetup(), quest: null } : {}) })
     },
@@ -193,6 +232,10 @@ export const useFollow = create<FollowStore>()((set, get) => {
       const path = state?.path ?? null
       if (path !== lastPath) {
         lastPath = path
+        clearEstimAudio()
+        reencoded = null
+        void useTracking.getState().followHeadset(null)
+        syncFrames()
         if (path) void resolve(path)
         else if (state) {
           engine.unload()
@@ -210,11 +253,23 @@ export const useFollow = create<FollowStore>()((set, get) => {
       wasPlaying = playing
       set(state ? { state, reached: get().reached || state.status === 'connected' } : { state: null, halted: null })
     },
+    feedFailed: (failed) => {
+      const { state, kind, host } = get()
+      if (!state || kind !== 'quest' || host !== failed.host) return
+      lostFeed = failed
+      if (reencoded?.mediaId !== failed.mediaId) return
+      reencoded = null
+      engine.followFile(followedFile, false)
+      syncFrames()
+    },
   }
 })
 
 export function startHeadsets() {
   on('headset:hello', (hello) => useFollow.getState().questHello(hello))
+  on('headset:frame', (f) => engine.lookaheadFrame(f.run, f.bytes, f.width, f.height, f.timeMs))
+  on('headset:feedFailed', (failed) => useFollow.getState().feedFailed(failed))
+  void invoke('quest:frames', null)
   on('headset:play', (play) => useFollow.getState().played(play))
   on('headset:bye', ({ host }) => {
     const s = useFollow.getState()

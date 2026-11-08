@@ -100,6 +100,25 @@ describe('delay', () => {
   })
 })
 
+describe('estim audio', () => {
+  it('keeps one audio device with its label and volume in hundredths, never as restim, and drops one with no sound output', () => {
+    const audio = { kind: 'audio', profile: 'stroker', device: 'wasapi/{x}', label: 'USB Audio' }
+    const outputs = migrate({ version: 1, devices: { outputs: [{ kind: 'audio', profile: 'stroker' }, { ...audio, volume: 0.333, delayMs: 40 }, buttplug, { ...audio, device: 'wasapi/{y}' }] } }).devices.outputs
+    expect(outputs.map((o) => o.kind)).toEqual(['audio', 'buttplug'])
+    expect(outputs[0]).toMatchObject({ device: 'wasapi/{x}', label: 'USB Audio', volume: 0.33, delayMs: 40 })
+    const [loud, junk] = migrate({ version: 1, devices: { outputs: [{ ...audio, volume: 7, profile: 'restim' }, { ...buttplug, volume: '1' }] } }).devices.outputs
+    expect(loud).toMatchObject({ volume: 1, profile: 'stroker' })
+    expect(junk?.volume).toBeUndefined()
+  })
+
+  it("keeps a video's linked file and swaps, and a video holding only those", () => {
+    const video = readPerVideo({ estimAudio: { file: 'D:/x/b.mp3', swapChannels: true } })
+    expect(video.estimAudio).toEqual({ file: 'D:/x/b.mp3', swapChannels: true })
+    expect(isEmptyPerVideo(video)).toBe(false)
+    expect(isEmptyPerVideo(readPerVideo({ estimAudio: { swap: false } }))).toBe(true)
+  })
+})
+
 describe('toy feature levels', () => {
   const toy = { kind: 'toy', profile: 'stroker', device: 'Nora', address: 'A' }
   it('keeps a level map in order and within range, and drops the identity and junk', () => {

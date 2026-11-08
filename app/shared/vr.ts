@@ -1,4 +1,5 @@
 import type { AxisId } from './axes'
+import type { VrDom } from './dom'
 import type { HeadsetToyCommand, HeadsetToys } from './headsetToys'
 import type { Projection, ProjectionSource } from './projection'
 import type { PassthroughSettings, ResolvedPassthrough } from './passthrough'
@@ -27,7 +28,10 @@ export interface VrPlayerState {
   passthrough?: ResolvedPassthrough
   passthroughMenus?: boolean
   passthroughKeys?: boolean
+  dom?: VrDom & { mic: VrDomMic }
 }
+
+export type VrDomMic = 'off' | 'on' | 'end'
 
 export const VR_PASSTHROUGH_KEY = 0x00ff00
 
@@ -95,6 +99,9 @@ export type VrCommand =
   | { kind: 'pressTaken' }
   | { kind: 'drag'; on: boolean }
   | { kind: 'toy'; command: HeadsetToyCommand }
+  | { kind: 'domStart'; id: string }
+  | { kind: 'domReply'; text: string }
+  | { kind: 'domMic'; mic: VrDomMic }
   | { kind: 'rangeLive'; value: number | null }
   | { kind: 'buzz'; buzz: VrBuzz; hand?: VrHand }
   | { kind: 'passthrough'; change: Partial<PassthroughSettings> }
@@ -106,7 +113,7 @@ export type VrCommand =
   | { kind: 'introSkip' }
   | { kind: 'introFrame'; ms: number; at: number; moving: boolean }
 
-export type VrPanelId = 'deck' | 'ring' | 'legend' | 'intro'
+export type VrPanelId = 'deck' | 'ring' | 'legend' | 'intro' | 'dom'
 
 export interface VrPlacement {
   metres: number
@@ -125,6 +132,7 @@ export const VR_PANELS: Record<VrPanelId, VrPanelSpec> = {
   deck: { width: 1280, height: 440, metres: 0.8, distance: 0.8, drop: 0.38, pitch: 25, curvature: 0 },
   ring: { width: 960, height: 960, metres: 0.5, distance: 0.8, drop: 0, pitch: 0, curvature: 0 },
   legend: { width: 1300, height: 800, metres: 0.355, distance: 0, drop: 0, pitch: 0, curvature: 0 },
+  dom: { width: 1120, height: 232, metres: 0.7, distance: 0.8, drop: 0.16, pitch: 11, curvature: 0 },
   intro: { width: INTRO_BOX.width, height: INTRO_BOX.height, metres: INTRO_BOX.metres, distance: VR_INTRO.distance, drop: VR_INTRO.drop, pitch: 0, curvature: 0 },
 }
 
@@ -163,7 +171,7 @@ export const VR_SKIP_SECONDS = 10
 
 export const VR_TURN_DEGREES = 10
 
-export const VR_SCREEN_SIZES = { small: 40, medium: 50, large: 61, huge: 75 } as const
+export const VR_SCREEN_SIZES = { small: 70, medium: 85, large: 100, huge: 120 } as const
 export type VrScreenSize = keyof typeof VR_SCREEN_SIZES
 export const VR_SCREEN_SIZE_DEFAULT: VrScreenSize = 'medium'
 

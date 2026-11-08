@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   engine: { load: vi.fn(), play: vi.fn(), unload: vi.fn(), setAxis: vi.fn(), setGlobalOffsetMs: vi.fn(), setVolume: vi.fn(), setMuted: vi.fn() },
 }))
 vi.mock('@/ipc', () => ({ invoke: mocks.invoke }))
+vi.mock('./estimAudio', () => ({ applyEstimAudio: vi.fn(), clearEstimAudio: vi.fn(), estimAudioOn: () => false, loadEstimAudio: vi.fn(async () => undefined) }))
 vi.mock('@/engine/client', () => ({ engine: mocks.engine, applyEnhance: vi.fn() }))
 vi.mock('./usage', () => ({ track: vi.fn() }))
 vi.mock('./params', () => ({ pushParams: vi.fn() }))

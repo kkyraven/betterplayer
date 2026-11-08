@@ -14,7 +14,8 @@ import { plainParam, pushParams } from './params'
 import { FLAT, resolveProjection, type Projection, type ProjectionSource, type ResolvedProjection } from '@shared/projection'
 import type { PassthroughSettings } from '@shared/passthrough'
 import { isUrl } from '@shared/remote'
-import { defaultAxisSettings, type AxisSettings, type DlssSettings, type FrameGenOverride, type PerVideoSettings, type UpscalingSettings, type ParamAxisId, type ParamSourceSettings } from '@shared/settings'
+import { defaultAxisSettings, type AxisSettings, type DlssSettings, type EstimAudioVideo, type FrameGenOverride, type PerVideoSettings, type UpscalingSettings, type ParamAxisId, type ParamSourceSettings } from '@shared/settings'
+import { readEstimAudioVideo } from '@shared/estimAudio'
 import { applyEnhance, engine, warm } from '@/engine/client'
 import * as live from './live'
 import { invoke } from '@/ipc'
@@ -23,6 +24,7 @@ import { scrubberMarks } from '@/lib/marks'
 import { fileTitle } from '@/lib/format'
 import { RATE_MAX, RATE_MIN } from '@/lib/rate'
 import { isFree, useAccount } from './account'
+import { applyEstimAudio, clearEstimAudio, estimAudioOn, loadEstimAudio } from './estimAudio'
 import { t } from './i18n'
 import { useLibrary } from './library'
 import { useSettings } from './settings'
@@ -134,6 +136,7 @@ interface PlayerState {
   setProjection: (projection: Projection | null) => void
   setPassthrough: (passthrough: PassthroughSettings) => void
   setFrameGen: (override: FrameGenOverride | null) => void
+  setEstimAudio: (patch: Partial<EstimAudioVideo>) => void
   setUpscaling: (patch: Partial<UpscalingSettings>) => void
   setDlss: (patch: Partial<DlssSettings>) => void
   setGlobalOffset: (ms: number) => void
@@ -373,9 +376,11 @@ export const usePlayer = create<PlayerState>()((set, get) => {
             return loadPage()
           }
         }
+        const loading = loadMedia()
+        void loadEstimAudio(path, () => (get().path === path ? get().video.estimAudio : undefined))
         const [standIn, loaded] = await Promise.all([
           isRemoteMedia(path) ? invoke('remote:scripts', path) : null,
-          loadMedia(),
+          loading,
         ])
         if (signal?.aborted || token !== openToken || get().path !== path) return
         const info = standIn ? await engine.loadScripts(standIn, video.variants).catch(() => loaded) : loaded
@@ -462,6 +467,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       flushVideoSave()
       useTracking.getState().stop()
       engine.unload()
+      clearEstimAudio()
       prepared = null
       useSubtitles.getState().clear()
       set({ path: null, title: '', scripts: [], media: null, audio: null, video: EMPTY_VIDEO, sheet: null, mark: null, replayed: false, playlist: null, ended: false, suggestions: null })
@@ -585,7 +591,7 @@ export const usePlayer = create<PlayerState>()((set, get) => {
         const suggestions = await invoke('library:suggestions', media.id)
         if (suggestions.length > 0 && stillAtEnd()) set({ suggestions })
       }
-      if (autoplay === 'off') return suggest()
+      if (autoplay === 'off' || estimAudioOn()) return suggest()
       const ids = playlist?.ids ?? await useLibrary.getState().allIds()
       if (ids.length === 0 || !stillAtEnd()) return
       let id: number | undefined
@@ -631,6 +637,14 @@ export const usePlayer = create<PlayerState>()((set, get) => {
       resolveAuto(path)
     },
     setPassthrough: (passthrough) => persist({ ...get().video, passthrough }),
+    setEstimAudio: (patch) => {
+      const { video, path } = get()
+      if (!path) return
+      const { estimAudio, ...rest } = video
+      const next = readEstimAudioVideo({ ...estimAudio, ...patch })
+      persist(next ? { ...rest, estimAudio: next } : rest)
+      applyEstimAudio(path, next)
+    },
     setFrameGen: (override) => {
       const { frameGen: _dropped, ...rest } = get().video
       persist(override ? { ...rest, frameGen: override } : rest)

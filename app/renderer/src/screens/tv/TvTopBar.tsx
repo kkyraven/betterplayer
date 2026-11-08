@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import type { MessageKey } from '@shared/i18n'
 import { cx } from '@/lib/cx'
 import { fmtDuration } from '@/lib/format'
-import { useDevices } from '@/state/devices'
+import { audioOutputOf, outputName, useDevices } from '@/state/devices'
 import { useT } from '@/state/i18n'
 import * as live from '@/state/live'
 import { usePlayer } from '@/state/player'
@@ -59,7 +59,9 @@ function TvStatus() {
   const t = useT()
   const device = useDevices((s) => {
     const d = Object.values(s.states).find((o) => o.status === 'connected')
-    return d ? (d.device ?? d.address).split(' ')[0] : null
+    if (!d) return null
+    const audio = d.kind === 'audio' ? audioOutputOf(s.outputs) : undefined
+    return audio ? outputName(audio.config) : (d.device ?? d.address).split(' ')[0]
   })
   const inSession = useSession((s) => s.stage === 'running')
   return (

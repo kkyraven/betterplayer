@@ -15,7 +15,7 @@ import { Slider } from '@/components/ui/Slider'
 import { Switch } from '@/components/ui/Switch'
 import { applyLevel, releaseLevel } from '@/dom/level'
 import { invoke } from '@/ipc'
-import { useDevices } from '@/state/devices'
+import { isEngineOutput, useDevices } from '@/state/devices'
 import { domErrorText, useDom } from '@/state/dom'
 import { useT } from '@/state/i18n'
 import { useUi } from '@/state/ui'
@@ -111,8 +111,8 @@ export function PleasurePainPage() {
   const t = useT()
   const pp = useDom((s) => s.pleasurePain)
   const running = useDom((s) => s.running)
-  const outputs = useDevices((s) => s.outputs.length)
-  const connected = useDevices((s) => Object.values(s.states).some((st) => st.status === 'connected'))
+  const outputs = useDevices((s) => s.outputs.filter((o) => o.config.kind !== 'audio').length)
+  const connected = useDevices((s) => s.outputs.some((o) => isEngineOutput(o) && s.states[o.id]?.status === 'connected'))
   const [test, setTest] = useState<number | null>(null)
   const shown = test ?? 8
   const setPp = (next: PleasurePain) => void useDom.getState().setPleasurePain(next)
@@ -206,13 +206,13 @@ export function PleasurePainPage() {
 export function ImagesTab({ dom, edit }: { dom: DomProfile; edit: Edit }) {
   const t = useT()
   const img = dom.images
-  const [files, setFiles] = useState<{ checkpoints: string[]; loras: string[] } | null>(null)
+  const [files, setFiles] = useState<{ models: string[]; flux: string[]; loras: string[] } | null | undefined>(undefined)
   const setImg = (patch: Partial<DomProfile['images']>) => edit({ ...dom, images: { ...img, ...patch } })
   const setLora = (i: number, patch: Partial<DomLora>) => setImg({ loras: img.loras.map((l, j) => (j === i ? { ...l, ...patch } : l)) })
   useEffect(() => {
     if (img.provider !== 'comfyui') return
     let live = true
-    setFiles(null)
+    setFiles(undefined)
     const timer = window.setTimeout(() => void invoke('dom:comfyFiles', img.comfyUrl).then((f) => live && setFiles(f)), 400)
     return () => {
       live = false
@@ -228,7 +228,8 @@ export function ImagesTab({ dom, edit }: { dom: DomProfile; edit: Edit }) {
     { value: 'dom', label: t('dom.images.sendDom', { name: dom.name || t('dom.newName') }) },
     { value: 'messages', label: t('dom.images.sendMessages') },
   ]
-  const connected = files !== null && files.checkpoints.length > 0
+  const connected = !!files
+  const flux = img.provider === 'comfyui' && !!files?.flux.includes(img.checkpoint)
   const options = (list: string[], current: string) => list.concat(list.includes(current) || !current ? [] : [current]).map((c) => ({ value: c, label: c }))
   return (
     <>
@@ -243,13 +244,13 @@ export function ImagesTab({ dom, edit }: { dom: DomProfile; edit: Edit }) {
             <div className="prow">
               <span className="lbl">{t('dom.ai.address')}</span>
               <span className="spacer" />
-              {files !== null && <span className={connected ? 'dom-status ok' : 'dom-status warn'}><span className="dot" />{connected ? t('dom.images.connected') : t('dom.images.notConnected')}</span>}
+              {files !== undefined && <span className={connected ? 'dom-status ok' : 'dom-status warn'}><span className="dot" />{connected ? t('dom.images.connected') : t('dom.images.notConnected')}</span>}
               <input className="input mono dom-url" value={img.comfyUrl} onChange={(e) => setImg({ comfyUrl: e.target.value })} spellCheck={false} />
             </div>
             <div className="prow">
               <span className="lbl">{t('dom.images.checkpoint')}</span>
               <span className="spacer" />
-              <Select options={options(files?.checkpoints ?? [], img.checkpoint)} value={img.checkpoint} onChange={(checkpoint) => setImg({ checkpoint })} label={t('dom.images.checkpoint')} disabled={!connected} />
+              <Select options={options(files?.models ?? [], img.checkpoint)} value={img.checkpoint} onChange={(checkpoint) => setImg({ checkpoint })} label={t('dom.images.checkpoint')} disabled={!connected} />
             </div>
           </>
         )}
@@ -299,10 +300,12 @@ export function ImagesTab({ dom, edit }: { dom: DomProfile; edit: Edit }) {
             <span className="eyebrow">{t('dom.images.positive')}</span>
             <textarea className="input dom-textarea" rows={3} value={img.appearance} onChange={(e) => setImg({ appearance: e.target.value })} />
           </label>
-          <label className="dom-field">
-            <span className="eyebrow">{t('dom.images.negative')}</span>
-            <textarea className="input dom-textarea" rows={2} value={img.negative} onChange={(e) => setImg({ negative: e.target.value })} />
-          </label>
+          {!flux && (
+            <label className="dom-field">
+              <span className="eyebrow">{t('dom.images.negative')}</span>
+              <textarea className="input dom-textarea" rows={2} value={img.negative} onChange={(e) => setImg({ negative: e.target.value })} />
+            </label>
+          )}
         </>
       )}
     </>

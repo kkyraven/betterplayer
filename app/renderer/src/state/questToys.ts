@@ -1,15 +1,18 @@
 import { isAxisId } from '@shared/axes'
 import { mediaIdFromUrl } from '@shared/peer'
 import type { QuestToys } from '@shared/quest'
+import { isUrl } from '@shared/remote'
 import type { PerVideoSettings } from '@shared/settings'
 import { invoke, on } from '@/ipc'
 import { applyVideoToEngine } from './axisDefaults'
 import { useDevices } from './devices'
+import { useEstimAudio } from './estimAudio'
 import { useFollow } from './follow'
 import { applyDeviceCommand, estimLevels, toyOutputs, videoToys, withToyCommand } from './headsetToys'
 import * as live from './live'
 import { usePlayer } from './player'
 import { useSettings } from './settings'
+import { useTracking } from './tracking'
 
 const EMPTY_VIDEO: PerVideoSettings = { globalOffsetMs: 0, axes: {} }
 const SAVE_MS = 300
@@ -28,11 +31,15 @@ export function startQuestToys() {
   const scripted = () => live.axisIdsWith(live.FLAG_SCRIPT).filter(isAxisId)
   const shown = () => live.axisIdsWith(live.FLAG_SCRIPT | live.FLAG_DERIVED).filter(isAxisId)
   const defaults = () => useSettings.getState().settings?.axesDefault
+  const tracking = (path: string) => {
+    const { source, key } = useTracking.getState()
+    return source === 'headset' && key === path
+  }
 
   const publish = () => {
     const toys: QuestToys = {
       outputs: toyOutputs(),
-      video: followed ? { mediaId: followed.mediaId, ...videoToys(followed.video, shown(), defaults()) } : null,
+      video: followed ? { mediaId: followed.mediaId, ...videoToys(followed.video, shown(), defaults()), tracking: isUrl(followed.path) ? undefined : tracking(followed.path) } : null,
       estim: estimLevels(),
     }
     const host = followedHost()
@@ -86,15 +93,22 @@ export function startQuestToys() {
   useSettings.subscribe((s, prev) => {
     if (s.settings?.axesDefault !== prev.settings?.axesDefault || s.settings?.estim !== prev.settings?.estim) publish()
   })
+  useEstimAudio.subscribe((s, prev) => {
+    if (s.state.status !== prev.state.status) publish()
+  })
   usePlayer.subscribe((s, prev) => {
     if (s.snapshot.flagsVersion !== prev.snapshot.flagsVersion) publish()
+  })
+  useTracking.subscribe((s, prev) => {
+    if (s.source !== prev.source || s.key !== prev.key) publish()
   })
 
   on('headset:toys', (command) => {
     if (command.kind === 'reconnect') return applyDeviceCommand(command)
     if (followedHost() !== command.host) return
-    if (command.kind === 'restimVolume' || command.kind === 'coyote') return applyDeviceCommand(command)
+    if (command.kind === 'restimVolume' || command.kind === 'audioVolume' || command.kind === 'coyote') return applyDeviceCommand(command)
     if (!followed || followed.mediaId !== command.mediaId) return
+    if (command.kind === 'tracking') return useTracking.getState().switchHeadset(command.on)
     const { intensity } = videoToys(followed.video, shown(), defaults())
     const video = withToyCommand(followed.video, command, scripted(), intensity, defaults())
     applyVideoToEngine(video)

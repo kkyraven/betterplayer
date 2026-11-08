@@ -18,6 +18,10 @@ pub const SUPER_RESOLUTION: &str = "dlss/nvngx_dlss.dll";
 
 pub const REQUIRED: [&str; 5] = ["host/nvngx.dll", "host/dxgi.dll", "host/renodx-dlss5.addon64", "host/nvngx_dlssnr.dll", "dlss/nvngx_dlss.dll"];
 
+const FRAME_TIMEOUT: Duration = Duration::from_secs(2);
+const WARMUP_FRAMES: u32 = 4;
+const WARMUP_TIMEOUT: Duration = Duration::from_secs(20);
+
 pub const MAX_OUTPUT: (u32, u32) = (7680, 4320);
 
 pub fn available() -> Result<PathBuf, String> {
@@ -389,11 +393,26 @@ impl Session {
     }
 
     pub fn process(&mut self, rgba: &[u8], motion: &[u8], pts: i64, reset: bool, out: &mut [u8]) -> Result<(), String> {
+        self.process_with(rgba, motion, pts, reset, out, FRAME_TIMEOUT)
+    }
+
+    pub fn warm_up(&mut self) -> Result<(), String> {
+        let (rgba_len, motion_len) = self.input_bytes();
+        let rgba = vec![128; rgba_len];
+        let motion = vec![0; motion_len];
+        let mut out = vec![0; self.output_bytes()];
+        for pts in 0..WARMUP_FRAMES {
+            self.process_with(&rgba, &motion, pts as i64, true, &mut out, WARMUP_TIMEOUT).map_err(|e| format!("warming up DLSS: {e}"))?;
+        }
+        Ok(())
+    }
+
+    fn process_with(&mut self, rgba: &[u8], motion: &[u8], pts: i64, reset: bool, out: &mut [u8], timeout: Duration) -> Result<(), String> {
         let (rgba_len, motion_len) = self.input_bytes();
         if rgba.len() != rgba_len || motion.len() != motion_len || out.len() != self.output_bytes() {
             return Err("frame buffers do not match the session's sizes".into());
         }
-        self.control.arm(Duration::from_secs(2))?;
+        self.control.arm(timeout)?;
         let result = self.process_inner(rgba, motion, pts, reset, out);
         self.control.disarm();
         if result.is_err() { self.control.cancel(); }
@@ -546,6 +565,53 @@ mod tests {
         assert!(Session::start_command(command, header, failed.clone(), Duration::from_secs(15)).is_err());
         failed.cancel();
         failed.wait_stopped();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "needs an RTX card and engine/dlss5"]
+    fn real_worker_times() {
+        let host = check_layout(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dlss5")).unwrap();
+        let header = VideoHeader::live((1280, 720), &DlssOptions::default()).unwrap();
+        let started = Instant::now();
+        let mut session = Session::start_cancellable(&host, header, SessionControl::new()).unwrap();
+        eprintln!("setup {:?} {:?}", started.elapsed(), session.setup());
+        let at = Instant::now();
+        session.warm_up().unwrap();
+        eprintln!("warm-up {:?}", at.elapsed());
+        let (rgba_len, motion_len) = session.input_bytes();
+        let rgba: Vec<u8> = (0..rgba_len).map(|i| if i % 4 == 3 { 255 } else { (i / 4 % 1280 / 5) as u8 }).collect();
+        let motion = vec![0; motion_len];
+        let mut out = vec![0; session.output_bytes()];
+        let mut slowest = Duration::ZERO;
+        for frame in 0..30 {
+            let at = Instant::now();
+            session.process(&rgba, &motion, frame, true, &mut out).unwrap();
+            slowest = slowest.max(at.elapsed());
+        }
+        eprintln!("slowest of 30 warmed frames {slowest:?}");
+        assert!(out.chunks(4).any(|px| px[0] > 0), "DLSS returned a black frame");
+        assert_eq!(session.finish().unwrap(), WARMUP_FRAMES + 30);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn warm_up_waits_out_a_slow_first_frame() {
+        let header = VideoHeader::live((64, 64), &DlssOptions::default()).unwrap();
+        let frame_in = FrameHeader::SIZE + 64 * 64 * 8;
+        let frame_out = (header.output.0 * header.output.1 * 4) as usize;
+        let tail = format!(
+            "$in = [Console]::OpenStandardInput(); function Drain($n) {{ $buf = New-Object byte[] $n; while ($n -gt 0) {{ $c = $in.Read($buf, 0, $n); if ($c -eq 0) {{ exit 9 }}; $n -= $c }} }}; \
+             Drain {head}; for ($i = 0; $i -lt {frames}; $i++) {{ Drain {frame_in}; if ($i -eq 0) {{ Start-Sleep -Milliseconds 3000 }}; \
+             $rec = New-Object byte[] (28 + {frame_out}); [BitConverter]::GetBytes([uint32]{out_magic}).CopyTo($rec, 0); [BitConverter]::GetBytes([uint32]$i).CopyTo($rec, 4); \
+             [BitConverter]::GetBytes([uint32]1).CopyTo($rec, 8); [BitConverter]::GetBytes([uint32]{frame_out}).CopyTo($rec, 12); [BitConverter]::GetBytes([uint32]1).CopyTo($rec, 16); \
+             [BitConverter]::GetBytes([int64]$i).CopyTo($rec, 20); $stream.Write($rec, 0, $rec.Length); $stream.Flush() }}; Start-Sleep -Seconds 60",
+            head = VideoHeader::SIZE, frames = WARMUP_FRAMES, out_magic = OUT_MAGIC,
+        );
+        let mut session = Session::start_command(ready_worker(&header, &tail), header, SessionControl::new(), Duration::from_secs(10)).unwrap();
+        let started = Instant::now();
+        session.warm_up().unwrap();
+        assert!(started.elapsed() > FRAME_TIMEOUT, "the first frame outlasted the playback deadline");
     }
 
     #[test]

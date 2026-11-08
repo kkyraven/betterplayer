@@ -36,7 +36,7 @@ export function SessionToys({ open, onOpenChange }: { open: boolean; onOpenChang
     toys = setup.toys
   const update = (patch: Partial<SessionToySettings>) => setSetup({ toys: { ...toys, ...patch } })
   const outputs = useMemo(() => {
-    const current = configured.flatMap((o) => (o.config.id ? [{ id: o.config.id, name: outputName(o.config), binary: o.config.kind === 'howl', missing: false }] : []))
+    const current = configured.flatMap((o) => (o.config.id && o.config.kind !== 'audio' ? [{ id: o.config.id, name: outputName(o.config), binary: o.config.kind === 'howl', missing: false }] : []))
     const remembered = [...toys.rules, ...toys.periods]
     for (const rule of remembered) if (!current.some((o) => o.id === rule.outputId)) current.push({ id: rule.outputId, name: rule.name, binary: false, missing: true })
     return current

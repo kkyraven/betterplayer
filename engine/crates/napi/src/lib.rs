@@ -402,6 +402,33 @@ pub struct EstimOptions {
 }
 
 #[napi(object)]
+pub struct EstimAudioOutput {
+    pub device: Option<String>,
+    pub delay_ms: f64,
+    pub volume: f64,
+}
+
+#[napi(object)]
+pub struct EstimAudioSource {
+    pub media: String,
+    pub estim: String,
+    pub music: Option<String>,
+    pub swap_channels: bool,
+}
+
+#[napi(object)]
+pub struct EstimAudioDevice {
+    pub name: String,
+    pub description: String,
+}
+
+#[napi(object)]
+pub struct EstimAudioState {
+    pub status: String,
+    pub error: Option<String>,
+}
+
+#[napi(object)]
 pub struct PainChannel {
     pub shape: String,
     pub intensity: f64,
@@ -1177,6 +1204,7 @@ impl Engine {
         end_seconds: Option<f64>,
     ) -> Result<AsyncTask<LoadScripts>> {
         let variants = variant_pairs(variants)?;
+        self.inner.clear_estim_audio();
         let cancelled = Arc::new(AtomicBool::new(false));
         if let Some(signal) = &signal {
             let cancelled = Arc::clone(&cancelled);
@@ -1252,6 +1280,25 @@ impl Engine {
         let kind = bp_core::FollowKind::from_str(&kind)
             .ok_or_else(|| err(format!("unknown follow kind {kind}")))?;
         self.inner.follow(kind, &host, port).map_err(err)
+    }
+
+    #[napi]
+    pub fn follow_file(&self, path: Option<String>, fed: Option<bool>) {
+        self.inner.follow_file(path.as_deref(), fed.unwrap_or(false))
+    }
+
+    #[napi]
+    pub fn lookahead_frame(&self, run: u32, bytes: Uint8Array, width: u32, height: u32, time_ms: f64) {
+        if bytes.len() < width as usize * height as usize * 4 {
+            return;
+        }
+        self.inner.lookahead_frame(bp_core::FedFrame {
+            run,
+            bytes: bytes.to_vec(),
+            width,
+            height,
+            time_ms,
+        })
     }
 
     #[napi]
@@ -2379,6 +2426,35 @@ impl Engine {
     }
 
     #[napi]
+    pub fn set_estim_audio_output(&self, output: EstimAudioOutput) {
+        self.inner.set_estim_audio_output(bp_core::EstimAudioOptions {
+            device: output.device.filter(|d| !d.is_empty()),
+            delay_ms: if output.delay_ms.is_finite() { output.delay_ms.clamp(-5000.0, 5000.0) } else { 0.0 },
+            volume: if output.volume.is_finite() { output.volume.clamp(0.0, 1.0) } else { 0.0 },
+        });
+    }
+
+    #[napi]
+    pub fn set_estim_audio(&self, source: Option<EstimAudioSource>) {
+        self.inner.set_estim_audio(source.map(|s| bp_core::EstimAudioPlan { media: s.media, estim: s.estim, music: s.music, swap_channels: s.swap_channels }));
+    }
+
+    #[napi]
+    pub fn estim_audio_devices(&self) -> Result<Vec<EstimAudioDevice>> {
+        Ok(self.inner.estim_audio_devices().map_err(err)?.into_iter().map(|d| EstimAudioDevice { name: d.name, description: d.description }).collect())
+    }
+
+    #[napi]
+    pub fn estim_audio_state(&self) -> EstimAudioState {
+        let status = self.inner.estim_audio_status();
+        let error = match &status {
+            bp_core::EstimAudioStatus::Error(e) => Some(e.clone()),
+            _ => None,
+        };
+        EstimAudioState { status: status.as_str().to_string(), error }
+    }
+
+    #[napi]
     pub fn estim(&self) -> EstimOptions {
         let o = self.inner.estim();
         EstimOptions {
@@ -2647,7 +2723,7 @@ impl Engine {
             "auto" => default_hwdec(),
             other => other,
         };
-        self.inner.player.set_hwdec(v).map_err(err)
+        self.inner.set_hwdec(v).map_err(err)
     }
 
     #[napi]

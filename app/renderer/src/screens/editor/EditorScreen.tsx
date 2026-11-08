@@ -9,7 +9,7 @@ import { keyLabel } from '@/input/actions'
 import { funscriptStatus } from '@/editor/status'
 import { fmtDuration, fmtTimecode, fmtWhen } from '@/lib/format'
 import { cx } from '@/lib/cx'
-import { useDevices } from '@/state/devices'
+import { isEngineOutput, useDevices } from '@/state/devices'
 import { useT } from '@/state/i18n'
 import { SPEEDS, useEditor } from '@/state/editor'
 import * as live from '@/state/live'
@@ -357,7 +357,7 @@ function RecordBar() {
 
 function StatusBar() {
   const t = useT()
-  const connected = useDevices((s) => Object.values(s.states).some((o) => o?.status === 'connected'))
+  const connected = useDevices((s) => s.outputs.some((o) => isEngineOutput(o) && s.states[o.id]?.status === 'connected'))
   const setSheet = useEditor((s) => s.setSheet)
   return (
     <footer className="ed-statusbar">

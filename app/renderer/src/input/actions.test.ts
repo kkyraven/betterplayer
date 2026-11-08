@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({
 }))
 vi.mock('@/engine/client', () => ({ enhanceCapabilities: {} }))
 vi.mock('@/state/gapSkip', () => ({ skipGap: vi.fn() }))
+vi.mock('@/state/estimAudio', () => ({ stepEstimAudioVolume: vi.fn() }))
 vi.mock('@/state/devices', () => ({ useDevices: { getState: () => state.devices } }))
 vi.mock('@/state/editor', () => ({ useEditor: { getState: () => state.editor } }))
 vi.mock('@/state/player', () => ({ usePlayer: { getState: () => state.player } }))

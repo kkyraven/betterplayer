@@ -2,6 +2,7 @@ mod beat;
 mod censor;
 mod clock;
 mod detect;
+mod estim_audio;
 mod follow;
 mod generate;
 mod hero;
@@ -35,9 +36,11 @@ use bp_script::{Axis, Container, Kind, Script, heatmap};
 use beat::Beat;
 use clock::Clock;
 use detect::Detect;
+use estim_audio::EstimAudio;
 use follow::{Follow, FollowEvent, FollowSink};
 use hero::HeroState;
 use lookahead::Lookahead;
+pub use lookahead::FedFrame;
 use motion::{Cadence, MotionFeed, box_run};
 use script_mixer::{ScriptMixer, multi_axis_output};
 pub use script_mixer::OutputScriptMode;
@@ -68,7 +71,8 @@ pub use range::{
 
 pub use bp_axes::{Provider, SmartLimit};
 pub use bp_devices::{RampConfig, RampProgress};
-pub use bp_player::{External, Matte, RenderSnapshot, VrCensor};
+pub use bp_player::{AudioDevice, External, Matte, RenderSnapshot, VrCensor};
+pub use estim_audio::{EstimAudioOptions, EstimAudioSource, EstimAudioStatus};
 pub use bp_script::{Bookmark, Chapter, Interpolation};
 use bp_tracking::CutDetector;
 pub use bp_tracking::{
@@ -531,10 +535,13 @@ struct Shared {
     pace: Mutex<f64>,
     box_run: Mutex<Option<bp_model::BoxRun>>,
     hwdec: Mutex<Option<String>>,
+    hwdec_setting: Mutex<Option<String>>,
     track_options: Mutex<TrackOptions>,
     lookahead: Mutex<Option<Lookahead>>,
     lookahead_allowed: AtomicBool,
     media_path: Mutex<Option<String>>,
+    follow_file: Mutex<Option<String>>,
+    follow_fed: AtomicBool,
     load_error: Mutex<Option<String>>,
     detector_model: Mutex<Option<DetectorModel>>,
     track_axes: Mutex<TrackAxes>,
@@ -569,8 +576,17 @@ pub struct Engine {
     matte: Mutex<Option<matte::MatteTrack>>,
     matte_make: Mutex<Option<matte::MatteMake>>,
     censor_track: Mutex<Option<matte::MatteTrack>>,
+    estim_audio: EstimAudio,
     hz: u32,
     next_output: u32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EstimAudioPlan {
+    pub media: String,
+    pub estim: String,
+    pub music: Option<String>,
+    pub swap_channels: bool,
 }
 
 const HEATMAP_BUCKETS: usize = 240;
@@ -621,10 +637,13 @@ impl Engine {
             pace: Mutex::new(0.5),
             box_run: Mutex::new(None),
             hwdec: Mutex::new(None),
+            hwdec_setting: Mutex::new(None),
             track_options: Mutex::new(TrackOptions::default()),
             lookahead: Mutex::new(None),
             lookahead_allowed: AtomicBool::new(false),
             media_path: Mutex::new(None),
+            follow_file: Mutex::new(None),
+            follow_fed: AtomicBool::new(false),
             load_error: Mutex::new(None),
             detector_model: Mutex::new(None),
             track_axes: Mutex::new(default_track_axes()),
@@ -660,6 +679,18 @@ impl Engine {
         };
         let player = Player::new(width, height, opts.player, Some(sink))?;
 
+        let estim_audio = {
+            let shared = shared.clone();
+            EstimAudio::start(Box::new(move |media: &str| {
+                let on_media = shared.following.load(Ordering::Relaxed) || shared.media_path.lock().unwrap().as_deref() == Some(media);
+                let (ms, running, speed) = {
+                    let clock = shared.clock.lock().unwrap();
+                    (clock.peek(), clock.running(), clock.speed())
+                };
+                (ms, running && on_media, speed, shared.sensation.lock().unwrap().level(Instant::now()))
+            }))?
+        };
+
         let tick = {
             let shared = shared.clone();
             let (hz, spin) = (opts.hz, opts.spin_us);
@@ -680,9 +711,38 @@ impl Engine {
             matte: Mutex::new(None),
             matte_make: Mutex::new(None),
             censor_track: Mutex::new(None),
+            estim_audio,
             hz: opts.hz,
             next_output: 1,
         })
+    }
+
+    pub fn set_estim_audio_output(&self, options: EstimAudioOptions) {
+        self.estim_audio.set_options(options);
+    }
+
+    pub fn estim_audio_output(&self) -> EstimAudioOptions {
+        self.estim_audio.options()
+    }
+
+    pub fn set_estim_audio(&self, plan: Option<EstimAudioPlan>) {
+        let own_track = plan.as_ref().filter(|p| p.estim == p.media);
+        let swapped = own_track.map(|p| bp_player::AudioOverride { path: p.media.clone(), audio: p.music.clone() });
+        self.estim_audio.set_source(plan.map(|p| EstimAudioSource { media: p.media, path: p.estim, swap_channels: p.swap_channels }));
+        self.player.set_audio_override(swapped);
+    }
+
+    pub fn clear_estim_audio(&self) {
+        self.estim_audio.set_source(None);
+        self.player.drop_audio_override();
+    }
+
+    pub fn estim_audio_devices(&self) -> Result<Vec<AudioDevice>, String> {
+        self.estim_audio.devices()
+    }
+
+    pub fn estim_audio_status(&self) -> EstimAudioStatus {
+        self.estim_audio.status()
     }
 
     pub fn load(
@@ -728,9 +788,11 @@ impl Engine {
     }
 
     pub fn unload(&self) -> Result<(), String> {
+        self.clear_estim_audio();
         self.player.stop()?;
         self.shared.loaded.store(false, Ordering::Relaxed);
         *self.shared.media_path.lock().unwrap() = None;
+        *self.shared.follow_file.lock().unwrap() = None;
         self.shared.beat.lock().unwrap().clear();
         self.shared.beat_live_installed.store(false, Ordering::Relaxed);
         *self.shared.lookahead.lock().unwrap() = None;
@@ -754,6 +816,7 @@ impl Engine {
         if let Some(mut old) = slot.take() {
             old.stop();
         }
+        self.clear_estim_audio();
         self.player.pause()?;
         self.shared.following.store(true, Ordering::Relaxed);
         {
@@ -775,10 +838,29 @@ impl Engine {
         Ok(())
     }
 
+    pub fn follow_file(&self, path: Option<&str>, fed: bool) {
+        let was_fed = self.shared.follow_fed.swap(fed, Ordering::Relaxed);
+        {
+            let mut file = self.shared.follow_file.lock().unwrap();
+            if file.as_deref() == path {
+                if was_fed != fed {
+                    drop(file);
+                    self.sync_lookahead();
+                }
+                return;
+            }
+            *file = path.map(str::to_owned);
+        }
+        self.note_hwdec();
+        self.sync_lookahead();
+    }
+
     pub fn unfollow(&self) {
         if let Some(mut f) = self.follow.lock().unwrap().take() {
             f.stop();
         }
+        self.clear_estim_audio();
+        *self.shared.follow_file.lock().unwrap() = None;
         if !self.shared.following.swap(false, Ordering::Relaxed) {
             return;
         }
@@ -796,6 +878,14 @@ impl Engine {
             clock.snap();
         }
         self.shared.mixer.lock().unwrap().resync();
+        self.note_hwdec();
+        self.sync_lookahead();
+    }
+
+    pub fn lookahead_frame(&self, frame: FedFrame) {
+        if let Some(l) = self.shared.lookahead.lock().unwrap().as_ref() {
+            l.feed(frame);
+        }
     }
 
     pub fn follow_state(&self) -> Option<FollowState> {
@@ -952,8 +1042,13 @@ impl Engine {
     }
 
     fn note_hwdec(&self) {
-        *self.shared.hwdec.lock().unwrap() =
-            Some(self.player.hwdec_current()).filter(|h| !h.is_empty());
+        *self.shared.hwdec.lock().unwrap() = self.shared.decoder(|| self.player.hwdec_current());
+    }
+
+    pub fn set_hwdec(&self, value: &str) -> Result<(), String> {
+        self.player.set_hwdec(value)?;
+        *self.shared.hwdec_setting.lock().unwrap() = Some(value.to_owned());
+        Ok(())
     }
 
     pub fn set_model(&self, kind: ModelKind, model: Option<AiModel>) {
@@ -1334,7 +1429,7 @@ impl Engine {
         {
             t.stop();
         }
-        *self.shared.lookahead.lock().unwrap() = None;
+        self.sync_lookahead();
         self.shared.model_timeline.lock().unwrap().clear();
         let mut tl = self.shared.timeline.lock().unwrap();
         if !tl.active {
@@ -2041,6 +2136,7 @@ impl Engine {
         self.matte_stop();
         self.matte_make_stop();
         self.censor_track(None, None);
+        self.estim_audio.close();
         self.shared.stop.store(true, Ordering::Relaxed);
         if let Some(t) = self.tick.take() {
             let _ = t.join();
@@ -2247,20 +2343,39 @@ impl Shared {
         self.mixer.lock().unwrap().resync();
     }
 
+    fn decoded_file(&self) -> Option<String> {
+        let media = self.media_path.lock().unwrap();
+        let followed = self.follow_file.lock().unwrap();
+        decoded_file(self.following.load(Ordering::Relaxed), media.as_deref(), followed.as_deref())
+            .map(str::to_owned)
+    }
+
+    fn decoder(&self, current: impl FnOnce() -> String) -> Option<String> {
+        if self.following.load(Ordering::Relaxed) {
+            return self.hwdec_setting.lock().unwrap().clone();
+        }
+        Some(current()).filter(|h| !h.is_empty())
+    }
+
     fn sync_lookahead(self: &Arc<Self>, hwdec: impl FnOnce() -> String) {
-        let path = lookahead_path(
-            self.lookahead_allowed.load(Ordering::Relaxed),
-            &self.track_axes.lock().unwrap(),
-            self.media_path.lock().unwrap().as_deref(),
-        )
-        .map(str::to_owned);
+        let file = self.decoded_file();
+        let fed = self.following.load(Ordering::Relaxed) && self.follow_fed.load(Ordering::Relaxed);
+        let path = match fed {
+            true => file,
+            false => lookahead_path(
+                self.lookahead_allowed.load(Ordering::Relaxed),
+                &self.track_axes.lock().unwrap(),
+                file.as_deref(),
+            )
+            .map(str::to_owned),
+        };
         let mut slot = self.lookahead.lock().unwrap();
-        if slot.as_ref().map(|l| l.path.as_str()) == path.as_deref() {
+        if slot.as_ref().map(|l| (l.path.as_str(), l.is_fed())) == path.as_deref().map(|p| (p, fed)) {
             return;
         }
-        *slot = path.map(|p| {
-            let hwdec = Some(hwdec()).filter(|h| !h.is_empty());
-            Lookahead::start(self.clone(), p, hwdec)
+        *slot = path.map(|p| match fed {
+            true => Lookahead::fed(self.clone(), p),
+            false => Lookahead::start(self.clone(), p, self.decoder(hwdec)),
         });
     }
 
@@ -3090,15 +3205,23 @@ fn is_local(path: &str) -> bool {
     !path.contains("://") || path.starts_with("file://")
 }
 
+fn decoded_file<'a>(
+    following: bool,
+    media: Option<&'a str>,
+    followed: Option<&'a str>,
+) -> Option<&'a str> {
+    if following { followed } else { media }.filter(|p| is_local(p))
+}
+
 fn lookahead_path<'a>(
     allowed: bool,
     axes: &TrackAxes,
-    media: Option<&'a str>,
+    file: Option<&'a str>,
 ) -> Option<&'a str> {
     let reads_frames = Axis::ALL
         .iter()
         .any(|a| axes[a.index()].source.on_frames() && track_component(*a).is_some());
-    media.filter(|p| allowed && reads_frames && is_local(p))
+    file.filter(|_| allowed && reads_frames)
 }
 
 fn grow_region(r: Region) -> Region {
@@ -3421,9 +3544,20 @@ mod tests {
             axes[Axis::R1.index()].source = source;
             assert_eq!(lookahead_path(true, &axes, LOCAL), LOCAL, "{source:?}");
         }
-        assert_eq!(lookahead_path(true, &axes, Some("https://example.com/v")), None);
+        assert_eq!(lookahead_path(true, &axes, decoded_file(false, Some("https://example.com/v"), None)), None);
         assert_eq!(lookahead_path(false, &axes, LOCAL), None);
         axes[Axis::R1.index()].source = TrackSource::Beat;
         assert_eq!(lookahead_path(true, &axes, LOCAL), None);
+    }
+
+    #[test]
+    fn following_decodes_the_headsets_file_not_the_players() {
+        let followed = Some("C:/videos/headset.mp4");
+        let axes = table(&[(Axis::L0, TrackSource::AiMotion)]);
+        let file = |following, followed| decoded_file(following, LOCAL, followed);
+        assert_eq!(lookahead_path(true, &axes, file(true, followed)), followed);
+        assert_eq!(lookahead_path(true, &axes, file(true, None)), None);
+        assert_eq!(lookahead_path(true, &axes, file(true, Some("http://pc:8080/media/7"))), None);
+        assert_eq!(lookahead_path(true, &axes, file(false, followed)), LOCAL);
     }
 }

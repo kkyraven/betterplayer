@@ -26,6 +26,7 @@ import { startHeadsetCensor } from './state/headsetCensor'
 import { startI18n } from './state/i18n'
 import { useLibrary } from './state/library'
 import { usePlayer } from './state/player'
+import { startQuestDom } from './state/questDom'
 import { startQuestToys } from './state/questToys'
 import { useSession } from './state/session'
 import { useRemote } from './state/remote'
@@ -82,6 +83,7 @@ async function boot() {
     startEngineEvents()
     startHeadsets()
     startQuestToys()
+    startQuestDom()
     startChaster()
     startCensor()
     startDenial()

@@ -1,4 +1,6 @@
+import type { QuestDom } from '@shared/quest'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { PassThrough } from 'node:stream'
 import { createServer as createHttpServer, type IncomingHttpHeaders, type Server } from 'node:http'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -13,6 +15,7 @@ import type { Library } from '../library'
 import type { HereSphereScan, HereSphereScene } from './heresphere'
 import { urlKey } from './auth'
 import type { SpeechApi } from '../speech'
+import { QuestStreams, type Encode } from './questStream'
 import { RemoteServer } from './server'
 
 vi.mock('electron', () => ({ app: {} }))
@@ -323,6 +326,8 @@ describe('access', () => {
     ['POST', '/quest/speech/s1?seq=0'],
     ['POST', '/quest/speech/s1/end'],
     ['DELETE', '/quest/speech/s1'],
+    ['GET', '/quest/dom?since=-1'],
+    ['POST', '/quest/dom'],
   ]
   const OPEN: [method: string, path: string][] = [
     ['GET', '/quest/info'],
@@ -443,6 +448,158 @@ describe('access', () => {
   })
 })
 
+describe('/quest/scene', () => {
+  const row = (id: number, path: string) => ({ id, path, title: 'clip', durationMs: 60_000, size: 1e8, mtime: 1, width: 1920, height: 1080 }) as unknown as MediaDetail
+  let server: RemoteServer
+  let base: string
+  let token: string
+  let dir: string
+  let rows: MediaDetail[]
+  let spawned: { args: string[]; killed: boolean; frames: (chunk: Buffer) => void; exit: (code: number | null) => void }[]
+  let encodes: QuestStreams
+  let produces = true
+
+  const streams = () =>
+    new QuestStreams({
+      probe: async (args) => (args.at(-1)?.endsWith('here.mp4') ? '{"streams":[{"codec_name":"av1","width":7680,"height":3840,"avg_frame_rate":"120/1"}]}' : '{"streams":[{"codec_name":"h264","width":1920,"height":1080,"avg_frame_rate":"30/1"}]}'),
+      encoder: async () => true,
+      spawn: async (args, frames): Promise<Encode> => {
+        let exit: (code: number | null) => void = () => {}
+        const exited = new Promise<number | null>((done) => (exit = done))
+        const record = { args, killed: false, frames, exit: (code: number | null) => exit(code) }
+        spawned.push(record)
+        const stdout = new PassThrough()
+        const produced = produces
+        stdout.write('G')
+        return { stdout, exited, produced: () => produced, stderr: () => '', kill: () => { record.killed = true; exit(null) } }
+      },
+    })
+
+  beforeEach(async () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    spawned = []
+    produces = true
+    dir = mkdtempSync(join(tmpdir(), 'bp-quest-scene-'))
+    writeFileSync(join(dir, 'here.mp4'), BYTES)
+    writeFileSync(join(dir, 'small.mp4'), BYTES)
+    const unplugged = join(dir, 'unplugged')
+    rows = [row(1, join(dir, 'here.mp4')), row(2, join(dir, 'gone.mp4')), row(3, join(dir, 'small.mp4')), row(4, join(unplugged, 'away.mp4'))]
+    const library = {
+      media: (id: number) => rows.find((r) => r.id === id) ?? null,
+      index: () => [],
+      roots: () => [{ id: 1, path: dir, kind: 'folder' }, { id: 2, path: unplugged, kind: 'folder' }],
+      projection: async () => ({ projection: FLAT }),
+      videoSettings: () => null,
+      passthrough: async () => ({ settings: {}, on: false, mode: 'off' }),
+    } as unknown as Library
+    const port = await freePort()
+    encodes = streams()
+    server = new RemoteServer(library, undefined, undefined, encodes)
+    await new Promise<void>((done) => {
+      server.setEmitter(() => done())
+      server.apply({ remote: { enabled: false, password: '', port } } as Settings)
+    })
+    base = `http://127.0.0.1:${port}`
+    token = await new Promise<string>((done) => {
+      const id = server.pairing.request({ id: 'quest-1', name: 'Quest', pin: '1234' }, '127.0.0.1', (_status, body) => done((body as { token: string }).token))
+      if (id) server.pairing.pin(id, '1234')
+    })
+  })
+
+  afterEach(() => {
+    server.stop()
+    rmSync(dir, { recursive: true, force: true })
+    vi.restoreAllMocks()
+  })
+
+  const scene = (id: number) => fetch(`${base}/quest/scene/${id}`, { headers: { Authorization: `Bearer ${token}` } })
+  const feed = (t: number, init: RequestInit = {}) => fetch(`${base}/quest/stream/1?t=${t}`, { ...init, headers: { Authorization: `Bearer ${token}`, ...init.headers } })
+
+  it('offers the feed only for a file the headset cannot decode in real time', async () => {
+    expect(((await (await scene(1)).json()) as { stream?: unknown }).stream).toEqual({ url: `${base}/quest/stream/1`, width: 7680, height: 3840, fps: 60 })
+    expect(await (await scene(3)).json()).not.toHaveProperty('stream')
+    expect((await fetch(`${base}/quest/stream/3`, { headers: { Authorization: `Bearer ${token}` } })).status).toBe(404)
+  })
+
+  it('runs one encode per headset: a new request ends the last, from its own time', async () => {
+    const first = await feed(0)
+    expect(first.status).toBe(200)
+    expect(first.headers.get('content-type')).toBe('video/mp2t')
+    const second = await feed(5_000)
+    expect(spawned.map((s) => s.killed)).toEqual([true, false])
+    expect(spawned[1]?.args[spawned[1].args.indexOf('-ss') + 1]).toBe('5.000')
+    await expect(first.text()).rejects.toThrow()
+    await second.body?.cancel()
+  })
+
+  it('ends the encode when the headset closes the stream', async () => {
+    const closing = new AbortController()
+    await feed(0, { signal: closing.signal })
+    closing.abort()
+    await vi.waitFor(() => expect(spawned[0]?.killed).toBe(true))
+  })
+
+  it('answers HEAD and a range past the start without encoding', async () => {
+    const head = await feed(0, { method: 'HEAD' })
+    expect(head.status).toBe(200)
+    expect(head.headers.get('content-type')).toBe('video/mp2t')
+    expect((await feed(0, { headers: { Range: 'bytes=100-' } })).status).toBe(416)
+    expect(spawned).toHaveLength(0)
+    const fromStart = await feed(0, { headers: { Range: 'bytes=0-' } })
+    expect(fromStart.status).toBe(200)
+    await fromStart.body?.cancel()
+  })
+
+  it("sends an encode's tracking frames only while the window wants that headset's video, a run per encode", async () => {
+    const sent: unknown[] = []
+    server.setHeadsetEmitter((event, data) => event === 'headset:frame' && sent.push(data))
+    const frame = Buffer.alloc(384 * 192 * 4, 7)
+    const first = await feed(5_000)
+    spawned[0]?.frames(frame)
+    server.wantFrames({ host: '127.0.0.1', mediaId: 1 })
+    spawned[0]?.frames(frame)
+    server.wantFrames({ host: '127.0.0.1', mediaId: 3 })
+    spawned[0]?.frames(frame)
+    server.wantFrames({ host: '127.0.0.1', mediaId: 1 })
+    const second = await feed(0)
+    spawned[1]?.frames(frame)
+    expect(sent).toEqual([
+      { run: 1, timeMs: 5_000 + 1000 / 30, width: 384, height: 192, bytes: frame },
+      { run: 2, timeMs: 0, width: 384, height: 192, bytes: frame },
+    ])
+    await expect(first.text()).rejects.toThrow()
+    await second.body?.cancel()
+  })
+
+  it('tells the window when an encode is busy or fails before any output, as the headset then plays the file itself', async () => {
+    const events: unknown[] = []
+    server.setHeadsetEmitter((event, data) => event === 'headset:feedFailed' && events.push(data))
+    const file = { path: join(dir, 'small.mp4'), mtime: 0 }
+    await encodes.open('quest-2', file, [])
+    await encodes.open('quest-3', file, [])
+    expect((await feed(0)).status).toBe(503)
+    expect(events).toEqual([{ host: '127.0.0.1', mediaId: 1 }])
+    encodes.end('quest-2')
+    produces = false
+    const early = await feed(0)
+    spawned[2]?.exit(1)
+    await expect(early.text()).rejects.toThrow()
+    expect(events).toEqual([{ host: '127.0.0.1', mediaId: 1 }, { host: '127.0.0.1', mediaId: 1 }])
+  })
+
+  it('answers for a file that is there and refuses one that is not, saying whether its drive is there', async () => {
+    const here = await scene(1)
+    expect(here.status).toBe(200)
+    expect(await here.json()).toMatchObject({ id: 1, url: `${base}/media/1` })
+    const gone = await scene(2)
+    expect(gone.status).toBe(404)
+    expect(await gone.json()).toEqual({ error: 'file missing' })
+    const away = await scene(4)
+    expect(away.status).toBe(404)
+    expect(await away.json()).toEqual({ error: 'drive missing' })
+  })
+})
+
 describe('/quest/speech', () => {
   let server: RemoteServer
   let base: string
@@ -451,8 +608,8 @@ describe('/quest/speech', () => {
   const speech: SpeechApi = {
     model: () => ({ kind: 'downloading', done: 5, total: 10 }),
     download: () => { calls.push(['download']) },
-    chunk: async (session, seq, pcm) => {
-      calls.push(['chunk', session, seq, [...pcm]])
+    chunk: async (session, seq, pcm, kind) => {
+      calls.push(['chunk', session, seq, [...pcm], ...(kind === 'reply' ? [kind] : [])])
       return { words: [{ text: 'VR', filter: true }], end: 'none' }
     },
     end: async (session) => {
@@ -487,6 +644,43 @@ describe('/quest/speech', () => {
   const call = (method: string, path: string, body?: Uint8Array) =>
     fetch(`${base}${path}`, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'audio/L16;rate=16000' }, body })
 
+  const dom = { doms: [{ id: 'd', name: 'Vale' }], session: { name: 'Vale', line: 'Good.', said: 1, replies: ['Yes'], thinking: false, level: null }, note: null }
+  const pause = [{ n: 1, kind: 'pause' as const }]
+
+  it('holds GET /quest/dom until the session moves', async () => {
+    const first = (await (await call('GET', '/quest/dom?since=-1')).json()) as QuestDom
+    expect(first).toMatchObject({ doms: [], session: null })
+    const held = call('GET', `/quest/dom?since=${first.version}`)
+    await new Promise((done) => setTimeout(done, 30))
+    server.setDom(dom, pause, '127.0.0.1')
+    expect(await (await held).json()).toEqual({ ...dom, commands: pause, version: first.version + 1 })
+  })
+
+  it('tells the window once that a headset asked', async () => {
+    const events: unknown[] = []
+    server.setHeadsetEmitter((event, data) => events.push([event, data]))
+    await call('GET', '/quest/dom?since=-1')
+    await call('GET', '/quest/dom?since=-1')
+    expect(events).toEqual([['headset:domAsk', { host: '127.0.0.1' }]])
+  })
+
+  it('shows a session and its commands only to the headset running it', async () => {
+    server.setDom(dom, pause, '10.0.0.9')
+    expect(await (await call('GET', '/quest/dom?since=-1')).json()).toMatchObject({ doms: [], session: null, commands: [] })
+    server.setDom({ ...dom, session: null }, [], null)
+    expect(await (await call('GET', '/quest/dom?since=-1')).json()).toMatchObject({ doms: dom.doms, session: null })
+  })
+
+  it('passes a start and a reply on with the host, and refuses anything else', async () => {
+    const events: unknown[] = []
+    server.setHeadsetEmitter((event, data) => events.push([event, data]))
+    const send = (body: unknown) => fetch(`${base}/quest/dom`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    expect((await send({ kind: 'start', domId: 'd' })).status).toBe(200)
+    expect((await send({ kind: 'send', text: 'Yes' })).status).toBe(200)
+    expect((await send({ kind: 'stop' })).status).toBe(400)
+    expect(events).toEqual([['headset:dom', { kind: 'start', domId: 'd', host: '127.0.0.1' }], ['headset:dom', { kind: 'send', text: 'Yes', host: '127.0.0.1' }]])
+  })
+
   it('answers the model state and starts its download', async () => {
     expect(await (await call('GET', '/quest/speech')).json()).toEqual({ kind: 'downloading', done: 5, total: 10 })
     expect((await call('POST', '/quest/speech/model')).status).toBe(204)
@@ -500,6 +694,11 @@ describe('/quest/speech', () => {
     expect(await (await call('POST', '/quest/speech/abc-1/end')).json()).toEqual({ words: [{ text: 'VR', filter: true }], chips: [{ id: 'v0', kind: 'vr', label: 'VR' }] })
     expect((await call('DELETE', '/quest/speech/abc-1')).status).toBe(204)
     expect(calls).toEqual([['chunk', 'abc-1', 3, [1, -2, 300]], ['end', 'abc-1'], ['cancel', 'abc-1']])
+  })
+
+  it('takes a reply as a reply', async () => {
+    await call('POST', '/quest/speech/abc-1?seq=0&kind=reply', new Uint8Array(new Int16Array([1]).buffer))
+    expect(calls).toEqual([['chunk', 'abc-1', 0, [1], 'reply']])
   })
 
   it('refuses a chunk over 2 MB, half a sample, or no seq', async () => {

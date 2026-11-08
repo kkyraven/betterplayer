@@ -1,3 +1,4 @@
+mod audio;
 mod enhance;
 pub mod frame_log;
 mod frames;
@@ -19,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+pub use audio::{AudioDevice, AudioEvent, AudioOut};
 pub use enhance::{DlssOptions, DlssRate, EnhanceCapabilities, EnhanceOptions, EnhanceState, GuideQuality, ModelPreset, NrPreset, NrStyle, Upscaler};
 pub use frames::{Acquired, External, FrameSlot, FrameTap};
 pub use matte::{Matte, MatteSource, VrCensor};
@@ -49,6 +51,69 @@ pub enum PlayerEvent {
 }
 
 pub type EventSink = Arc<dyn Fn(PlayerEvent) + Send + Sync>;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioOverride {
+    pub path: String,
+    pub audio: Option<String>,
+}
+
+#[derive(Default)]
+struct OverrideState {
+    wanted: Option<AudioOverride>,
+    loaded: Option<String>,
+    applied: Option<Option<String>>,
+}
+
+impl OverrideState {
+    fn apply(&mut self, mpv: &Mpv) -> Result<(), String> {
+        let Some(wanted) = self.wanted.as_ref() else { return Ok(()) };
+        if self.applied.is_some() || self.loaded.as_deref() != Some(wanted.path.as_str()) {
+            return Ok(());
+        }
+        let added = match &wanted.audio {
+            Some(audio) => mpv.command(&["audio-add", audio, "select"]).map(|()| mpv.get_string("aid")),
+            None => Ok(None),
+        };
+        let silent = || mpv.set_property("aid", "no");
+        match added {
+            Ok(Some(id)) => {
+                self.applied = Some(Some(id));
+                Ok(())
+            }
+            Ok(None) => {
+                self.applied = Some(None);
+                silent()
+            }
+            Err(e) => {
+                self.applied = Some(None);
+                silent().and(Err(e))
+            }
+        }
+    }
+
+    fn change(&mut self, mpv: &Mpv, wanted: Option<AudioOverride>) -> Result<(), String> {
+        let same = wanted.as_ref().is_some_and(|w| self.loaded.as_deref() == Some(w.path.as_str()));
+        let none = wanted.is_none();
+        self.wanted = wanted;
+        if same {
+            let old = self.applied.take();
+            let applied = self.apply(mpv);
+            if let Some(Some(id)) = old {
+                let _ = mpv.command(&["audio-remove", &id]);
+            }
+            return applied;
+        }
+        if !none {
+            return Ok(());
+        }
+        let Some(added) = self.applied.take() else { return Ok(()) };
+        if let Some(id) = added {
+            let _ = mpv.command(&["audio-remove", &id]);
+        }
+        mpv.set_property("aid", "auto")
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VrKey {
@@ -179,6 +244,7 @@ pub struct Player {
     enhance: Arc<Mutex<Enhance>>,
     has_video: Arc<AtomicBool>,
     vr: Arc<Mutex<Option<VrStatus>>>,
+    audio: Arc<Mutex<OverrideState>>,
 }
 
 pub struct VrReply {
@@ -205,6 +271,7 @@ pub struct MediaLoader {
     mpv: Arc<Mpv>,
     ytdl: String,
     vr: Arc<Mutex<Option<VrStatus>>>,
+    audio: Arc<Mutex<OverrideState>>,
 }
 
 impl MediaLoader {
@@ -215,7 +282,7 @@ impl MediaLoader {
     pub fn load_range(&self, path: &str, start_seconds: Option<f64>, remote: Option<&str>, end_seconds: Option<f64>) -> Result<(), String> {
         self.mpv.set_property("http-header-fields", remote.unwrap_or(""))?;
         let _ = self.mpv.set_property("ytdl", if remote.is_some() { "no" } else { &self.ytdl });
-        load_file_range(&self.mpv, path, start_seconds, end_seconds, in_headset(&self.vr))
+        load_file_range(&self.mpv, path, start_seconds, end_seconds, in_headset(&self.vr), &self.audio)
     }
 
     pub fn hwdec_current(&self) -> String {
@@ -223,7 +290,12 @@ impl MediaLoader {
     }
 }
 
-fn load_file_range(mpv: &Mpv, path: &str, start_seconds: Option<f64>, end_seconds: Option<f64>, headset: bool) -> Result<(), String> {
+fn load_file_range(mpv: &Mpv, path: &str, start_seconds: Option<f64>, end_seconds: Option<f64>, headset: bool, audio: &Mutex<OverrideState>) -> Result<(), String> {
+    {
+        let mut audio = audio.lock().unwrap();
+        audio.loaded = None;
+        audio.applied = None;
+    }
     let options = portals::loadfile_options(start_seconds, end_seconds, portals::take_keyframe_start(headset));
     portals::loading(headset);
     if options.is_empty() { return mpv.command(&["loadfile", path]); }
@@ -258,6 +330,7 @@ impl Player {
         mpv.set_option("idle", "yes")?;
         mpv.set_option("keep-open", "yes")?;
         mpv.set_option("pause", "yes")?;
+        mpv.set_option("reset-on-next-file", "aid")?;
         #[cfg(windows)]
         mpv.set_option("vd-lavc-check-hw-profile", "no")?;
         #[cfg(target_os = "linux")]
@@ -287,8 +360,10 @@ impl Player {
         let has_video = Arc::new(AtomicBool::new(false));
         let picture_back: Arc<Mutex<Option<Sender<Msg>>>> = Arc::new(Mutex::new(None));
         let vr: Arc<Mutex<Option<VrStatus>>> = Arc::new(Mutex::new(None));
+        let audio: Arc<Mutex<OverrideState>> = Arc::new(Mutex::new(OverrideState::default()));
         let events = {
             let mpv = mpv.clone();
+            let audio = audio.clone();
             let log = log.clone();
             let stop = stop_events.clone();
             let enhance = enhance.clone();
@@ -328,6 +403,13 @@ impl Player {
                                 portals::restarted(in_headset(&vr));
                                 if std::mem::take(&mut behind).tripped {
                                     let _ = mpv.set_property("framedrop", &framedrop);
+                                }
+                                {
+                                    let mut audio = audio.lock().unwrap();
+                                    audio.loaded = mpv.get_string("path");
+                                    if let Err(e) = audio.apply(&mpv) {
+                                        push_log(&log, format!("audio override: {e}"));
+                                    }
                                 }
                                 emit(PlayerEvent::FileLoaded)
                             }
@@ -441,15 +523,32 @@ impl Player {
             enhance,
             has_video,
             vr,
+            audio,
         })
     }
 
     pub fn load(&self, path: &str, start_seconds: Option<f64>) -> Result<(), String> {
-        load_file_range(&self.mpv, path, start_seconds, None, in_headset(&self.vr))
+        load_file_range(&self.mpv, path, start_seconds, None, in_headset(&self.vr), &self.audio)
     }
 
     pub fn media_loader(&self) -> MediaLoader {
-        MediaLoader { mpv: self.mpv.clone(), ytdl: self.ytdl.clone(), vr: self.vr.clone() }
+        MediaLoader { mpv: self.mpv.clone(), ytdl: self.ytdl.clone(), vr: self.vr.clone(), audio: self.audio.clone() }
+    }
+
+    pub fn set_audio_override(&self, wanted: Option<AudioOverride>) {
+        let mut audio = self.audio.lock().unwrap();
+        if audio.wanted == wanted {
+            return;
+        }
+        if let Err(e) = audio.change(&self.mpv, wanted) {
+            push_log(&self.log, format!("audio override: {e}"));
+        }
+    }
+
+    pub fn drop_audio_override(&self) {
+        let mut audio = self.audio.lock().unwrap();
+        audio.wanted = None;
+        audio.applied = None;
     }
 
     pub fn has_video(&self) -> bool {
@@ -493,11 +592,11 @@ impl Player {
     }
 
     pub fn set_volume(&self, volume: f64) -> Result<(), String> {
-        self.mpv.set_property("volume", &(volume.clamp(0.0, 1.0) * 100.0).to_string())
+        self.mpv.set_property("volume", &format!("{:.4}", audio::mpv_volume(volume)))
     }
 
     pub fn volume(&self) -> f64 {
-        self.mpv.get_double("volume").unwrap_or(100.0) / 100.0
+        self.mpv.get_double("volume").map_or(1.0, |v| (v / 100.0).powi(3))
     }
 
     pub fn set_muted(&self, muted: bool) -> Result<(), String> {

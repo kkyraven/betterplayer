@@ -1,5 +1,5 @@
 import type { Chip } from '@shared/portals'
-import type { SpeechFinal, SpeechModelState, SpeechReply, SpeechWord } from '@shared/speech'
+import type { SpeechFinal, SpeechKind, SpeechModelState, SpeechReply, SpeechWord } from '@shared/speech'
 import type { Library } from '../library'
 import type { Models } from '../models'
 import { Endpointer } from './endpoint'
@@ -17,6 +17,7 @@ export interface SpeechDeps {
   voice: SpeechVoice
   vocabulary: () => Vocabulary
   corrections: (chips: readonly Chip[]) => Promise<{ from: string; to: string }[]>
+  replyPrompt: () => Promise<string>
   now?: () => number
 }
 
@@ -34,10 +35,14 @@ interface Session {
   decodedSamples: number
   final: Promise<SpeechFinal> | null
   drop: NodeJS.Timeout | null
+  kind: SpeechKind
   vocabulary: Vocabulary
+  prompt: Promise<string>
 }
 
 const NOTHING: SpeechFinal = { words: [], chips: [] }
+
+const saidWords = (text: string): SpeechWord[] => text.trim().split(/\s+/).filter(Boolean).map((word) => ({ text: word, filter: false }))
 
 export class Speech {
   private session: Session | null = null
@@ -47,11 +52,11 @@ export class Speech {
     this.now = deps.now ?? Date.now
   }
 
-  async chunk(id: string, seq: number, pcm: Int16Array): Promise<SpeechReply> {
+  async chunk(id: string, seq: number, pcm: Int16Array, kind: SpeechKind = 'search'): Promise<SpeechReply> {
     let s = this.session?.id === id ? this.session : null
     if (!s) {
       if (seq !== 0) return { words: [], end: 'silent' }
-      s = this.open(id)
+      s = this.open(id, kind)
     }
     this.keep(s)
     if (s.endpoint.end !== 'none' || seq < s.seq || s.early.has(seq)) return this.reply(s)
@@ -94,12 +99,14 @@ export class Speech {
     if (this.session?.id === id) this.close(this.session)
   }
 
-  private open(id: string): Session {
+  private open(id: string, kind: SpeechKind): Session {
     if (this.session) this.close(this.session)
+    const vocabulary = this.deps.vocabulary()
     const s: Session = {
       id, seq: 0, early: new Map(), pcm: new Int16Array(16_000 * 4), samples: 0, endpoint: new Endpointer(),
       heard: this.deps.ear.reset(), words: [], decoding: false, decodedAt: 0, decodedSamples: 0, final: null,
-      drop: null, vocabulary: this.deps.vocabulary(),
+      drop: null, kind, vocabulary,
+      prompt: kind === 'reply' ? this.deps.replyPrompt().catch(() => '') : Promise.resolve(vocabulary.prompt),
     }
     this.session = s
     return s
@@ -146,9 +153,9 @@ export class Speech {
     s.decoding = true
     s.decodedAt = this.now()
     s.decodedSamples = s.endpoint.samples
-    void this.deps.voice.transcribe(pcm, s.vocabulary.prompt)
+    void s.prompt.then((prompt) => this.deps.voice.transcribe(pcm, prompt))
       .then((text) => {
-        if (this.session === s && !s.final) s.words = voiceChips(voiceWords(text), s.vocabulary.tags).words
+        if (this.session === s && !s.final) s.words = s.kind === 'reply' ? saidWords(text) : voiceChips(voiceWords(text), s.vocabulary.tags).words
       })
       .catch(() => undefined)
       .finally(() => { s.decoding = false })
@@ -157,7 +164,8 @@ export class Speech {
   private async decodeFinal(s: Session): Promise<SpeechFinal> {
     const pcm = this.utterance(s)
     if (!pcm) return NOTHING
-    const text = await this.deps.voice.transcribe(pcm, s.vocabulary.prompt)
+    const text = await this.deps.voice.transcribe(pcm, await s.prompt)
+    if (s.kind === 'reply') return { words: saidWords(text), chips: [], text: text.trim() }
     const { chips, words } = voiceChips(voiceWords(text), s.vocabulary.tags)
     if (!chips.some((c) => c.kind === 'text')) return { words, chips }
     const corrections = await this.deps.corrections(chips).catch(() => [])
@@ -168,17 +176,17 @@ export class Speech {
 export interface SpeechApi {
   model(): SpeechModelState
   download(): void
-  chunk(session: string, seq: number, pcm: Int16Array): Promise<SpeechReply>
+  chunk(session: string, seq: number, pcm: Int16Array, kind?: SpeechKind): Promise<SpeechReply>
   end(session: string): Promise<SpeechFinal>
   cancel(session: string): void
 }
 
-export function voiceSearch(enginePath: string, models: Pick<Models, 'status' | 'download'>, library: Pick<Library, 'tags' | 'index' | 'performerNames' | 'prepareSearch' | 'query'>) {
+export function voiceSearch(enginePath: string, models: Pick<Models, 'status' | 'download'>, library: Pick<Library, 'tags' | 'index' | 'performerNames' | 'prepareSearch' | 'query'>, replyPrompt: () => Promise<string>) {
   const files = new VoiceModels(models)
   const ear = new WorkerEar(enginePath, () => files.files())
   const voice = new WorkerVoice(enginePath, () => files.files())
   const vocabulary = new VocabularyCache(librarySource(library))
-  const speech = new Speech({ ear, voice, vocabulary: () => vocabulary.get(), corrections: (chips) => libraryCorrections(library, chips) })
+  const speech = new Speech({ ear, voice, vocabulary: () => vocabulary.get(), corrections: (chips) => libraryCorrections(library, chips), replyPrompt })
   const api: SpeechApi = {
     model: () => {
       const state = files.state()
@@ -186,7 +194,7 @@ export function voiceSearch(enginePath: string, models: Pick<Models, 'status' | 
       return state
     },
     download: () => void files.download(),
-    chunk: (session, seq, pcm) => speech.chunk(session, seq, pcm),
+    chunk: (session, seq, pcm, kind) => speech.chunk(session, seq, pcm, kind),
     end: (session) => speech.end(session),
     cancel: (session) => speech.cancel(session),
   }

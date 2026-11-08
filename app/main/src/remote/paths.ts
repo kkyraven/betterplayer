@@ -1,11 +1,21 @@
-import { isAbsolute, relative, resolve, sep } from 'node:path'
+import { stat } from 'node:fs/promises'
+import { isAbsolute, parse, relative, resolve, sep } from 'node:path'
 import type { ForwardedChannel } from '@shared/peer'
 import { mediaIdFromUrl, mediaUrl, PATH_CHANNELS } from '@shared/peer'
-import { isPlaylist, type LibraryRoot, type MediaDetail, type MediaPage, type MediaRow } from '@shared/library'
+import { isUrl } from '@shared/remote'
+import { isPlaylist, type LibraryRoot, type MediaDetail, type MediaPage, type MediaRow, type MissingFile } from '@shared/library'
 
 export const contains = (root: string, path: string): boolean => {
   const rel = relative(resolve(root), resolve(path))
   return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+}
+
+export async function whyMissing(path: string, roots: LibraryRoot[]): Promise<MissingFile | null> {
+  if (isUrl(path)) return null
+  if ((await stat(path).catch(() => null))?.isFile()) return null
+  const held = roots.filter((r) => r.kind === 'folder' && contains(r.path, path)).map((r) => r.path)
+  const root = held.sort((x, y) => y.length - x.length)[0] ?? parse(resolve(path)).root
+  return (await stat(root).catch(() => null))?.isDirectory() ? 'file' : 'drive'
 }
 
 const FILE_CHANNELS: readonly ForwardedChannel[] = ['subtitles:find', 'subtitles:read']

@@ -8,8 +8,10 @@ const mocks = vi.hoisted(() => ({
   time: 10000,
   playlistId: null as number | null,
   librarySetState: vi.fn(),
+  estimAudio: false,
 }))
 vi.mock('@/ipc', () => ({ invoke: mocks.invoke }))
+vi.mock('./estimAudio', () => ({ applyEstimAudio: vi.fn(), clearEstimAudio: vi.fn(), estimAudioOn: () => mocks.estimAudio, loadEstimAudio: vi.fn(async () => undefined) }))
 vi.mock('@/state/usage', () => ({ track: vi.fn() }))
 vi.mock('./params', () => ({ plainParam: vi.fn(), pushParams: vi.fn() }))
 vi.mock('./live', () => ({ get: () => ({ timeMs: mocks.time }) }))
@@ -31,6 +33,7 @@ import { usePlayer } from './player'
 
 beforeEach(() => {
   mocks.playlistId = null
+  mocks.estimAudio = false
   mocks.librarySetState.mockClear()
   vi.stubGlobal('window', { setTimeout, clearTimeout })
   vi.stubGlobal('localStorage', { getItem: () => null, setItem: vi.fn() })
@@ -71,6 +74,17 @@ it('shuffled autoplay visits every video once and stops at the end', async () =>
   expect(mocks.setScreen).toHaveBeenCalledTimes(1)
   expect(new Set(mocks.load.mock.calls.map(call => call[0])).size).toBe(4)
   expect(mocks.allIds).not.toHaveBeenCalled()
+})
+
+it('waits on the last frame while estim audio plays, rather than start the next video', async () => {
+  await usePlayer.getState().openPlaylist(7, false)
+  const first = usePlayer.getState().path
+  mocks.estimAudio = true
+  await usePlayer.getState().onEnded()
+  expect(usePlayer.getState().path).toBe(first)
+  mocks.estimAudio = false
+  await usePlayer.getState().onEnded()
+  expect(usePlayer.getState().path).not.toBe(first)
 })
 
 it('opening a separate file clears the playlist sequence', async () => {

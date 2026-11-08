@@ -1,13 +1,14 @@
 import { defaultAdvancedPain } from '@shared/dom-pain'
 import { isFeatureName } from '@shared/usage'
-import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { defaultDomAi, emptyYou, newDom, type ChatMessage, type ChatReply, type ChatToolCall } from '@shared/dom'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { defaultDomAi, emptyYou, newDom, type ChatMessage, type ChatReply, type ChatTool, type ChatToolCall } from '@shared/dom'
 import type { Live } from './live'
 import { usePlayer } from './player'
 type PlayerState = ReturnType<typeof usePlayer.getState>
 
 const m = vi.hoisted(() => ({
   invoke: vi.fn(),
+  vrAllowed: vi.fn(() => true),
   setTags: vi.fn(),
   captureVideo: vi.fn(),
   tags: ['one', 'two', 'three', 'four'],
@@ -17,6 +18,7 @@ const m = vi.hoisted(() => ({
   open: vi.fn(), pause: vi.fn(), play: vi.fn(), seek: vi.fn(),
   replies: [] as ChatReply[],
   held: false,
+  outputs: [] as { id: number; config: { name: string } }[],
   devicesListener: null as ((s: { held: boolean }, prev: { held: boolean }) => void) | null,
   live: { timeMs: 0, durationMs: 120000, seekGeneration: 0, playbackEnded: false },
   path: '/one.mp4',
@@ -27,11 +29,12 @@ const m = vi.hoisted(() => ({
 }))
 vi.mock('@/components/player/stage', () => ({ captureVideo: m.captureVideo }))
 vi.mock('@/ipc', () => ({ invoke: m.invoke }))
+vi.mock('@shared/account', async (actual) => ({ ...(await actual<typeof import('@shared/account')>()), vrAllowed: m.vrAllowed }))
 vi.mock('@/engine/client', () => ({ engine: { haltSensation: m.haltSensation, applyPain: m.applyPain, stopPain: m.stopPain, painState: m.painState, stopSensation: m.stopSensation, startSensation: m.startSensation, resetSensation: m.resetSensation, clearPlaybackEnd: m.clearPlaybackEnd, state: () => ({ seekGeneration: m.live.seekGeneration }) } }))
 vi.mock('@/dom/level', () => ({ applyLevel: vi.fn(), reapplyRanges: vi.fn(), releaseLevel: vi.fn() }))
-vi.mock('./account', () => ({ isUnsubscribed: () => false, isSubscriber: () => true, useAccount: { getState: () => ({}) } }))
+vi.mock('./account', () => ({ isUnsubscribed: () => false, isSubscriber: () => true, useAccount: { getState: () => ({ status: {} }) } }))
 vi.mock('./library', () => ({ useLibrary: { getState: () => ({ tagEdits: m.tagEdits, setTags: m.setTags }) } }))
-vi.mock('./devices', () => ({ outputName: () => 'Toy', useDevices: { getState: () => ({ outputs: [], held: m.held }), subscribe: (fn: typeof m.devicesListener) => { m.devicesListener = fn; return () => { m.devicesListener = null } } } }))
+vi.mock('./devices', () => ({ isEngineOutput: (o: { id: number }) => o.id < 0x80000000, outputName: (c: { name: string }) => c.name, useDevices: { getState: () => ({ outputs: m.outputs, held: m.held }), subscribe: (fn: typeof m.devicesListener) => { m.devicesListener = fn; return () => { m.devicesListener = null } } } }))
 vi.mock('./i18n', () => ({ t: (key: string) => key }))
 vi.mock('./live', () => ({
   get: () => m.live,
@@ -51,7 +54,8 @@ vi.mock('./player', () => ({
 vi.mock('./settings', () => ({ useSettings: { subscribe: () => () => {} } }))
 vi.mock('./ui', () => ({ useUi: { getState: () => ({ setScreen: vi.fn() }) } }))
 
-import { domErrorCode, useDom } from './dom'
+import { windowStage } from '@/dom/stage'
+import { domErrorCode, headsetDom, useDom } from './dom'
 
 const call = (name: string, args: Record<string, unknown>): ChatToolCall => ({ id: crypto.randomUUID(), type: 'function', function: { name, arguments: JSON.stringify(args) } })
 const reply = (...toolCalls: ChatToolCall[]): ChatReply => ({ content: '', toolCalls })
@@ -81,6 +85,7 @@ beforeEach(() => {
   m.paused = false
   m.loaded = true
   m.held = false
+  m.outputs = []
   m.durationMs = 120000
   m.live = { timeMs: 0, durationMs: 120000, seekGeneration: 0, playbackEnded: false }
   m.invoke.mockImplementation(async (channel: string, value: unknown) => {
@@ -102,6 +107,12 @@ it('runs fractional sensation pauses and early starts without changing video pla
   expect(m.pause).not.toHaveBeenCalled()
   expect(m.play).not.toHaveBeenCalled()
   expect(results()).toContain('Sensation paused for 2.5')
+})
+
+it('names only the toys its levels reach, not estim audio', async () => {
+  m.outputs = [{ id: 1, config: { name: 'Handy' } }, { id: 0x80000000, config: { name: 'Estim audio' } }]
+  await start()
+  expect(chatMessages()[0]?.[0]?.content).toContain("user's sex toys (Handy)")
 })
 
 it('leaves the user hold to the user and says so', async () => {
@@ -490,4 +501,112 @@ it('keeps keys per own server address and drops an answer for an address since l
   answers[defaultDomAi().ownUrl]?.({ kind: 'ok', models: ['old'] })
   await asking
   expect(useDom.getState().ownStatus).toBeNull()
+})
+
+describe('in a headset', () => {
+  const names = (at: number) => (m.invoke.mock.calls.filter(([channel]) => channel === 'dom:chat')[at]?.[2] as ChatTool[]).map((tool) => tool.function.name)
+  const said = (content: string, ...toolCalls: ChatToolCall[]): ChatReply => ({ content, toolCalls })
+  beforeEach(() => useDom.setState({ headset: true, replies: [] }))
+  afterEach(() => useDom.setState({ headset: false }))
+
+  it('offers suggest_replies only to a session a headset shows', async () => {
+    useDom.setState({ headset: false })
+    await start()
+    expect(names(0)).not.toContain('suggest_replies')
+    useDom.getState().stop()
+    useDom.setState({ headset: true })
+    m.invoke.mockClear()
+    await start()
+    expect(names(0)).toContain('suggest_replies')
+  })
+
+  it('takes the replies with the words, with no second request', async () => {
+    m.replies.push(said('Good.', call('suggest_replies', { replies: ['Yes', 'More', 'Slower'] })))
+    await useDom.getState().start('dom')
+    await settle()
+    expect(useDom.getState().replies).toEqual(['Yes', 'More', 'Slower'])
+    expect(chatMessages()).toHaveLength(1)
+  })
+
+  it('asks for replies alone when the model spoke without them, leaving the history as it was', async () => {
+    m.replies.push(said('Good.'), said('', call('suggest_replies', { replies: ['Yes', 'More', 'Slower'] })))
+    await useDom.getState().start('dom')
+    await vi.waitFor(() => expect(useDom.getState().replies).toHaveLength(3))
+    expect(names(1)).toEqual(['suggest_replies'])
+    m.replies.push(said('Now.', call('suggest_replies', { replies: ['A', 'B', 'C'] })))
+    useDom.getState().send('Hello')
+    await vi.waitFor(() => expect(useDom.getState().replies).toEqual(['A', 'B', 'C']))
+    expect(chatMessages().at(-1)?.some((message) => String(message.content).includes('Call suggest_replies now'))).toBe(false)
+  })
+
+  it('offers the replies again when the turn fails, so a wearer with no keyboard can retry', async () => {
+    m.replies.push(said('Good.', call('suggest_replies', { replies: ['Yes', 'More', 'Slower'] })))
+    await useDom.getState().start('dom')
+    await settle()
+    m.invoke.mockImplementationOnce(async () => { throw new Error('dom:server') })
+    useDom.getState().send('Yes')
+    await vi.waitFor(() => expect(useDom.getState().replies).toEqual(['Yes', 'More', 'Slower']))
+    expect(useDom.getState().running).toBe(true)
+  })
+
+  it('drops the replies once one is sent or the dom speaks again', async () => {
+    m.replies.push(said('Good.', call('suggest_replies', { replies: ['Yes', 'More', 'Slower'] })))
+    await useDom.getState().start('dom')
+    await settle()
+    useDom.getState().send('Yes')
+    expect(useDom.getState().replies).toEqual([])
+    await settle()
+  })
+
+  it('ends a session on halt with the toys held, so nothing the dom does can start them', async () => {
+    await start()
+    useDom.getState().halt()
+    expect(useDom.getState().running).toBe(false)
+    expect(m.haltSensation).toHaveBeenCalledOnce()
+    expect(m.resetSensation).toHaveBeenCalledOnce()
+    expect(m.paused).toBe(true)
+  })
+
+  it('tells a stage that plays elsewhere to pause even when it cannot see the video', async () => {
+    const stage = { ...windowStage, video: () => null, generation: () => 0, watch: () => () => {}, show: () => {}, halted: vi.fn(), pause: vi.fn(), open: vi.fn(async () => {}), play: vi.fn() }
+    m.replies.push(reply())
+    await useDom.getState().start('dom', stage)
+    await settle()
+    useDom.getState().halt()
+    expect(stage.pause).toHaveBeenCalledOnce()
+    expect(stage.halted).toHaveBeenCalledOnce()
+  })
+
+  it('holds the dom to a free account\'s headset limit', async () => {
+    m.vrAllowed.mockReturnValue(false)
+    await start(call('play_video', { id: 1 }), call('queue_video', { id: 1, start_seconds: 1, end_seconds: 3 }))
+    expect(m.open).not.toHaveBeenCalled()
+    expect(results()).toContain('over the free length')
+    m.vrAllowed.mockReturnValue(true)
+  })
+})
+
+describe('headsetDom', () => {
+  const state = () => useDom.getState()
+  it('shows the last words and the level, and no session once stopped', async () => {
+    await start()
+    useDom.setState({ lines: [{ id: 1, kind: 'dom', text: 'Good.' }, { id: 2, kind: 'act', icon: 'level', text: 'Level', value: '3' }], level: 3, pleasurePain: { ...state().pleasurePain, enabled: true } })
+    expect(headsetDom(state()).session).toMatchObject({ name: 'Vale', line: 'Good.', said: 1, level: 3 })
+    useDom.getState().stop()
+    expect(headsetDom(state()).session).toBeNull()
+    expect(headsetDom(state()).doms).toEqual([{ id: 'dom', name: 'Vale' }])
+  })
+
+  it('says why a session ended on its own', () => {
+    useDom.setState({ running: false, note: 'Out of allowance' })
+    expect(headsetDom(state()).note).toBe('Out of allowance')
+  })
+
+  it('does not say an old error again after a Stop', async () => {
+    useDom.setState({ note: null })
+    await start()
+    useDom.setState({ lines: [{ id: 1, kind: 'error', text: 'The AI did not answer.' }] })
+    useDom.getState().stop()
+    expect(headsetDom(state()).note).toBeNull()
+  })
 })

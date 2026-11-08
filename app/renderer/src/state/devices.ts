@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { create } from 'zustand'
 import { track } from '@/state/usage'
-import type { OutputState, OutputStats, RampConfig } from 'bp-engine'
+import type { EstimAudioState, OutputState, OutputStats, RampConfig } from 'bp-engine'
 import { OPENSHOCK_PULSE_MS, type FeatureLevel, type OpenShockTrigger, type OutputConfig, type OutputProfile, type ParamAxisId, type ParamSourceSettings, type RampSettings, type Settings, type VibrationSettings } from '@shared/settings'
 import { AXIS_IDS, type AxisId } from '@shared/axes'
 import { engine } from '@/engine/client'
@@ -33,12 +33,15 @@ interface DevicesState {
   setTrigger: (id: number, trigger: OpenShockTrigger) => Promise<void>
   setVibration: (id: number, vibration: VibrationSettings | null) => Promise<void>
   setDelay: (id: number, ms: number) => void
+  setVolume: (id: number, volume: number) => void
+  setAudioDevice: (id: number, device: { name: string; label: string }) => Promise<void>
   setRamp: (id: number, ramp: RampSettings) => Promise<void>
   restartRamp: (id: number) => void
   setParam: (id: number, axis: ParamAxisId, source: ParamSourceSettings) => Promise<void>
   setFeatureAxis: (id: number, feature: number, axis: AxisId | null) => Promise<void>
   setFeatureLevel: (id: number, feature: number, level: FeatureLevel | null) => void
   setStates: (outputs: OutputState[]) => void
+  setAudioState: (state: EstimAudioState) => void
 }
 
 export function pushStopOnPause(on: boolean) {
@@ -62,11 +65,33 @@ function pushFeatureAxes(id: number, config: OutputConfig) {
   for (const [feature, level] of Object.entries(config.featureLevels ?? {})) engine.setOutputFeatureLevel(id, Number(feature), level)
 }
 
-let lockedId = 0x80000000
+const OWN_IDS = 0x80000000
+let ownId = OWN_IDS
+
+export function isEngineOutput(output: ConfiguredOutput): boolean {
+  return output.id < OWN_IDS
+}
+
+export function audioOutputOf(outputs: ConfiguredOutput[]): ConfiguredOutput | undefined {
+  return outputs.find((o) => o.config.kind === 'audio')
+}
+
+function pushAudio(config: OutputConfig | null) {
+  engine.setEstimAudioOutput({ device: config?.device, delayMs: config?.delayMs ?? 0, volume: config?.volume ?? 1 })
+}
+
+function audioStatus(status: string): string {
+  if (status === 'error') return 'error'
+  return status === 'idle' || status === 'ready' || status === 'playing' ? 'connected' : 'connecting'
+}
 
 function connect(config: OutputConfig): ConfiguredOutput {
   config = { ...config, id: config.id ?? crypto.randomUUID() }
-  if (config.kind === 'pishock' && !isPremium(useAccount.getState())) return { id: lockedId++, config }
+  if (config.kind === 'audio') {
+    pushAudio(config)
+    return { id: ownId++, config }
+  }
+  if (config.kind === 'pishock' && !isPremium(useAccount.getState())) return { id: ownId++, config }
   const { kind, path, baud, host, port, url, profile, device, address, strengthA, strengthB, key, appKey, hosting, token, shocker, trigger, username, userId, clientId } = config
   const id = engine.connect({ kind, path, baud, host, port, url, profile, name: device, address, strengthA, strengthB, key, appKey, hosting, token, shocker, trigger, username, userId, clientId })
   pushRestim(id, config)
@@ -103,6 +128,8 @@ export function outputName(config: OutputConfig): string {
       return 'OpenShock'
     case 'pishock':
       return 'PiShock'
+    case 'audio':
+      return t('estimAudio.name')
   }
 }
 
@@ -114,6 +141,9 @@ export const useDevices = create<DevicesState>()((set, get) => {
   const saved = (s: Settings): Settings => ({ ...s, devices: { ...s.devices, outputs: get().outputs.map((o) => o.config) } })
   const persist = () => useSettings.getState().update(saved)
   const persistDebounced = () => useSettings.getState().updateDebounced(saved)
+  const seedAudio = () => {
+    if (audioOutputOf(get().outputs)) get().setAudioState(engine.estimAudioState())
+  }
   return {
     outputs: [],
     states: {},
@@ -128,22 +158,27 @@ export const useDevices = create<DevicesState>()((set, get) => {
       for (const c of configs) track(`device.${c.kind}`)
       const outputs = configs.map(connect)
       set({ outputs, selectedId: outputs[0]?.id ?? null })
+      seedAudio()
       if (configs.some(c => !c.id)) void persist()
       pushParams()
     },
     add: async (config) => {
       if (config.kind === 'pishock' && !isPremium(useAccount.getState())) throw new Error(t('common.supporterOnly'))
+      if (config.kind === 'audio' && audioOutputOf(get().outputs)) throw new Error('Estim audio is already added')
       const output = connect(config)
       set((s) => ({ outputs: [...s.outputs, output], selectedId: output.id }))
+      seedAudio()
       pushParams()
       await persist()
       return output.id
     },
     remove: async (id) => {
-      engine.disconnect(id)
+      if (get().outputs.find((o) => o.id === id)?.config.kind === 'audio') pushAudio(null)
+      else engine.disconnect(id)
       set((s) => {
         const outputs = s.outputs.filter((o) => o.id !== id)
-        return { outputs, selectedId: s.selectedId === id ? (outputs[0]?.id ?? null) : s.selectedId }
+        const { [id]: _removed, ...states } = s.states
+        return { outputs, states, selectedId: s.selectedId === id ? (outputs[0]?.id ?? null) : s.selectedId }
       })
       pushParams()
       await persist()
@@ -151,6 +186,15 @@ export const useDevices = create<DevicesState>()((set, get) => {
     reconnect: (id) => {
       const current = get().outputs.find((o) => o.id === id)
       if (!current) return
+      if (current.config.kind === 'audio') {
+        try {
+          engine.estimAudioDevices()
+        } catch (error) {
+          console.warn('estim audio devices', error)
+        }
+        pushAudio(current.config)
+        return seedAudio()
+      }
       engine.disconnect(id)
       const output = connect(current.config)
       set((s) => ({
@@ -208,9 +252,28 @@ export const useDevices = create<DevicesState>()((set, get) => {
       await persist()
     },
     setDelay: (id, ms) => {
-      engine.setOutputDelay(id, ms)
       set((s) => ({ outputs: s.outputs.map((o) => (o.id === id ? { ...o, config: { ...o.config, delayMs: ms || undefined } } : o)) }))
+      const output = get().outputs.find((o) => o.id === id)
+      if (output?.config.kind === 'audio') pushAudio(output.config)
+      else engine.setOutputDelay(id, ms)
       persistDebounced()
+    },
+    setVolume: (id, volume) => {
+      const output = get().outputs.find((o) => o.id === id)
+      if (output?.config.kind !== 'audio') return
+      const config = { ...output.config, volume: Math.round(Math.max(0, Math.min(1, volume)) * 100) / 100 }
+      set((s) => ({ outputs: s.outputs.map((o) => (o.id === id ? { ...o, config } : o)) }))
+      pushAudio(config)
+      persistDebounced()
+    },
+    setAudioDevice: async (id, device) => {
+      const output = get().outputs.find((o) => o.id === id)
+      if (output?.config.kind !== 'audio') return
+      const config = { ...output.config, device: device.name, label: device.label }
+      set((s) => ({ outputs: s.outputs.map((o) => (o.id === id ? { ...o, config } : o)) }))
+      pushAudio(config)
+      seedAudio()
+      await persist()
     },
     setTrigger: async (id, trigger) => {
       engine.setOpenshockTrigger(id, trigger)
@@ -221,7 +284,25 @@ export const useDevices = create<DevicesState>()((set, get) => {
       set((s) => ({ outputs: s.outputs.map((o) => (o.id === id ? { ...o, config: { ...o.config, name: name.trim() || undefined } } : o)) }))
       await persist()
     },
-    setStates: (outputs) => set({ states: Object.fromEntries(outputs.map((o) => [o.id, o])) }),
+    setStates: (outputs) =>
+      set((s) => {
+        const states: Record<number, OutputState> = Object.fromEntries(outputs.map((o) => [o.id, o]))
+        const audio = audioOutputOf(s.outputs)
+        const kept = audio && s.states[audio.id]
+        if (kept) states[kept.id] = kept
+        return { states }
+      }),
+    setAudioState: (raw) => {
+      const { outputs, states } = get()
+      const output = audioOutputOf(outputs)
+      if (!output) return
+      const status = audioStatus(raw.status)
+      const error = status === 'error' ? raw.error : undefined
+      const address = output.config.label ?? output.config.device ?? ''
+      const current = states[output.id]
+      if (current && current.status === status && current.error === error && current.address === address) return
+      set({ states: { ...states, [output.id]: { id: output.id, kind: 'audio', address, profile: 'stroker', status, error, features: [], sentValues: {} } } })
+    },
   }
 })
 
@@ -270,7 +351,7 @@ const HOSTED_TEST_MS = 5000
 
 export function testMove(output: ConfiguredOutput): Promise<void> {
   const profile = output.config.profile
-  if (output.config.kind === 'pishock' && !isPremium(useAccount.getState())) return Promise.resolve()
+  if (!isEngineOutput(output)) return Promise.resolve()
   if (output.config.kind === 'openshock' || output.config.kind === 'pishock') {
     engine.testOutput(output.id)
     return new Promise((resolve) => window.setTimeout(resolve, OPENSHOCK_PULSE_MS))

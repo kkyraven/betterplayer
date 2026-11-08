@@ -1,4 +1,4 @@
-import type { MediaQuery } from './library'
+import type { MediaQuery, MissingFile } from './library'
 import type { ProjectionKind } from './projection'
 
 const DEG = Math.PI / 180
@@ -463,14 +463,16 @@ export const CONTINUE_QUERY: MediaQuery = { section: 'continue', sort: 'lastPlay
 export const VR_ROW_QUERY: MediaQuery = { section: 'vr', sort: 'recommended', desc: true, filters: {}, limit: VR_PORTAL.rows.limit, offset: 0 }
 export const RECOMMENDED_QUERY: MediaQuery = { section: 'all', sort: 'recommended', desc: true, filters: {}, limit: VR_PORTAL.rows.limit, offset: 0, continueRow: true }
 
-export function shelfRows<R extends { id: number }>(input: { continueRows: R[]; vrRows: R[]; recommended: R[]; playing: R | null }): { top: 'continue' | 'vr'; topRows: R[]; bottomRows: R[] } {
+export function shelfRows<R extends { id: number }>(input: { continueRows: R[]; vrRows: R[]; recommended: R[]; playing: R | null }): { top: 'continue' | 'vr'; bottom: 'vr' | 'recommended'; topRows: R[]; bottomRows: R[] } {
   const { continueRows, vrRows, recommended, playing } = input
   const top = continueRows.length === 0 && playing === null ? 'vr' : 'continue'
   const topRows = top === 'vr'
     ? vrRows.slice(0, VR_PORTAL.rows.limit)
     : [...(playing ? [playing] : []), ...continueRows.filter((r) => r.id !== playing?.id)].slice(0, VR_PORTAL.rows.limit)
   const shown = new Set(topRows.map((r) => r.id))
-  return { top, topRows, bottomRows: recommended.filter((r) => !shown.has(r.id)) }
+  const vrLeft = vrRows.filter((r) => !shown.has(r.id))
+  const bottom = top === 'continue' && vrLeft.length > 0 ? 'vr' : 'recommended'
+  return { top, bottom, topRows, bottomRows: bottom === 'vr' ? vrLeft : recommended.filter((r) => !shown.has(r.id)) }
 }
 
 export const lockedFor = (durationMs: number, freeMs: number | null) => freeMs !== null && durationMs > freeMs
@@ -538,7 +540,7 @@ export interface PortalStatus {
   diveKey: string | null
   liveAtMs: number | null
   failedKey: string | null
-  error: { key: string; atMs: number } | null
+  error: { key: string; atMs: number; why: MissingFile | null } | null
   playing: { path: string; mediaId: number | null; positionMs: number; projection: ProjectionKind; title: string } | null
   offer: boolean
   offerCheck: { checking: boolean; message: string | null }

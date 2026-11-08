@@ -169,7 +169,9 @@ const rowCases = [
   { name: 'dedupe', continueRows: r(1, 2), vrRows: r(5), recommended: r(2, 3, 4), playing: null },
   { name: 'playing moved first', continueRows: r(1, 2, 3), vrRows: [], recommended: r(3, 4), playing: { id: 3 } },
   { name: 'playing prepended', continueRows: r(1, 2), vrRows: [], recommended: r(9, 4), playing: { id: 9 } },
-  { name: 'empty continue gives VR', continueRows: [], vrRows: r(5, 6), recommended: r(6, 7), playing: null },
+  { name: 'VR row skips the top row', continueRows: r(1, 5), vrRows: r(5, 6), recommended: r(7), playing: null },
+  { name: 'no VR left gives Recommended', continueRows: r(5), vrRows: r(5), recommended: r(5, 7), playing: null },
+  { name: 'empty continue gives VR then Recommended', continueRows: [], vrRows: r(5, 6), recommended: r(6, 7), playing: null },
   { name: 'empty continue while playing', continueRows: [], vrRows: r(5), recommended: r(8, 5), playing: { id: 8 } },
 ]
 const rows = () => rowCases.map(({ name, ...input }) => ({ name, input, output: shelfRows(input) }))
@@ -469,16 +471,22 @@ describe('rows', () => {
   const out = (name: string) => rows().find((c) => c.name === name)!.output
   const idsOf = (rs: { id: number }[]) => rs.map((x) => x.id)
 
-  it('puts the playing video first and keeps Recommended clear of the top row', () => {
-    expect(idsOf(out('dedupe').bottomRows)).toEqual([3, 4])
+  it('puts the playing video first and keeps the bottom row clear of the top row', () => {
     expect(idsOf(out('playing moved first').topRows)).toEqual([3, 1, 2])
+    expect(idsOf(out('playing moved first').bottomRows)).toEqual([4])
     expect(idsOf(out('playing prepended').topRows)).toEqual([9, 1, 2])
     expect(idsOf(out('playing prepended').bottomRows)).toEqual([4])
   })
 
   it('shows VR on top only when nothing is continued or playing', () => {
-    expect(out('empty continue gives VR')).toMatchObject({ top: 'vr', topRows: [{ id: 5 }, { id: 6 }], bottomRows: [{ id: 7 }] })
-    expect(out('empty continue while playing')).toMatchObject({ top: 'continue', topRows: [{ id: 8 }], bottomRows: [{ id: 5 }] })
+    expect(out('empty continue gives VR then Recommended')).toMatchObject({ top: 'vr', bottom: 'recommended', topRows: [{ id: 5 }, { id: 6 }], bottomRows: [{ id: 7 }] })
+    expect(out('empty continue while playing')).toMatchObject({ top: 'continue', bottom: 'vr', topRows: [{ id: 8 }], bottomRows: [{ id: 5 }] })
+  })
+
+  it('shows VR below Continue when a VR video is not already on top, else Recommended', () => {
+    expect(out('dedupe')).toMatchObject({ bottom: 'vr', bottomRows: [{ id: 5 }] })
+    expect(out('VR row skips the top row')).toMatchObject({ bottom: 'vr', bottomRows: [{ id: 6 }] })
+    expect(out('no VR left gives Recommended')).toMatchObject({ bottom: 'recommended', bottomRows: [{ id: 7 }] })
   })
 })
 

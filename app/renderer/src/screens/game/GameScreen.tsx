@@ -13,7 +13,7 @@ import { Switch } from '@/components/ui/Switch'
 import { invoke } from '@/ipc'
 import { cx } from '@/lib/cx'
 import { isFree, useAccount } from '@/state/account'
-import { outputName, useDevices } from '@/state/devices'
+import { isEngineOutput, outputName, useDevices } from '@/state/devices'
 import { hasSystemAudio, useGame } from '@/state/game'
 import { useT } from '@/state/i18n'
 import { useSettings } from '@/state/settings'
@@ -230,7 +230,7 @@ function LiveLine({ rhythm, sourceLabel }: { rhythm: boolean; sourceLabel: strin
   const beat = useTracking((s) => s.beat)
   const outputs = useDevices((s) => s.outputs)
   const states = useDevices((s) => s.states)
-  const device = outputs.find((o) => states[o.id]?.status === 'connected')
+  const device = outputs.find((o) => isEngineOutput(o) && states[o.id]?.status === 'connected')
   const beatText = beat?.status === 'ready' ? null : beat?.status === 'error' ? (beat.error ?? t('tracking.bar.noBeats')) : t('tracking.bar.analysingAudio')
   return (
     <span className="game-live">

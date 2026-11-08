@@ -6,6 +6,8 @@ import { useSettings } from './settings'
 
 let followed: PerVideoSettings | null = null
 
+export const followedAxis = (id: AxisId): AxisSettings | undefined => followed?.axes[id]
+
 export function pushAxisToEngine(id: AxisId, settings: AxisSettings) {
   if (!usePlayer.getState().video.axes[id] && !followed?.axes[id]) engine.setAxis(id, settings)
 }

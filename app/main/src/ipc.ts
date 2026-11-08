@@ -22,13 +22,16 @@ import { Models } from './models'
 import { voiceSearch } from './speech'
 import { isVoiceModel } from './speech/models'
 import { findSubtitles, readSubtitles } from './subtitles'
+import { findEstimAudio } from './estimAudio'
 import { readTags } from './tags'
 import type { Account } from './account'
 import { kinkyravenModels } from './censor/catalog'
+import { domReplyPrompt } from '@shared/dom'
 import type { Dom } from './dom'
 import type { RemoteClient } from './remote/client'
 import type { RemoteServer } from './remote/server'
 import { allowThroughFirewall, firewallBlocks } from './remote/firewall'
+import { whyMissing } from './remote/paths'
 import type { SettingsStore } from './settings/store'
 import type { Updater } from './update'
 import type { VrHost } from './vr/host'
@@ -73,6 +76,15 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
         { name: t('main.dialog.video'), extensions: [...VIDEO_EXTENSIONS] },
         { name: t('main.dialog.audio'), extensions: [...AUDIO_EXTENSIONS] },
       ],
+    })
+    return result.canceled ? null : (result.filePaths[0] ?? null)
+  })
+
+  handle('dialog:openEstimAudio', async (video) => {
+    const result = await dialog.showOpenDialog(win, {
+      defaultPath: dirname(video),
+      properties: ['openFile'],
+      filters: [{ name: t('main.dialog.audio'), extensions: [...AUDIO_EXTENSIONS] }],
     })
     return result.canceled ? null : (result.filePaths[0] ?? null)
   })
@@ -193,10 +205,10 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   handle('models:remove', (file) => models.remove(file))
   handle('models:cancel', (id) => models.cancel(id))
 
-  const voice = voiceSearch(enginePath, models, library)
+  const voice = voiceSearch(enginePath, models, library, async () => domReplyPrompt(await dom.you(), dom.list()))
   handle('speech:model', () => voice.api.model())
   handle('speech:download', () => voice.api.download())
-  handle('speech:chunk', (session, seq, pcm) => voice.api.chunk(session, seq, pcm))
+  handle('speech:chunk', (session, seq, pcm, kind) => voice.api.chunk(session, seq, pcm, kind))
   handle('speech:end', (session) => voice.api.end(session))
   handle('speech:cancel', (session) => voice.api.cancel(session))
   remote.setSpeech(voice.api)
@@ -248,6 +260,7 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   handle('game:openScreenAccess', () => game.openScreenAccess())
   handle('media:tags', (path) => readTags(path))
   handle('subtitles:find', (video) => findSubtitles(video))
+  handle('estim:find', (video) => findEstimAudio(video))
   handle('subtitles:read', (path) => readSubtitles(path))
   win.on('enter-full-screen', () => {
     send(win, 'window:fullscreen', true)
@@ -426,6 +439,7 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   handle('passthrough:sample', (path, timeSec, u, v) => library.samplePassthrough(path, timeSec, u, v))
   handle('library:suggestions', (id) => library.suggestions(id))
   handle('library:scriptFolders', (path) => library.scriptFolders(path))
+  handle('library:missing', (path) => whyMissing(path, library.roots()))
   handle('library:byPath', (path) => library.byPath(path))
   handle('library:byTitle', (title) => library.byTitle(title))
   handle('library:folders', () => library.folders())
@@ -588,8 +602,11 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   })
   remote.setHeadsetEmitter((event, data) => send(win, event, data))
   handle('remote:status', () => remote.status())
+  handle('quest:reencoded', (mediaId) => remote.reencoded(mediaId))
+  handle('quest:frames', (want) => remote.wantFrames(want))
   handle('remote:publish', (state) => remote.publish(state))
   handle('remote:toys', (toys, host) => remote.setToys(toys, host))
+  handle('remote:dom', (state, commands, host) => remote.setDom(state, commands, host))
   handle('remote:censor', (look) => {
     remote.setCensor(look)
     const before = censorKey()

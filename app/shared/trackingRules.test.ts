@@ -168,6 +168,17 @@ describe('resolve', () => {
     expect(sources(game.axes)).toBe('video video video video video off')
     expect(game.start).toBe(true)
   })
+
+  it('tracks a headset video by the player rules, on the sources it can play without picture or audio', () => {
+    const headset = (patch: Partial<VideoResolveInput> = {}) => player({ side: 'headset', ...patch })
+    expect(sources(resolve(headset()).axes)).toBe(MOTION)
+    expect(resolve(headset({ scripted: axisSet('L0', 'L1', 'L2', 'R1', 'R2') })).start).toBe(false)
+    expect(sources(resolve(headset({ video: { own: { L0: { source: 'hero' }, L2: { source: 'beat' } } } })).axes)).toBe(MOTION)
+    expect(resolve(headset({ music: pmv })).axes.L0.source).toBe('ai-motion')
+    expect(resolve(headset({ rules: rules({ fill: 'off' }) })).start).toBe(false)
+    const zones = { enabled: true, zones: [newZone({ x: 0.1, y: 0.1, w: 0.2, h: 0.2 })] }
+    expect(resolve(headset({ scripted: axisSet('L0', 'L1', 'L2', 'R1', 'R2'), video: { own: {}, zones } })).start).toBe(false)
+  })
 })
 
 describe('changeRules', () => {

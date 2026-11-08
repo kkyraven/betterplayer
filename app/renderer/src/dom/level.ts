@@ -5,13 +5,14 @@ import type { AxisId } from '@shared/axes'
 import { painOutput, windowAround, type PleasurePain } from '@shared/dom'
 import { defaultAxisSettings, type AxisSettings, type ParamAxisId } from '@shared/settings'
 import { engine } from '@/engine/client'
+import { followedAxis } from '@/state/axisDefaults'
 import { holdEstim } from '@/state/estim'
 import { holdParams, plainParam } from '@/state/params'
 import { usePlayer } from '@/state/player'
 import { useSettings } from '@/state/settings'
 
 function plainAxis(id: AxisId): AxisSettings {
-  return usePlayer.getState().video.axes[id] ?? useSettings.getState().settings?.axesDefault[id] ?? defaultAxisSettings(id)
+  return usePlayer.getState().video.axes[id] ?? followedAxis(id) ?? useSettings.getState().settings?.axesDefault[id] ?? defaultAxisSettings(id)
 }
 
 let ranges: Partial<Record<AxisId, [number, number]>> = {}

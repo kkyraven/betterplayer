@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { IpcEvents } from '@shared/ipc'
 import type { MediaDetail } from '@shared/library'
 import { PASSTHROUGH_DEFAULTS, resolvePassthrough, type PassthroughSettings } from '@shared/passthrough'
@@ -12,7 +12,8 @@ import { resolveProjection } from '@shared/projection'
 import { QUEST_DISCOVERY_PORT, type QuestBeacon, type QuestPairPrompt, type QuestPaired, type QuestScene, type QuestToys } from '@shared/quest'
 import type { PerVideoSettings, Settings } from '@shared/settings'
 import type { Library } from '../library'
-import { peerHost, readHello, readPosition, readSample, readToyCommand, resumePosition } from './quest'
+import { peerHost, readDomRequest, readHello, readPosition, readSample, readToyCommand, resumePosition } from './quest'
+import { QuestStreams } from './questStream'
 import { NUDGE_MS, RemoteServer } from './server'
 
 vi.mock('electron', () => ({ app: {} }))
@@ -67,9 +68,15 @@ describe('request bodies', () => {
     expect(readToyCommand({ kind: 'restimVolume', change: 'up' })).toEqual({ kind: 'restimVolume', change: 'up' })
     expect(readToyCommand({ kind: 'restimVolume', change: 1.5 })).toEqual({ kind: 'restimVolume', change: 1 })
     expect(readToyCommand({ kind: 'restimVolume', value: 0.5 })).toBeNull()
+    expect(readToyCommand({ kind: 'audioVolume', change: 'up' })).toEqual({ kind: 'audioVolume', change: 'up' })
+    expect(readToyCommand({ kind: 'audioVolume', change: 0.456 })).toEqual({ kind: 'audioVolume', change: 0.46 })
+    expect(readToyCommand({ kind: 'audioVolume', change: 'down' })).toBeNull()
     expect(readToyCommand({ kind: 'coyote', id: 'c1', channel: 'b', change: 999 })).toEqual({ kind: 'coyote', id: 'c1', channel: 'b', change: 200 })
     expect(readToyCommand({ kind: 'coyote', id: 'c1', channel: 'a', change: 'down' })).toBeNull()
     expect(readToyCommand({ kind: 'coyote', id: 'c1', channel: 'c', change: 40 })).toBeNull()
+    expect(readToyCommand({ kind: 'tracking', mediaId: 7, on: false })).toEqual({ kind: 'tracking', mediaId: 7, on: false })
+    expect(readToyCommand({ kind: 'tracking', mediaId: 7, on: 1 })).toBeNull()
+    expect(readToyCommand({ kind: 'tracking', on: true })).toBeNull()
     expect(readToyCommand('intensity')).toBeNull()
   })
 
@@ -79,7 +86,10 @@ describe('request bodies', () => {
   })
 })
 
-const ROW = { id: 7, path: 'D:/v/clip MKX200.mp4', title: 'clip MKX200', durationMs: 60_000, width: 5760, height: 2880, projection: 'fisheye', axes: ['L0'], heat: [0.5, 1] } as unknown as MediaDetail
+const FILES = mkdtempSync(join(tmpdir(), 'bp-quest-'))
+writeFileSync(join(FILES, 'clip MKX200.mp4'), '')
+afterAll(() => rmSync(FILES, { recursive: true, force: true }))
+const ROW = { id: 7, path: join(FILES, 'clip MKX200.mp4'), title: 'clip MKX200', durationMs: 60_000, width: 5760, height: 2880, projection: 'fisheye', axes: ['L0'], heat: [0.5, 1] } as unknown as MediaDetail
 const OVERRIDE: PerVideoSettings['projection'] = { kind: 'equirect180', layout: 'ou', fov: 180, arc: 200, swapEyes: true }
 
 const freePort = () =>
@@ -105,9 +115,10 @@ describe('/quest routes', () => {
       projection: async (path: string) => resolveProjection({ name: 'clip MKX200', width: 5760, height: 2880, user: saved[path]?.projection }),
       passthrough: async (_path: string, settings: PassthroughSettings | undefined) => resolvePassthrough(settings, 'clip MKX200', { key: 0x00b140, candidates: [] }, settings?.mode === 'ai'),
       samplePassthrough: async (_path: string, timeSec: number, u: number, v: number) => (timeSec === 12.5 && u === 0.25 && v === 1 ? 0xd02020 : null),
+      roots: () => [],
     } as unknown as Library
     const port = await freePort()
-    server = new RemoteServer(library, port)
+    server = new RemoteServer(library, port, undefined, new QuestStreams({ encoder: async () => false }))
     server.setApi(async (channel, args) => {
       if (channel === 'video:get') return saved[String(args[0])] ?? null
       if (channel === 'video:set') saved[String(args[0])] = args[1] as PerVideoSettings
@@ -245,7 +256,7 @@ describe('/quest routes', () => {
   it("answers the window's toys and passes a toy change on with the sender as host", async () => {
     expect((await fetch(`${base}/quest/toys`)).status).toBe(401)
     expect(await (await fetch(`${base}/quest/toys`, { headers: auth })).json()).toEqual({ outputs: [], video: null, estim: [] })
-    const toys: QuestToys = { outputs: [{ id: 'a1b2', name: 'Handy', connected: true }], video: { mediaId: 7, intensity: 1.2, offsetMs: -40, range: { min: 0.1, max: 0.9 } }, estim: [{ kind: 'restim', volume: 0.6 }] }
+    const toys: QuestToys = { outputs: [{ id: 'a1b2', name: 'Handy', connected: true }], video: { mediaId: 7, intensity: 1.2, offsetMs: -40, range: { min: 0.1, max: 0.9 }, tracking: true }, estim: [{ kind: 'restim', volume: 0.6 }] }
     server.setToys(toys, '10.0.0.9')
     expect(await (await fetch(`${base}/quest/toys`, { headers: auth })).json()).toEqual({ ...toys, video: null, estim: [] })
     server.setToys(toys, '127.0.0.1')
@@ -281,9 +292,9 @@ describe('pairing', () => {
 
   beforeEach(async () => {
     prompts = []
-    const library = { media: (id: number) => (id === ROW.id ? ROW : null), videoSettings: () => null, projection: async () => resolveProjection({ name: 'clip', width: 0, height: 0 }), passthrough: async () => resolvePassthrough(undefined, 'clip', null, false) } as unknown as Library
+    const library = { media: (id: number) => (id === ROW.id ? ROW : null), videoSettings: () => null, projection: async () => resolveProjection({ name: 'clip', width: 0, height: 0 }), passthrough: async () => resolvePassthrough(undefined, 'clip', null, false), roots: () => [] } as unknown as Library
     const port = await freePort()
-    server = new RemoteServer(library)
+    server = new RemoteServer(library, undefined, undefined, new QuestStreams({ encoder: async () => false }))
     server.pairing.setEmitters(
       () => {},
       (list) => (prompts = list),
@@ -386,5 +397,17 @@ describe('nudge', () => {
     vi.advanceTimersByTime(10_000)
     while (got.length === 0) await settle()
     expect(got[0]).toMatchObject({ app: 'betterplayer', id: server.pairing.id, port, paired: true })
+  })
+})
+
+describe('readDomRequest', () => {
+  it('takes a start and a reply, trimmed and held to a length', () => {
+    expect(readDomRequest({ kind: 'start', domId: 'd1' })).toEqual({ kind: 'start', domId: 'd1' })
+    expect(readDomRequest({ kind: 'send', text: ' Yes ' })).toEqual({ kind: 'send', text: 'Yes' })
+    expect((readDomRequest({ kind: 'send', text: 'x'.repeat(9000) }) as { text: string }).text).toHaveLength(2000)
+  })
+
+  it('refuses anything else', () => {
+    for (const bad of [null, [], { kind: 'stop' }, { kind: 'start' }, { kind: 'send', text: '  ' }, { kind: 'send', text: 4 }]) expect(readDomRequest(bad)).toBeNull()
   })
 })

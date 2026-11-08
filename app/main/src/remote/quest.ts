@@ -3,7 +3,7 @@ import { clampToyCommand } from '@shared/headsetToys'
 import type { MediaRow } from '@shared/library'
 import type { ResolvedPassthrough } from '@shared/passthrough'
 import type { ResolvedProjection } from '@shared/projection'
-import { QUEST_PROTOCOL, type QuestBeacon, type QuestHello, type QuestSample, type QuestScene, type QuestToyCommand } from '@shared/quest'
+import { QUEST_PROTOCOL, type QuestBeacon, type QuestDomRequest, type QuestHello, type QuestSample, type QuestScene, type QuestSceneAudio, type QuestStream, type QuestToyCommand } from '@shared/quest'
 
 const TEXT_LIMIT = 64
 
@@ -11,8 +11,8 @@ export function questBeacon(id: string, port: number, paired: boolean, name = ho
   return { app: 'betterplayer', v: QUEST_PROTOCOL, id, name, port, paired }
 }
 
-export function questScene(row: MediaRow, { projection, source }: ResolvedProjection, resumeMs: number, base: string, passthrough: ResolvedPassthrough): QuestScene {
-  return { id: row.id, title: row.title, url: `${base}/media/${row.id}`, durationMs: row.durationMs, resumeMs, projection, projectionSource: source, width: row.width, height: row.height, axes: row.axes, heat: row.heat, passthrough }
+export function questScene(row: MediaRow, { projection, source }: ResolvedProjection, resumeMs: number, base: string, passthrough: ResolvedPassthrough, stream?: QuestStream, audio?: QuestSceneAudio): QuestScene {
+  return { id: row.id, title: row.title, url: `${base}/media/${row.id}`, durationMs: row.durationMs, resumeMs, projection, projectionSource: source, width: row.width, height: row.height, axes: row.axes, heat: row.heat, passthrough, ...(stream ? { stream } : {}), ...(audio ? { audio } : {}) }
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -42,17 +42,28 @@ export function readSample(body: unknown): QuestSample | null {
   return { timeSec, u: unit(u), v: unit(v) }
 }
 
+const REPLY_LIMIT = 2000
+
+export function readDomRequest(body: unknown): QuestDomRequest | null {
+  if (!isRecord(body)) return null
+  const { kind, domId, text } = body
+  if (kind === 'start') return isId(domId) ? { kind, domId } : null
+  if (kind === 'send' && typeof text === 'string' && text.trim()) return { kind, text: text.trim().slice(0, REPLY_LIMIT) }
+  return null
+}
+
 export function readToyCommand(body: unknown): QuestToyCommand | null {
   if (!isRecord(body)) return null
-  const { kind, mediaId, value, ms, id, min, max, channel, change } = body
+  const { kind, mediaId, value, ms, id, min, max, channel, change, on } = body
   const estim = change === 'up' ? change : isNumber(change) ? change : null
   if (kind === 'reconnect') return isId(id) ? { kind, id } : null
-  if (kind === 'restimVolume') return estim !== null ? clampToyCommand({ kind, change: estim }) : null
+  if (kind === 'restimVolume' || kind === 'audioVolume') return estim !== null ? clampToyCommand({ kind, change: estim }) : null
   if (kind === 'coyote') return isId(id) && (channel === 'a' || channel === 'b') && estim !== null ? clampToyCommand({ kind, id, channel, change: estim }) : null
   if (!isMediaId(mediaId)) return null
   if (kind === 'intensity' && isNumber(value)) return clampToyCommand({ kind, mediaId, value })
   if (kind === 'offset' && isNumber(ms)) return clampToyCommand({ kind, mediaId, ms })
   if (kind === 'range' && isNumber(min) && isNumber(max)) return clampToyCommand({ kind, mediaId, min, max })
+  if (kind === 'tracking' && typeof on === 'boolean') return { kind, mediaId, on }
   return null
 }
 

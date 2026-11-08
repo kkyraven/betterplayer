@@ -2,6 +2,7 @@ export const TOY_INTENSITY_MAX = 2
 export const TOY_OFFSET_MAX_MS = 5000
 export const COYOTE_STRENGTH_MAX = 200
 export const RESTIM_VOLUME_STEP = 0.01
+export const AUDIO_VOLUME_STEP = 0.01
 export const COYOTE_STRENGTH_STEP = 1
 
 export interface VideoToys {
@@ -10,7 +11,7 @@ export interface VideoToys {
   range: { min: number; max: number } | null
 }
 
-export type EstimLevel = { kind: 'restim'; volume: number } | { kind: 'coyote'; id: string; name: string; a: number; b: number }
+export type EstimLevel = { kind: 'restim'; volume: number } | { kind: 'audio'; volume: number } | { kind: 'coyote'; id: string; name: string; a: number; b: number }
 
 export interface HeadsetToys {
   outputs: { id: string; name: string; connected: boolean }[]
@@ -25,6 +26,7 @@ export type HeadsetToyCommand =
   | { kind: 'offset'; ms: number }
   | { kind: 'range'; min: number; max: number }
   | { kind: 'restimVolume'; change: EstimChange }
+  | { kind: 'audioVolume'; change: EstimChange }
   | { kind: 'coyote'; id: string; channel: 'a' | 'b'; change: EstimChange }
   | { kind: 'reconnect'; id: string }
 
@@ -44,6 +46,7 @@ export function clampToyCommand<C extends HeadsetToyCommand>(command: C): C {
       return { ...command, min, max: Math.max(min, hundredths(clamp(command.max, 0, 1))) }
     }
     case 'restimVolume':
+    case 'audioVolume':
       return command.change === 'up' ? command : { ...command, change: hundredths(clamp(command.change, 0, 1)) }
     case 'coyote':
       return command.change === 'up' ? command : { ...command, change: Math.round(clamp(command.change, 0, COYOTE_STRENGTH_MAX)) }

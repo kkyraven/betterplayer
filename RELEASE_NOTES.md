@@ -1,5 +1,11 @@
 # Release notes
 
+## 1.5.0
+
+- Add VR Support
+- Usability Fixes
+- Audio Estim Support
+
 ## 1.3.0
 
 - Manage tags across your library

@@ -113,6 +113,7 @@
 .grp { display: grid; gap: 8px; }
 .grp .lbl { display: flex; justify-content: space-between; align-items: center; font-size: 12.5px; font-weight: 600; }
 .grp .lbl .hint { font: 500 11px var(--mono); color: var(--text-3); }
+.grp .lbl .act { font-size: 11.5px; font-weight: 500; color: var(--accent); }
 .tog-row { display: flex; align-items: center; justify-content: space-between; font-size: 12.5px; color: var(--text-2); }
 .stepper { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 8px; height: 30px; background: var(--well); width: fit-content; }
 .stepper button { width: 30px; height: 28px; display: grid; place-items: center; color: var(--text-2); }

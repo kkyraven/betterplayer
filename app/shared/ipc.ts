@@ -8,14 +8,14 @@ import type { ModelFileInfo, ModelFileStatus, ModelInfo, ModelProgress } from '.
 import type { BrowserError, BrowserFrame, BrowserHandoff, BrowserRegionEdit, BrowserStartData, BrowserTab, Rect, Region, RegionBox } from './browser'
 import type { EditorDocument, EditorFilePage, EditorFileQuery, EditorStored, Pattern } from './editor'
 import type { GameSources } from './game'
-import type { AlPersona, ChatMessage, ChatReply, ChatTool, DomAccount, DomAiSettings, DomMemory, DomMemoryKind, DomPose, DomProfile, DomYou, OwnModels, PleasurePain } from './dom'
+import type { AlPersona, ChatMessage, ChatReply, ChatTool, DomAccount, DomAiSettings, DomMemory, DomMemoryKind, DomPose, DomProfile, DomYou, OwnModels, PleasurePain, VrDom } from './dom'
 import type { MatcherReport, MatcherResolveResult, OrphanSet } from './matcher'
-import type { DropResult, FolderNode, LibraryChange, LibraryCounts, LibraryRoot, MediaDetail, MediaPage, MediaQuery, MediaRow, Playlist, ScanProgress, Tag, TagUndo } from './library'
+import type { DropResult, FolderNode, LibraryChange, LibraryCounts, LibraryRoot, MediaDetail, MediaPage, MediaQuery, MediaRow, MissingFile, Playlist, ScanProgress, Tag, TagUndo } from './library'
 import type { PlayerCommand, PlayingState, RemoteSourceStatus } from './peer'
-import type { QuestCensor, QuestConnectResult, QuestHeadset, QuestHello, QuestPairPrompt, QuestPinResult, QuestToyCommand, QuestToys } from './quest'
+import type { QuestCensor, QuestConnectResult, QuestDomCommand, QuestDomRequest, QuestHeadset, QuestHello, QuestPairPrompt, QuestPinResult, QuestToyCommand, QuestToys } from './quest'
 import type { VrCommand, VrDeckState, VrHand, VrPlayerState, VrRay } from './vr'
 import type { PortalDevOp, PortalToPanel, PortalToScene, PortalUp } from './portals'
-import type { SpeechFinal, SpeechModelState, SpeechReply } from './speech'
+import type { SpeechFinal, SpeechKind, SpeechModelState, SpeechReply } from './speech'
 import type { RemoteLoad, ServerInput } from './remote'
 import type { PerVideoSettings, Settings } from './settings'
 import type { ResolvedProjection } from './projection'
@@ -70,6 +70,19 @@ export interface RemoteStatus {
   urls: string[]
 }
 
+export interface QuestFrameWant {
+  host: string
+  mediaId: number
+}
+
+export interface HeadsetFrame {
+  run: number
+  timeMs: number
+  width: number
+  height: number
+  bytes: Uint8Array
+}
+
 export interface ScriptFile {
   suffix: string
   json: string
@@ -92,6 +105,7 @@ export interface AudioPeaks {
 
 export interface IpcContract {
   'dialog:openVideo': () => string | null
+  'dialog:openEstimAudio': (video: string) => string | null
   'dialog:openStashApp': () => string | null
   'dialog:saveScripts': (media: string, title: string, files: ScriptFile[]) => string[] | null
   'hero:export': (media: string, title: string, json: string) => string | null
@@ -140,6 +154,7 @@ export interface IpcContract {
   'passthrough:sample': (path: string, timeSec: number, u: number, v: number) => number | null
   'library:suggestions': (id: number) => MediaRow[]
   'library:scriptFolders': (path: string) => Promise<string[]>
+  'library:missing': (path: string) => Promise<MissingFile | null>
   'library:byPath': (path: string) => MediaDetail | null
   'library:byTitle': (title: string) => MediaDetail | null
   'library:folders': () => FolderNode[]
@@ -193,6 +208,7 @@ export interface IpcContract {
   'remote:scripts': (url: string) => string | null
   'player:control': (command: PlayerCommand) => void
   'remote:toys': (state: QuestToys, host: string | null) => void
+  'remote:dom': (dom: VrDom, commands: QuestDomCommand[], host: string | null) => void
   'remote:censor': (look: QuestCensor | null) => void
   'quest:headsets': () => QuestHeadset[]
   'quest:invite': (target: { id: string } | { address: string }) => boolean
@@ -203,6 +219,8 @@ export interface IpcContract {
   'quest:decline': (requestId: string) => void
   'quest:firewall': () => boolean
   'quest:allowFirewall': () => boolean
+  'quest:reencoded': (mediaId: number) => boolean
+  'quest:frames': (want: QuestFrameWant | null) => void
   'vr:launch': () => void
   'vr:start': (options?: { intro: boolean }) => void
   'vr:stop': () => void
@@ -292,7 +310,7 @@ export interface IpcContract {
   'models:cancel': (id: string) => void
   'speech:model': () => SpeechModelState
   'speech:download': () => void
-  'speech:chunk': (session: string, seq: number, pcm: Int16Array) => SpeechReply
+  'speech:chunk': (session: string, seq: number, pcm: Int16Array, kind?: SpeechKind) => SpeechReply
   'speech:end': (session: string) => SpeechFinal
   'speech:cancel': (session: string) => void
   'audio:decode': (source: string) => string
@@ -332,7 +350,7 @@ export interface IpcContract {
   'dom:pushMemories': (domId: string, memoryIds: string[]) => DomMemory[]
   'dom:chat': (messages: ChatMessage[], tools: ChatTool[], freeMinutes: boolean) => ChatReply
   'dom:image': (domId: string, pose: DomPose) => string
-  'dom:comfyFiles': (url: string) => { checkpoints: string[]; loras: string[] }
+  'dom:comfyFiles': (url: string) => { models: string[]; flux: string[]; loras: string[] } | null
   'audio:peaks': (source: string) => AudioPeaks
   'editor:load': (key: string) => EditorStored
   'editor:files': (query: EditorFileQuery) => EditorFilePage
@@ -348,6 +366,7 @@ export interface IpcContract {
   'media:tags': (path: string) => MediaTags | null
   'subtitles:find': (video: string) => SubtitleTrack[]
   'subtitles:read': (path: string) => Cue[]
+  'estim:find': (video: string) => string | null
 }
 
 export type IpcChannel = keyof IpcContract
@@ -373,7 +392,11 @@ export interface IpcEvents {
   'headset:bye': { host: string }
   'headset:stop': { host: string }
   'headset:toys': QuestToyCommand & { host: string }
+  'headset:domAsk': { host: string }
+  'headset:dom': QuestDomRequest & { host: string }
   'headset:play': { kind: 'deovr' | 'heresphere'; host: string; mediaId: number }
+  'headset:frame': HeadsetFrame
+  'headset:feedFailed': QuestFrameWant
   'chaster:status': ChasterStatus
   'account:status': AccountStatus
   'browser:tabs': BrowserTab[]

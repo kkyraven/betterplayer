@@ -4221,6 +4221,7 @@
    },
    "output": {
     "top": "continue",
+    "bottom": "vr",
     "topRows": [
      {
       "id": 1
@@ -4231,10 +4232,7 @@
     ],
     "bottomRows": [
      {
-      "id": 3
-     },
-     {
-      "id": 4
+      "id": 5
      }
     ]
    }
@@ -4268,6 +4266,7 @@
    },
    "output": {
     "top": "continue",
+    "bottom": "recommended",
     "topRows": [
      {
       "id": 3
@@ -4312,6 +4311,7 @@
    },
    "output": {
     "top": "continue",
+    "bottom": "recommended",
     "topRows": [
      {
       "id": 9
@@ -4331,7 +4331,89 @@
    }
   },
   {
-   "name": "empty continue gives VR",
+   "name": "VR row skips the top row",
+   "input": {
+    "continueRows": [
+     {
+      "id": 1
+     },
+     {
+      "id": 5
+     }
+    ],
+    "vrRows": [
+     {
+      "id": 5
+     },
+     {
+      "id": 6
+     }
+    ],
+    "recommended": [
+     {
+      "id": 7
+     }
+    ],
+    "playing": null
+   },
+   "output": {
+    "top": "continue",
+    "bottom": "vr",
+    "topRows": [
+     {
+      "id": 1
+     },
+     {
+      "id": 5
+     }
+    ],
+    "bottomRows": [
+     {
+      "id": 6
+     }
+    ]
+   }
+  },
+  {
+   "name": "no VR left gives Recommended",
+   "input": {
+    "continueRows": [
+     {
+      "id": 5
+     }
+    ],
+    "vrRows": [
+     {
+      "id": 5
+     }
+    ],
+    "recommended": [
+     {
+      "id": 5
+     },
+     {
+      "id": 7
+     }
+    ],
+    "playing": null
+   },
+   "output": {
+    "top": "continue",
+    "bottom": "recommended",
+    "topRows": [
+     {
+      "id": 5
+     }
+    ],
+    "bottomRows": [
+     {
+      "id": 7
+     }
+    ]
+   }
+  },
+  {
+   "name": "empty continue gives VR then Recommended",
    "input": {
     "continueRows": [],
     "vrRows": [
@@ -4354,6 +4436,7 @@
    },
    "output": {
     "top": "vr",
+    "bottom": "recommended",
     "topRows": [
      {
       "id": 5
@@ -4392,6 +4475,7 @@
    },
    "output": {
     "top": "continue",
+    "bottom": "vr",
     "topRows": [
      {
       "id": 8

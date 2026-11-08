@@ -52,6 +52,14 @@ impl Sensation {
     }
 
     pub fn scale(&mut self, now: Instant) -> f64 {
+        let level = self.level(now);
+        if level >= 1.0 {
+            self.resume_at = None;
+        }
+        level
+    }
+
+    pub fn level(&self, now: Instant) -> f64 {
         if self.halted || self.held {
             return 0.0;
         }
@@ -59,12 +67,7 @@ impl Sensation {
         if now < at {
             return 0.0;
         }
-        let elapsed = now.duration_since(at);
-        if elapsed >= RESUME {
-            self.resume_at = None;
-            return 1.0;
-        }
-        elapsed.as_secs_f64() / RESUME.as_secs_f64()
+        (now.duration_since(at).as_secs_f64() / RESUME.as_secs_f64()).min(1.0)
     }
 }
 

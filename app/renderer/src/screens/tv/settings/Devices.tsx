@@ -40,22 +40,24 @@ function DeviceRows({ output, first }: { output: ConfiguredOutput; first: boolea
         }
         onPress={() => reconnect(output.id)}
       />
-      <TvRow
-        kind="button"
-        label={t('tv.devices.test', { name })}
-        sub={(output.config.kind === 'openshock' || output.config.kind === 'pishock') ? (testing ? t('tv.devices.pulsing') : t('tv.devices.onePulse')) : testing ? t('tv.devices.moving') : t('tv.devices.oneSweep')}
-        disabled={state?.status !== 'connected' || testing}
-        action={
-          <>
-            <Play />
-            {t('tv.devices.testButton')}
-          </>
-        }
-        onPress={() => {
-          setTesting(true)
-          void testMove(output).finally(() => setTesting(false))
-        }}
-      />
+      {output.config.kind !== 'audio' && (
+        <TvRow
+          kind="button"
+          label={t('tv.devices.test', { name })}
+          sub={(output.config.kind === 'openshock' || output.config.kind === 'pishock') ? (testing ? t('tv.devices.pulsing') : t('tv.devices.onePulse')) : testing ? t('tv.devices.moving') : t('tv.devices.oneSweep')}
+          disabled={state?.status !== 'connected' || testing}
+          action={
+            <>
+              <Play />
+              {t('tv.devices.testButton')}
+            </>
+          }
+          onPress={() => {
+            setTesting(true)
+            void testMove(output).finally(() => setTesting(false))
+          }}
+        />
+      )}
     </>
   )
 }

@@ -344,3 +344,43 @@ export function domAccess(s: { ai: Pick<DomAiSettings, 'provider'>; account: Pic
   if (subscribed) return 'ok'
   return (s.account.freeSecondsLeft ?? 0) > 0 ? 'ok' : 'freeUsed'
 }
+
+const DOM_PROMPT_CHARS = 800
+
+export function domReplyPrompt(you: Pick<DomYou, 'safeword' | 'petNames'>, doms: Pick<DomProfile, 'name'>[]): string {
+  return [...you.petNames, ...doms.map((d) => d.name.trim()), you.safeword.trim()].filter(Boolean).join(', ').slice(-DOM_PROMPT_CHARS)
+}
+
+export const VR_DOM_SLICES = 8
+
+export const DOM_REPLIES = 3
+const DOM_REPLY_CHARS = 40
+
+function fitReply(text: string): string {
+  const reply = text.trim()
+  if (reply.length <= DOM_REPLY_CHARS) return reply
+  const cut = reply.slice(0, DOM_REPLY_CHARS + 1)
+  const space = cut.lastIndexOf(' ')
+  return (space > 0 ? cut.slice(0, space) : cut.slice(0, DOM_REPLY_CHARS)).trim()
+}
+
+export function domReplies(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const texts = raw.filter((r): r is string => typeof r === 'string').map(fitReply).filter(Boolean)
+  return [...new Set(texts)].slice(0, DOM_REPLIES)
+}
+
+export interface VrDomSession {
+  name: string
+  line: string | null
+  said: number
+  replies: string[]
+  thinking: boolean
+  level: number | null
+}
+
+export interface VrDom {
+  doms: { id: string; name: string }[]
+  session: VrDomSession | null
+  note: string | null
+}

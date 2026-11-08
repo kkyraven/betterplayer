@@ -8,6 +8,7 @@ use crate::render::Msg;
 use crate::windows::dlss5::{self, Session, SessionControl, VideoHeader};
 
 const DEBOUNCE: Duration = Duration::from_millis(400);
+const BEHIND_LIMIT: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, PartialEq)]
 struct Built {
@@ -144,6 +145,30 @@ impl Drop for Capture {
 }
 
 struct InputFrame { serial: u64, pixels: Vec<u8> }
+
+#[derive(Clone, Default)]
+struct Mailbox(Arc<(Mutex<(Option<InputFrame>, bool)>, std::sync::Condvar)>);
+
+impl Mailbox {
+    fn send(&self, frame: InputFrame) {
+        self.0.0.lock().unwrap().0 = Some(frame);
+        self.0.1.notify_one();
+    }
+
+    fn close(&self) {
+        self.0.0.lock().unwrap().1 = true;
+        self.0.1.notify_one();
+    }
+
+    fn recv(&self) -> Option<InputFrame> {
+        let mut slot = self.0.0.lock().unwrap();
+        loop {
+            if slot.1 { return None; }
+            if let Some(frame) = slot.0.take() { return Some(frame); }
+            slot = self.0.1.wait(slot).unwrap();
+        }
+    }
+}
 enum WorkerEvent {
     Ready,
     Frame { serial: u64, pixels: Vec<u8> },
@@ -152,7 +177,7 @@ enum WorkerEvent {
 
 struct Worker {
     built: Built,
-    input: Option<mpsc::SyncSender<InputFrame>>,
+    input: Option<Mailbox>,
     events: mpsc::Receiver<WorkerEvent>,
     control: SessionControl,
     ready: bool,
@@ -164,15 +189,17 @@ impl Worker {
         let header = VideoHeader::live(built.input, &built.request.options)?;
         let control = SessionControl::new();
         let child_control = control.clone();
-        let (tx, rx) = mpsc::sync_channel::<InputFrame>(1);
+        let input = Mailbox::default();
+        let rx = input.clone();
         let (events, result) = mpsc::channel();
         std::thread::Builder::new().name("bp-dlss-worker".into()).spawn(move || {
             let run = || -> Result<(), String> {
                 let mut session = Session::start_cancellable(&host, header, child_control.clone())?;
+                session.warm_up()?;
                 events.send(WorkerEvent::Ready).map_err(|_| "render thread closed")?;
                 let _ = wake.send(Msg::Redraw);
                 let motion = vec![0; session.input_bytes().1];
-                while let Ok(frame) = rx.recv() {
+                while let Some(frame) = rx.recv() {
                     let mut pixels = vec![0; session.output_bytes()];
                     session.process(&frame.pixels, &motion, frame.serial as i64, true, &mut pixels)?;
                     events.send(WorkerEvent::Frame { serial: frame.serial, pixels }).map_err(|_| "render thread closed")?;
@@ -186,12 +213,12 @@ impl Worker {
             drop(events);
             let _ = wake.send(Msg::Redraw);
         }).map_err(|e| format!("starting DLSS thread: {e}"))?;
-        Ok(Self { built, input: Some(tx), events: result, control, ready: false, stopping: false })
+        Ok(Self { built, input: Some(input), events: result, control, ready: false, stopping: false })
     }
 
     fn cancel(&mut self) {
         self.stopping = true;
-        self.input = None;
+        if let Some(input) = self.input.take() { input.close(); }
         self.control.cancel();
     }
 }
@@ -232,6 +259,7 @@ pub(crate) struct DlssRender {
     failure: Option<String>,
     capture: Option<Capture>,
     flight: Flight,
+    behind_since: Option<Instant>,
     completed: Option<Vec<u8>>,
     frame: Option<(u32, u32, u32)>,
 }
@@ -241,7 +269,7 @@ impl DlssRender {
         Self {
             shared, wake, host: dlss5::available(), request: DlssRequest::default(),
             changed_at: Instant::now(), surfaces: Surfaces::new(), worker: None,
-            failure: None, capture: None, flight: Flight::default(), completed: None, frame: None,
+            failure: None, capture: None, flight: Flight::default(), behind_since: None, completed: None, frame: None,
         }
     }
 
@@ -258,6 +286,7 @@ impl DlssRender {
         self.capture = None;
         self.flight.pending = None;
         self.flight.completed = None;
+        self.behind_since = None;
         self.completed = None;
     }
 
@@ -269,7 +298,11 @@ impl DlssRender {
 
     pub fn new_frame(&mut self) {
         if self.flight.advance() {
-            self.fail("DLSS cannot keep up with this video's frame rate; using Sharp. Turn DLSS off and on to retry".into());
+            self.capture = None;
+            let since = *self.behind_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= BEHIND_LIMIT {
+                self.fail("DLSS cannot keep up with this video's frame rate; using Sharp. Turn DLSS off and on to retry".into());
+            }
         }
         self.completed = None;
     }
@@ -317,7 +350,10 @@ impl DlssRender {
                 Ok(_) if worker.stopping => {},
                 Ok(WorkerEvent::Ready) => worker.ready = true,
                 Ok(WorkerEvent::Frame { serial, pixels }) => {
-                    if self.flight.complete(serial) { self.completed = Some(pixels); }
+                    if self.flight.complete(serial) {
+                        self.completed = Some(pixels);
+                        self.behind_since = None;
+                    }
                 }
                 Ok(WorkerEvent::Failed(error)) => { self.fail(error); }
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -368,9 +404,9 @@ impl DlssRender {
                 Ok(Some(pixels)) => {
                     let serial = capture.serial;
                     self.capture = None;
-                    let sent = self.worker.as_ref().and_then(|w| w.input.as_ref())
-                        .is_some_and(|tx| tx.try_send(InputFrame { serial, pixels }).is_ok());
-                    if !sent { self.fail("DLSS worker queue unavailable; using Sharp".into()); }
+                    let input = self.worker.as_ref().and_then(|w| w.input.as_ref());
+                    if let Some(input) = input { input.send(InputFrame { serial, pixels }); }
+                    if input.is_none() { self.fail("DLSS worker queue unavailable; using Sharp".into()); }
                 }
                 Ok(None) => {},
                 Err(error) => self.fail(error),
@@ -461,6 +497,40 @@ mod tests {
     }
 
     #[test]
+    fn late_frames_fall_back_only_after_the_behind_limit() {
+        let (wake, _) = mpsc::channel();
+        let mut render = DlssRender::new(Arc::new(Mutex::new(DlssShared::default())), wake);
+        let (events, rx) = mpsc::channel();
+        render.worker = Some(Worker {
+            built: Built { input: (1280, 720), output: (1920, 1080), request: render.request },
+            input: Some(Mailbox::default()), events: rx, control: SessionControl::new(), ready: true, stopping: false,
+        });
+        render.flight.pending = Some(render.flight.serial);
+        render.new_frame();
+        assert!(render.failure.is_none(), "a GPU clocking up after a pause misses a few frames");
+        render.flight.pending = Some(render.flight.serial);
+        events.send(WorkerEvent::Frame { serial: render.flight.serial, pixels: vec![] }).unwrap();
+        render.poll();
+        assert!(render.behind_since.is_none(), "an on-time frame ends the run");
+        render.flight.pending = Some(render.flight.serial);
+        render.new_frame();
+        render.behind_since = Some(Instant::now() - BEHIND_LIMIT);
+        render.flight.pending = Some(render.flight.serial);
+        render.new_frame();
+        assert!(render.failure.as_deref().is_some_and(|f| f.contains("cannot keep up")));
+    }
+
+    #[test]
+    fn mailbox_keeps_only_the_newest_frame() {
+        let mailbox = Mailbox::default();
+        mailbox.send(InputFrame { serial: 1, pixels: vec![] });
+        mailbox.send(InputFrame { serial: 2, pixels: vec![] });
+        assert_eq!(mailbox.recv().map(|f| f.serial), Some(2));
+        mailbox.close();
+        assert!(mailbox.recv().is_none());
+    }
+
+    #[test]
     fn paused_debounce_has_a_deadline_and_failure_does_not_retry() {
         let (tx, _) = mpsc::channel();
         let shared = Arc::new(Mutex::new(DlssShared::default()));
@@ -512,10 +582,9 @@ mod tests {
         let mut render = DlssRender::new(shared, wake);
         render.host = Ok(std::path::PathBuf::from("unused-test-host"));
         let (events, rx) = mpsc::channel();
-        let (input, _) = mpsc::sync_channel(1);
         render.worker = Some(Worker {
             built: Built { input: (1280, 720), output: (1920, 1080), request: wanted },
-            input: Some(input), events: rx, control: SessionControl::new(), ready: false, stopping: false,
+            input: Some(Mailbox::default()), events: rx, control: SessionControl::new(), ready: false, stopping: false,
         });
         assert!(render.prepare(1280, 720).is_none());
         render.changed_at = Instant::now() - DEBOUNCE;

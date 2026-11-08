@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { domReplies, domReplyPrompt } from './dom'
 import { DOM_LEVEL_MAX, LORA_WEIGHT_MAX, clampLevel, emptyYou, normalizeYou, defaultDomAi, normalizeDomAi, defaultPleasurePain, domAccess, normalizeDom, normalizeLoras, normalizePleasurePain, windowAround, painOutput, pointAt, spanAt } from './dom'
 
 describe('pleasure and pain', () => {
@@ -84,4 +85,23 @@ it('defaults the safeword off and normalizes the optional stored word', () => {
   expect(normalizeYou({}).safeword).toBe('')
   expect(normalizeYou({ safeword: ' red ' }).safeword).toBe('red')
   expect(normalizeYou({ safeword: 42 }).safeword).toBe('')
+})
+
+describe('replies in a headset', () => {
+  it('keeps three short, different replies from whatever the model sent', () => {
+    expect(domReplies([' Yes ', 'Yes', '', 4, 'Please slower', 'I need a break', 'Fourth'])).toEqual(['Yes', 'Please slower', 'I need a break'])
+    expect(domReplies(['x'.repeat(90)])[0]).toHaveLength(40)
+    expect(domReplies(['Please could we keep going a while longer now'])).toEqual(['Please could we keep going a while'])
+    expect(domReplies('Yes')).toEqual([])
+  })
+
+  it('primes speech with the names, then the safeword last, where the decoder keeps it', () => {
+    expect(domReplyPrompt({ safeword: ' red ', petNames: ['pet'] }, [{ name: 'Vale' }, { name: '' }])).toBe('pet, Vale, red')
+  })
+
+  it('keeps the safeword when the names run long', () => {
+    const prompt = domReplyPrompt({ safeword: 'red', petNames: Array.from({ length: 400 }, (_, i) => `pet${i}`) }, [])
+    expect(prompt).toHaveLength(800)
+    expect(prompt.endsWith(', red')).toBe(true)
+  })
 })

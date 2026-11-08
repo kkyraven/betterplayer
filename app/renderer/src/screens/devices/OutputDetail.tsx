@@ -10,10 +10,11 @@ import { Slider } from '@/components/ui/Slider'
 import { Switch } from '@/components/ui/Switch'
 import { engine } from '@/engine/client'
 import { cx } from '@/lib/cx'
-import { outputName, setStopOnPause, useDevices, useOutputStats, usePlayerAxes, type ConfiguredOutput } from '@/state/devices'
+import { isEngineOutput, outputName, setStopOnPause, useDevices, useOutputStats, usePlayerAxes, type ConfiguredOutput } from '@/state/devices'
 import { useT } from '@/state/i18n'
 import { useSettings } from '@/state/settings'
 import { isPremium, useAccount } from '@/state/account'
+import { EstimAudioRows } from './EstimAudioRows'
 import { OpenShockPanel } from './OpenShockPanel'
 import { RestimPanel } from './RestimPanel'
 import { featureName, ossmText, statusDot, statusText } from './status'
@@ -38,10 +39,9 @@ export function OutputDetail({ output, state }: { output: ConfiguredOutput; stat
   const setVibration = useDevices((s) => s.setVibration)
   const setDelay = useDevices((s) => s.setDelay)
   const stopOnPause = useSettings((s) => s.settings?.devices.stopOnPause ?? true)
-  const [clamps, setClamps] = useState<AxisClamp[]>(() => engine.outputClamps(output.id) ?? AXES.map(() => ({ enabled: true, min: 0, max: 1 })))
+  const [clamps, setClamps] = useState<AxisClamp[]>(() => (isEngineOutput(output) ? engine.outputClamps(output.id) : null) ?? AXES.map(() => ({ enabled: true, min: 0, max: 1 })))
   const [name, setName] = useState(output.config.name ?? '')
   const live = usePlayerAxes()
-  const stats = useOutputStats(output.id)
   const profile = output.config.profile
   const premium = useAccount(isPremium)
   const kind = output.config.kind
@@ -50,6 +50,7 @@ export function OutputDetail({ output, state }: { output: ConfiguredOutput; stat
   const axes = axesForProfile(profile).filter((a) => a.kind !== 'estimParam' && (!isOssm || a.id === 'L0'))
   const isSocket = kind === 'websocket' || kind === 'tcp' || kind === 'udp'
   const isToy = kind === 'toy'
+  const isAudio = kind === 'audio'
   const shakes = profile === 'stroker' && (isSocket || kind === 'serial' || kind === 'ble' || isOssm)
   const vibration = output.config.vibration
   const hzMax = vibrationHzMax(kind)
@@ -66,7 +67,7 @@ export function OutputDetail({ output, state }: { output: ConfiguredOutput; stat
     engine.setOutputClamp(output.id, axis.id, clamp)
   }
 
-  const meta = [isToy || isOssm ? 'bluetooth' : kind, state?.address, state?.device, state?.tcode, state?.battery !== undefined && `${state.battery}%`].filter(Boolean).join(' · ')
+  const meta = isAudio ? (output.config.label ?? output.config.device ?? '') : [isToy || isOssm ? 'bluetooth' : kind, state?.address, state?.device, state?.tcode, state?.battery !== undefined && `${state.battery}%`].filter(Boolean).join(' · ')
 
   const featureRow = (f: OutputState['features'][number]) => {
     const axis: AxisId | null = f.axis !== undefined && isAxisId(f.axis) ? f.axis : null
@@ -166,10 +167,7 @@ export function OutputDetail({ output, state }: { output: ConfiguredOutput; stat
           <span className="dhead-sub mono">{meta}</span>
         </div>
         <div className="spacer" />
-        <span className="dhead-stat">
-          <span className="faint">{t('devices.output.linesSent')}</span>
-          <span className="mono">{stats?.linesSent ?? 0}</span>
-        </span>
+        {isEngineOutput(output) && <LinesSent id={output.id} />}
       </div>
 
       <div className="section">
@@ -180,6 +178,7 @@ export function OutputDetail({ output, state }: { output: ConfiguredOutput; stat
             <span className="spacer" />
             <input className="input name-input" value={name} placeholder={outputName({ ...output.config, name: undefined })} aria-label={t('devices.output.deviceName')} onChange={(e) => setName(e.target.value)} onBlur={() => void rename(output.id, name)} />
           </div>
+          {isAudio && <EstimAudioRows output={output} />}
           {output.config.kind === 'handy' && (
             <div className="prow">
               <span className="lbl">{t('devices.wizard.scriptHosting')}</span>
@@ -294,7 +293,7 @@ export function OutputDetail({ output, state }: { output: ConfiguredOutput; stat
             )}
           </div>
         </div>
-      ) : isHowl || isOpenShock ? null : (
+      ) : isHowl || isOpenShock || isAudio ? null : (
       <div className="section">
         <span className="eyebrow">{t('devices.output.axes')}</span>
         <div className="axhead">
@@ -385,7 +384,7 @@ export function OutputDetail({ output, state }: { output: ConfiguredOutput; stat
             <div className="prow">
               <span>
                 <div className="lbl">{t('devices.output.delay')}</div>
-                <div className="sub">{t('devices.output.delaySub')}</div>
+                {!isAudio && <div className="sub">{t('devices.output.delaySub')}</div>}
               </span>
               <div className="track-wrap strength">
                 <Slider label={t('devices.output.delay')} value={[delay]} min={-OUTPUT_DELAY_MAX} max={OUTPUT_DELAY_MAX} step={5} onValueChange={([v]) => setDelay(output.id, v ?? 0)} />
@@ -396,6 +395,7 @@ export function OutputDetail({ output, state }: { output: ConfiguredOutput; stat
         </div>
       )}
 
+      {!isAudio && (
       <div className="section">
         <span className="eyebrow">{t('devices.output.safety')}</span>
         <div className="panel">
@@ -418,11 +418,23 @@ export function OutputDetail({ output, state }: { output: ConfiguredOutput; stat
           ))}
         </div>
       </div>
+      )}
 
       <Button variant="ghost" className="btn-danger" onClick={() => void remove(output.id)}>
         <Trash2 />
         {t('devices.screen.removeDevice')}
       </Button>
     </>
+  )
+}
+
+function LinesSent({ id }: { id: number }) {
+  const t = useT()
+  const stats = useOutputStats(id)
+  return (
+    <span className="dhead-stat">
+      <span className="faint">{t('devices.output.linesSent')}</span>
+      <span className="mono">{stats?.linesSent ?? 0}</span>
+    </span>
   )
 }

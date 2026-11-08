@@ -84,7 +84,7 @@ pub struct VrStatus {
 
 const SHORTCUTS_KEPT: usize = 32;
 
-pub(crate) const VR_SCREEN_ARC_DEFAULT: f32 = 50.0;
+pub(crate) const VR_SCREEN_ARC_DEFAULT: f32 = 85.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Asked {

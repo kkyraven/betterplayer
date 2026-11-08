@@ -1,8 +1,9 @@
 import type { AxisId } from '@shared/axes'
-import { COYOTE_STRENGTH_STEP, RESTIM_VOLUME_STEP, changedLevel, clampToyCommand, type EstimLevel, type HeadsetToyCommand, type HeadsetToys, type VideoToyCommand, type VideoToys } from '@shared/headsetToys'
+import { AUDIO_VOLUME_STEP, COYOTE_STRENGTH_STEP, RESTIM_VOLUME_STEP, changedLevel, clampToyCommand, type EstimLevel, type HeadsetToyCommand, type HeadsetToys, type VideoToyCommand, type VideoToys } from '@shared/headsetToys'
 import { defaultAxisSettings, type PerVideoSettings, type Settings } from '@shared/settings'
-import { outputName, useDevices, type ConfiguredOutput } from './devices'
+import { audioOutputOf, outputName, useDevices, type ConfiguredOutput } from './devices'
 import { setEstim, volumeHeld } from './estim'
+import { estimAudioLive } from './estimAudio'
 import { useSettings } from './settings'
 
 type Defaults = Settings['axesDefault'] | undefined
@@ -25,9 +26,12 @@ function live(kind: 'restim' | 'coyote', output?: ConfiguredOutput): boolean {
 
 export function estimLevels(): EstimLevel[] {
   const estim = useSettings.getState().settings?.estim
+  const { outputs } = useDevices.getState()
+  const audio = audioOutputOf(outputs)
   const levels: EstimLevel[] = []
   if (estim && live('restim')) levels.push({ kind: 'restim', volume: estim.volumeMax })
-  for (const o of useDevices.getState().outputs) {
+  if (audio && estimAudioLive()) levels.push({ kind: 'audio', volume: audio.config.volume ?? 1 })
+  for (const o of outputs) {
     if (o.config.kind === 'coyote' && live('coyote', o)) levels.push({ kind: 'coyote', id: outputId(o), name: outputName(o.config), a: o.config.strengthA ?? 0, b: o.config.strengthB ?? 0 })
   }
   return levels
@@ -70,6 +74,14 @@ export function applyDeviceCommand(command: DeviceToyCommand) {
       const volumeMax = Math.round(changedLevel(Math.round(estim.volumeMax * 100) / 100, c.change, RESTIM_VOLUME_STEP) * 100) / 100
       if (volumeMax === estim.volumeMax) return
       return setEstim({ volumeMax, volumeFloor: Math.min(estim.volumeFloor, volumeMax) })
+    }
+    case 'audioVolume': {
+      const audio = audioOutputOf(devices.outputs)
+      if (!audio || (c.change === 'up' && !estimAudioLive())) return
+      const current = audio.config.volume ?? 1
+      const volume = Math.round(Math.min(1, changedLevel(Math.round(current * 100) / 100, c.change, AUDIO_VOLUME_STEP)) * 100) / 100
+      if (volume !== current) devices.setVolume(audio.id, volume)
+      return
     }
     case 'coyote': {
       if (output?.config.kind !== 'coyote' || (c.change === 'up' && !live('coyote', output))) return
