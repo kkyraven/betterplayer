@@ -28,7 +28,7 @@ import { Select } from '@/components/ui/Select'
 import { Slider } from '@/components/ui/Slider'
 import { Switch } from '@/components/ui/Switch'
 import { electron } from '@/node'
-import { checkSupporter, isFree, useAccount } from '@/state/account'
+import { cancelItchLink, checkPurchase, isFree, isLinkingItch, useAccount } from '@/state/account'
 import { t, useT } from '@/state/i18n'
 import { useChaster, useMinuteClock } from '@/state/chaster'
 import { useDenial } from '@/state/denial'
@@ -60,6 +60,7 @@ export function CensorSettings() {
   const now = useMinuteClock()
   const [choice, setChoice] = useState<LockChoice>('off')
   const [checking, setChecking] = useState(false)
+  const linking = useAccount(isLinkingItch)
   const [message, setMessage] = useState<string | null>(null)
   const [dragging, setDragging] = useState<number | null>(null)
   const strength = dragging ?? Math.round(censor.strength * 100)
@@ -69,7 +70,7 @@ export function CensorSettings() {
   const anyOn = (censor.enabled || denialOn) && installed
   const purchased = async () => {
     setChecking(true)
-    setMessage(await checkSupporter())
+    setMessage(await checkPurchase())
     setChecking(false)
   }
   const lock = () => {
@@ -120,8 +121,8 @@ export function CensorSettings() {
             </span>
             <span className="spacer" />
             <span className="offer-acts">
-              <Button variant="ghost" disabled={checking} onClick={() => void purchased()}>
-                {checking ? t('settings.support.checking') : t('vr.offer.purchased')}
+              <Button variant="ghost" disabled={checking && !linking} onClick={linking ? cancelItchLink : () => void purchased()}>
+                {linking ? t('common.cancel') : checking ? t('settings.support.checking') : t('vr.offer.purchased')}
               </Button>
               <Button onClick={() => void electron.shell.openExternal(ITCH_URL)}>{t('vr.offer.itch')}</Button>
               <Button variant="primary" onClick={() => void electron.shell.openExternal(SUBSCRIBE_URL)}>

@@ -1,6 +1,6 @@
 import { ExternalLink } from 'lucide-react'
 import { useEffect, useRef, useState, type Ref } from 'react'
-import { ITCH_URL, SUBSCRIBE_URL, vrUnlimited } from '@shared/account'
+import { ITCH_URL, SUBSCRIBE_URL } from '@shared/account'
 import type { MessageKey } from '@shared/i18n'
 import type { VrError } from '@shared/vr'
 import { Button } from '@/components/ui/Button'
@@ -9,7 +9,7 @@ import { VrGogglesIcon } from '@/components/ui/VrGogglesIcon'
 import { focusFirst } from '@/input/spatialNav'
 import { ipcMessage } from '@/lib/errors'
 import { electron } from '@/node'
-import { checkSupporter } from '@/state/account'
+import { cancelItchLink, checkPurchase, isLinkingItch, useAccount } from '@/state/account'
 import { useT } from '@/state/i18n'
 import { useVr } from '@/state/vr'
 import './InHeadset.css'
@@ -79,6 +79,7 @@ export function VrOffer() {
   const hide = useVr((s) => s.hideOffer)
   const ref = useRef<HTMLDivElement>(null)
   const [checking, setChecking] = useState(false)
+  const linking = useAccount(isLinkingItch)
   const [message, setMessage] = useState<string | null>(null)
   useEffect(() => {
     if (!offer) return
@@ -101,7 +102,7 @@ export function VrOffer() {
   const open = async (url: string) => setMessage(await openPage(url))
   const purchased = async () => {
     setChecking(true)
-    const result = await checkSupporter(vrUnlimited)
+    const result = await checkPurchase()
     setChecking(false)
     setMessage(result)
     if (result !== null) return
@@ -111,12 +112,12 @@ export function VrOffer() {
   }
   return (
     <div className="in-headset vr-offer" onClick={(e) => e.target === e.currentTarget && hide()}>
-      <VrOfferCard ref={ref} trap open={(url) => void open(url)} notNow={hide} purchased={() => void purchased()} checking={checking} message={message} />
+      <VrOfferCard ref={ref} trap open={(url) => void open(url)} notNow={hide} purchased={() => void purchased()} checking={checking} cancel={linking ? cancelItchLink : undefined} message={message} />
     </div>
   )
 }
 
-export function VrOfferCard({ ref, trap = false, open, notNow, purchased, checking, message }: { ref?: Ref<HTMLDivElement>; trap?: boolean; open: (url: string) => void; notNow: () => void; purchased: () => void; checking: boolean; message: string | null }) {
+export function VrOfferCard({ ref, trap = false, open, notNow, purchased, checking, cancel, message }: { ref?: Ref<HTMLDivElement>; trap?: boolean; open: (url: string) => void; notNow: () => void; purchased: () => void; checking: boolean; cancel?: () => void; message: string | null }) {
   const t = useT()
   return (
     <div ref={ref} className="vr-offer-card" role="dialog" aria-labelledby="vr-offer-title" data-nav-trap={trap || undefined}>
@@ -138,8 +139,8 @@ export function VrOfferCard({ ref, trap = false, open, notNow, purchased, checki
       </div>
       <span className="vr-offer-fine">
         {t('vr.offer.email')}{' '}
-        <button type="button" className="vr-offer-link" data-key="offer:purchased" disabled={checking} onClick={purchased}>
-          {checking ? t('settings.support.checking') : t('vr.offer.purchased')}
+        <button type="button" className="vr-offer-link" data-key="offer:purchased" disabled={checking && !cancel} onClick={cancel ?? purchased}>
+          {cancel ? t('common.cancel') : checking ? t('settings.support.checking') : t('vr.offer.purchased')}
         </button>
       </span>
       {message && <span className="vr-offer-fine error" role="status">{message}</span>}

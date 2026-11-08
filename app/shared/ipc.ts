@@ -239,6 +239,8 @@ export interface IpcContract {
   'account:logout': () => void
   'account:refresh': () => void
   'account:syncAgenticLover': () => void
+  'account:linkItch': () => void
+  'account:cancelItchLink': () => void
   'account:setName': (name: string) => void
   'account:setAvatar': (userId: string, png: string | null) => void
   'account:friends': () => void

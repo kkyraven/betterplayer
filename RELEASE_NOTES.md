@@ -1,5 +1,9 @@
 # Release notes
 
+## 1.5.1
+
+- Unlock an itch.io purchase made with a different email
+
 ## 1.5.0
 
 - Add VR Support

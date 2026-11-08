@@ -57,6 +57,7 @@ export interface AccountStatus {
   stun: string[]
   error?: string
   syncedAt: number | null
+  linkingItch?: boolean
 }
 
 export const SIGNED_OUT: AccountStatus = { state: 'out', me: null, friends: NO_FRIENDS, stun: [], syncedAt: null }

@@ -70,6 +70,7 @@ export class Account {
   private hashRun = 0
   private hashed = false
   private loginRun = 0
+  private itchRun = 0
   private pulling: Promise<void> | null = null
   private stopped = false
   private avatarRevision = 0
@@ -231,6 +232,44 @@ export class Account {
     })
     if (token !== this.token || !this.status.me) return
     this.set({ ...this.status, me: { ...this.status.me, premium: me.premium, agenticLover: me.agenticLover, itch: me.itch, vr: me.vr } })
+  }
+
+  async linkItch(): Promise<void> {
+    const run = ++this.itchRun
+    const token = this.token
+    const start = await this.request<{ id: string; url: string }>('POST', '/me/itch')
+    this.setLinkingItch(true)
+    try {
+      await shell.openExternal(start.url)
+      const until = Date.now() + LOGIN_TIMEOUT_MS
+      while (Date.now() < until) {
+        await new Promise((r) => setTimeout(r, LOGIN_POLL_MS))
+        if (run !== this.itchRun) throw new Error(t('account.error.itchCancelled'))
+        if (token !== this.token) throw new Error(t('account.error.changed'))
+        const { status } = await this.request<{ status: string }>('GET', `/me/itch/${encodeURIComponent(start.id)}`).catch((e: unknown) => {
+          if (e instanceof ServerError && e.status === 429) return { status: 'pending' }
+          throw e
+        })
+        if (status === 'pending') continue
+        if (status === 'done') return await this.refresh()
+        if (status === 'none') throw new Error(t('account.error.itchNone'))
+        if (status === 'taken') throw new Error(t('account.error.itchTaken'))
+        if (status === 'cancelled') throw new Error(t('account.error.itchCancelled'))
+        throw new Error(t('account.error.unreachable', { host: 'itch.io' }))
+      }
+      throw new Error(t('account.error.itchTimedOut'))
+    } finally {
+      if (run === this.itchRun) this.setLinkingItch(false)
+    }
+  }
+
+  cancelItchLink() {
+    this.itchRun++
+    this.setLinkingItch(false)
+  }
+
+  private setLinkingItch(linkingItch: boolean) {
+    if (Boolean(this.status.linkingItch) !== linkingItch) this.set({ ...this.status, linkingItch })
   }
 
   private sessionLost() {

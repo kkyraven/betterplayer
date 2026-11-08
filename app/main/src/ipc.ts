@@ -291,6 +291,8 @@ export function registerIpc(win: BrowserWindow, store: SettingsStore, library: L
   handle('account:logout', () => account.logout())
   handle('account:refresh', () => account.refresh(true))
   handle('account:syncAgenticLover', () => account.syncAgenticLover())
+  handle('account:linkItch', () => account.linkItch())
+  handle('account:cancelItchLink', () => account.cancelItchLink())
   handle('account:setName', (name) => account.setName(name))
   handle('account:setAvatar', (userId, png) => account.setAvatar(userId, png))
   handle('account:friends', () => account.friends())

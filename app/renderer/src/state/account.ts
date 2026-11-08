@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { SIGNED_OUT, type AccountStatus, type Me } from '@shared/account'
+import { SIGNED_OUT, vrUnlimited, type AccountStatus, type Me } from '@shared/account'
 import { invoke, on } from '@/ipc'
 import { ipcMessage } from '@/lib/errors'
 import { t } from './i18n'
@@ -38,12 +38,26 @@ export const isPremium = (s: AccountStore) => s.status.me?.premium === true
 export const isSubscriber = (s: AccountStore) => isPremium(s) && s.status.me?.itch !== true
 export const isFree = (s: AccountStore) => s.status.state === 'out' || (s.status.me !== null && !s.status.me.premium)
 export const isUnsubscribed = (s: AccountStore) => isFree(s) || s.status.me?.itch === true
+export const isLinkingItch = (s: AccountStore) => s.status.linkingItch === true
+export const cancelItchLink = () => void invoke('account:cancelItchLink').catch(() => {})
 
 export async function checkSupporter(unlocked: (me: Me | null) => boolean = (me) => me?.premium === true): Promise<string | null> {
   try {
     await invoke(useAccount.getState().status.me ? 'account:refresh' : 'account:login')
     const account = useAccount.getState().status
     return account.error ?? (unlocked(account.me) ? null : t('account.notSubscribed'))
+  } catch (error) {
+    return ipcMessage(error)
+  }
+}
+
+export async function checkPurchase(): Promise<string | null> {
+  const message = await checkSupporter(vrUnlimited)
+  const account = useAccount.getState().status
+  if (message === null || !account.me || account.error) return message
+  try {
+    await invoke('account:linkItch')
+    return vrUnlimited(useAccount.getState().status.me) ? null : t('account.notSubscribed')
   } catch (error) {
     return ipcMessage(error)
   }

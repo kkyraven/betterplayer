@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/Button'
 import { VrGogglesIcon } from '@/components/ui/VrGogglesIcon'
 import { ipcMessage } from '@/lib/errors'
 import { electron } from '@/node'
-import { checkAgenticLover, checkSupporter, isSubscriber, useAccount } from '@/state/account'
+import { cancelItchLink, checkAgenticLover, checkPurchase, checkSupporter, isLinkingItch, isSubscriber, useAccount } from '@/state/account'
 import { useT } from '@/state/i18n'
 
 const FEATURES: ReadonlyArray<readonly [MessageKey, MessageKey]> = [
@@ -24,11 +24,12 @@ export function SupportSettings() {
   const t = useT()
   const status = useAccount((s) => s.status)
   const subscribed = useAccount(isSubscriber)
+  const linking = useAccount(isLinkingItch)
   const [busy, setBusy] = useState<'portal' | 'agenticLover' | 'itch' | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const refresh = async (from: 'portal' | 'agenticLover' | 'itch') => {
     setBusy(from)
-    setMessage(await (from === 'portal' ? checkSupporter() : from === 'itch' ? checkSupporter(vrUnlimited) : checkAgenticLover()))
+    setMessage(await (from === 'portal' ? checkSupporter() : from === 'itch' ? checkPurchase() : checkAgenticLover()))
     setBusy(null)
   }
   const open = (url: string) => {
@@ -83,8 +84,8 @@ export function SupportSettings() {
             <strong>{t('settings.support.itch')}</strong>
             <small>{t('settings.support.itchSub')}</small>
           </div>
-          <Button variant="ghost" disabled={busy !== null} onClick={() => void refresh('itch')}>
-            {busy === 'itch' ? t('settings.support.checking') : t('vr.offer.purchased')}
+          <Button variant="ghost" disabled={busy !== null && !linking} onClick={linking ? cancelItchLink : () => void refresh('itch')}>
+            {linking ? t('common.cancel') : busy === 'itch' ? t('settings.support.checking') : t('vr.offer.purchased')}
           </Button>
           <Button onClick={() => open(ITCH_URL)}>
             {t('vr.offer.itch')}
