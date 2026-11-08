@@ -114,6 +114,19 @@ pub struct Controller {
 pub struct Overlays(std::convert::Infallible);
 
 #[cfg(not(windows))]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Headset {
+    pub driver: String,
+    pub system: String,
+    pub model: String,
+}
+
+#[cfg(not(windows))]
+pub fn headset() -> Option<Headset> {
+    None
+}
+
+#[cfg(not(windows))]
 impl Overlays {
     pub fn new() -> Result<Overlays, String> {
         Err("not-installed: SteamVR needs Windows".into())
@@ -145,7 +158,7 @@ impl Overlays {
     pub fn connected(&mut self) -> bool {
         match self.0 {}
     }
-    pub fn recentre(&mut self, _: f32) -> Result<(), String> {
+    pub fn recentre(&mut self, _: bool) -> Result<(), String> {
         match self.0 {}
     }
     pub fn show(&mut self, _: u32, _: bool) -> Result<(), String> {
