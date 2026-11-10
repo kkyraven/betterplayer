@@ -12,17 +12,20 @@ use buttplug_core::message::{DeviceFeature, DeviceFeatureOutput, InputType, Outp
 use buttplug_server::ButtplugServerBuilder;
 use buttplug_server::device::{ServerDeviceManager, ServerDeviceManagerBuilder};
 use buttplug_server_device_config::{
-    DeviceConfigurationManager, DeviceConfigurationManagerBuilder, load_protocol_configs,
+    DeviceConfigurationManager, DeviceConfigurationManagerBuilder, ServerDeviceDefinition,
+    ServerDeviceDefinitionBuilder, load_protocol_configs,
 };
 use buttplug_server_hwmgr_btleplug::BtlePlugCommunicationManagerBuilder;
 use futures_util::StreamExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
+use crate::interval::{Interval, Pacer, Point};
 use crate::output::{CONNECT_GLIDE_MS, Keyframe};
 use crate::tcode::AxisClamp;
 
 pub const BIND_TIMEOUT: Duration = Duration::from_secs(15);
 const SEND_EVERY_MS: f64 = 100.0;
+const MESSAGE_GAP_MS: u32 = 5;
 const KEYFRAME_SLIP: Duration = Duration::from_millis(40);
 const SPEED_FULL: f64 = 4.0;
 const SPEED_TAU_MS: f64 = 150.0;
@@ -325,6 +328,8 @@ impl Hub {
             levels: vec![LevelMap::default(); n],
             inputs: vec![None; n],
             last: vec![None; n],
+            interval: Interval::default(),
+            pacers: vec![Pacer::default(); n],
             speed: [0.0; Axis::COUNT],
             prev: [None; Axis::COUNT],
             since_send_ms: 0.0,
@@ -407,9 +412,18 @@ fn device_config() -> Result<DeviceConfigurationManager, String> {
         }
     }
     for (identifier, definition) in all.base_device_definitions() {
-        builder.base_device_definition(identifier, definition.clone());
+        let gap = definition.message_gap_ms().or((!takes_positions(definition)).then_some(MESSAGE_GAP_MS));
+        let definition = ServerDeviceDefinitionBuilder::from_user(definition).message_gap_ms(gap).finish();
+        builder.base_device_definition(identifier, Arc::new(definition));
     }
     builder.finish().map_err(|e| format!("device config: {e}"))
+}
+
+fn takes_positions(definition: &ServerDeviceDefinition) -> bool {
+    definition
+        .features()
+        .values()
+        .any(|f| f.contains_output(OutputType::Position) || f.contains_output(OutputType::HwPositionWithDuration))
 }
 
 async fn run(shared: Arc<Shared>, mut rx: UnboundedReceiver<Cmd>) -> Result<(), String> {
@@ -613,6 +627,8 @@ pub struct ToyLink {
     levels: Vec<LevelMap>,
     inputs: Vec<Option<f64>>,
     last: Vec<Option<i32>>,
+    pub interval: Interval,
+    pacers: Vec<Pacer>,
     speed: [f64; Axis::COUNT],
     prev: [Option<f64>; Axis::COUNT],
     since_send_ms: f64,
@@ -625,6 +641,7 @@ impl ToyLink {
     pub fn stop(&mut self) -> io::Result<()> {
         self.tx.send(DevCmd::Stop).map_err(|_| io::Error::new(io::ErrorKind::NotConnected, "toy disconnected"))?;
         self.last.fill(None);
+        self.pacers.fill(Pacer::default());
         self.inputs.fill(None);
         self.prev.fill(None);
         self.speed.fill(0.0);
@@ -723,9 +740,10 @@ impl ToyLink {
         interval_ms: u32,
         active: &[bool; Axis::COUNT],
     ) -> io::Result<bool> {
-        self.send_scaled(values, clamps, interval_ms, active, 1.0, None)
+        self.send_scaled(values, clamps, interval_ms, active, 1.0, None, &[None; Axis::COUNT])
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn send_scaled(
         &mut self,
         values: &[f64; Axis::COUNT],
@@ -734,6 +752,7 @@ impl ToyLink {
         active: &[bool; Axis::COUNT],
         scale: f64,
         keyframe: Option<Keyframe>,
+        points: &[Option<Point>; Axis::COUNT],
     ) -> io::Result<bool> {
         self.track_speed(values, interval_ms);
         for i in 0..Axis::COUNT {
@@ -750,14 +769,12 @@ impl ToyLink {
         }
         self.since_send_ms += interval_ms as f64;
         let due = self.since_send_ms >= SEND_EVERY_MS;
-        if !due && keyframe.is_none() {
-            return Ok(false);
-        }
         let duration = self.since_send_ms.round() as u32;
         if due {
             self.since_send_ms = 0.0;
         }
         let now = Instant::now();
+        let sweeping = self.testing_since.is_some();
         let test = self
             .testing_since
             .filter(|_| due)
@@ -794,7 +811,11 @@ impl ToyLink {
                 continue;
             }
             self.keyframe[i] = None;
-            if !due {
+            let paced = f.is_level() && !sweeping;
+            if sweeping {
+                self.pacers[i] = Pacer::default();
+            }
+            if !paced && !due {
                 continue;
             }
             let testable = !matches!(
@@ -827,12 +848,25 @@ impl ToyLink {
                     })
                 });
             let v = match driven {
+                Some(v) if paced => {
+                    let point = self.axes[i]
+                        .filter(|a| !follows_speed(f, *a))
+                        .and_then(|a| points[a.index()])
+                        .map(|p| Point { value: level.apply(p.value.clamp(0.0, 1.0)) * scale, ..p });
+                    let sent = self.last[i].map(|sent| sent as f64 / 1000.0);
+                    match self.pacers[i].step(self.interval, v, point, sent, interval_ms as f64) {
+                        Some(v) => v,
+                        None => continue,
+                    }
+                }
                 Some(v) => v,
-                None if self.last[i].is_some() => match rest(f) {
-                    Some(r) => r,
-                    None => continue,
-                },
-                None => continue,
+                None => {
+                    self.pacers[i] = Pacer::default();
+                    match rest(f).filter(|_| self.last[i].is_some()) {
+                        Some(r) => r,
+                        None => continue,
+                    }
+                }
             };
             let timed = f.kind == FeatureKind::TimedPosition;
             if timed && self.glide_until[i].is_some_and(|t| now < t) {
@@ -896,6 +930,8 @@ impl Drop for ToyLink {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    const NO_POINTS: [Option<Point>; Axis::COUNT] = [None; Axis::COUNT];
 
     pub(crate) fn fixture(kinds: &[FeatureKind]) -> (ToyLink, UnboundedReceiver<DevCmd>) {
         let (tx, _rx) = unbounded_channel();
@@ -967,11 +1003,11 @@ pub(crate) mod tests {
         let clamps = [AxisClamp::default(); Axis::COUNT];
         let active = [true; Axis::COUNT];
         let move_to = Keyframe { at_ms: 2000.0, pos: 0.9, in_ms: 2000.0 };
-        link.send_scaled(&[0.5; Axis::COUNT], &clamps, 100, &active, 1.0, Some(move_to)).unwrap();
+        link.send_scaled(&[0.5; Axis::COUNT], &clamps, 100, &active, 1.0, Some(move_to), &NO_POINTS).unwrap();
         assert_eq!(output_value(&mut rx).1, 0.9);
         link.stop().unwrap();
         assert!(matches!(rx.try_recv(), Ok(DevCmd::Stop)));
-        link.send_scaled(&[0.6; Axis::COUNT], &clamps, 100, &active, 0.5, None).unwrap();
+        link.send_scaled(&[0.6; Axis::COUNT], &clamps, 100, &active, 0.5, None, &NO_POINTS).unwrap();
         let DevCmd::Output(_, ClientDeviceOutputCommand::HwPositionWithDuration(_, duration)) = rx.try_recv().unwrap() else { panic!("expected timed position") };
         assert_eq!(duration, 100, "the sensation ramp must not be extended by a connect glide");
     }
@@ -985,6 +1021,9 @@ pub(crate) mod tests {
         }
         assert!(!protocols.contains_key("ossm"));
         assert!(!config.base_device_definitions().is_empty());
+        let definitions = config.base_device_definitions();
+        assert!(definitions.values().all(|d| takes_positions(d) || d.message_gap_ms().is_some()));
+        assert!(definitions.values().any(|d| takes_positions(d) && d.message_gap_ms().is_none()));
     }
 
     #[test]
@@ -1247,23 +1286,23 @@ pub(crate) mod tests {
         link.set_axes(&HashMap::from([(0, Some(Axis::L0)), (1, Some(Axis::V0))]));
         let clamps = [AxisClamp::default(); Axis::COUNT];
         let on = [true; Axis::COUNT];
-        link.send_scaled(&[0.5; Axis::COUNT], &clamps, 100, &on, 1.0, Some(Keyframe { at_ms: 1000.0, pos: 0.9, in_ms: 300.0 })).unwrap();
+        link.send_scaled(&[0.5; Axis::COUNT], &clamps, 100, &on, 1.0, Some(Keyframe { at_ms: 1000.0, pos: 0.9, in_ms: 300.0 }), &NO_POINTS).unwrap();
         assert!(matches!(rx.try_recv(), Ok(DevCmd::Output(0, ClientDeviceOutputCommand::HwPositionWithDuration(_, CONNECT_GLIDE_MS)))));
         assert_eq!(output_value(&mut rx), (1, 0.5));
         link.glide_until[0] = Some(Instant::now() - Duration::from_millis(1));
         let k = Keyframe { at_ms: 1000.0, pos: 0.9, in_ms: 300.0 };
-        assert!(link.send_scaled(&[0.6; Axis::COUNT], &clamps, 10, &on, 1.0, Some(k)).unwrap());
+        assert!(link.send_scaled(&[0.6; Axis::COUNT], &clamps, 10, &on, 1.0, Some(k), &NO_POINTS).unwrap());
         assert!(matches!(rx.try_recv(), Ok(DevCmd::Output(0, ClientDeviceOutputCommand::HwPositionWithDuration(ClientDeviceCommandValue::Percent(p), 300))) if (p - 0.9).abs() < 1e-9));
         assert!(rx.try_recv().is_err());
-        assert!(!link.send_scaled(&[0.6; Axis::COUNT], &clamps, 10, &on, 1.0, Some(Keyframe { in_ms: 290.0, ..k })).unwrap());
+        assert!(!link.send_scaled(&[0.6; Axis::COUNT], &clamps, 10, &on, 1.0, Some(Keyframe { in_ms: 290.0, ..k }), &NO_POINTS).unwrap());
         for _ in 0..8 {
-            link.send_scaled(&[0.6; Axis::COUNT], &clamps, 10, &on, 1.0, Some(k)).unwrap();
+            link.send_scaled(&[0.6; Axis::COUNT], &clamps, 10, &on, 1.0, Some(k), &NO_POINTS).unwrap();
         }
         assert_eq!(output_value(&mut rx), (1, 0.6));
         assert!(rx.try_recv().is_err());
-        assert!(link.send_scaled(&[0.7; Axis::COUNT], &clamps, 10, &on, 1.0, Some(Keyframe { at_ms: 1300.0, pos: 0.1, in_ms: 250.0 })).unwrap());
+        assert!(link.send_scaled(&[0.7; Axis::COUNT], &clamps, 10, &on, 1.0, Some(Keyframe { at_ms: 1300.0, pos: 0.1, in_ms: 250.0 }), &NO_POINTS).unwrap());
         assert!(matches!(rx.try_recv(), Ok(DevCmd::Output(0, ClientDeviceOutputCommand::HwPositionWithDuration(ClientDeviceCommandValue::Percent(p), 250))) if (p - 0.1).abs() < 1e-9));
-        assert!(link.send_scaled(&[0.7; Axis::COUNT], &clamps, 100, &on, 1.0, None).unwrap());
+        assert!(link.send_scaled(&[0.7; Axis::COUNT], &clamps, 100, &on, 1.0, None, &NO_POINTS).unwrap());
         assert!(matches!(rx.try_recv(), Ok(DevCmd::Output(0, ClientDeviceOutputCommand::HwPositionWithDuration(ClientDeviceCommandValue::Percent(p), d))) if (p - 0.7).abs() < 1e-9 && d >= 100));
     }
 
@@ -1297,31 +1336,36 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn cadence_skips_duplicates_and_disabled_axis_stops() {
+    fn a_level_follows_the_interval_and_rests_at_once() {
         let (mut link, mut rx) = fixture(&[FeatureKind::Vibrate]);
         link.set_axes(&HashMap::from([(0, Some(Axis::V0))]));
+        link.set_levels(&HashMap::from([(0, LevelMap { cap: 0.5, ..LevelMap::default() })]));
         let mut clamps = [AxisClamp::default(); Axis::COUNT];
-        for _ in 0..9 {
-            assert!(
-                !link
-                    .send(&[0.6; Axis::COUNT], &clamps, 10, &[true; Axis::COUNT])
-                    .unwrap()
-            );
+        let tick = |link: &mut ToyLink, v: f64, clamps: &[AxisClamp; Axis::COUNT], point: Option<Point>| {
+            let mut points = NO_POINTS;
+            points[Axis::V0.index()] = point;
+            link.send_scaled(&[v; Axis::COUNT], clamps, 10, &[true; Axis::COUNT], 1.0, None, &points).unwrap()
+        };
+        assert!(tick(&mut link, 0.2, &clamps, None));
+        assert_eq!(output_value(&mut rx).1, 0.1);
+        for v in [0.2, 1.0, 0.2, 0.2, 0.2, 0.2, 0.2] {
+            assert!(!tick(&mut link, v, &clamps, None));
         }
-        assert!(
-            link.send(&[0.6; Axis::COUNT], &clamps, 10, &[true; Axis::COUNT])
-                .unwrap()
-        );
-        assert_eq!(output_value(&mut rx).1, 0.6);
-        assert!(
-            !link
-                .send(&[0.6; Axis::COUNT], &clamps, 100, &[true; Axis::COUNT])
-                .unwrap()
-        );
+        assert!(tick(&mut link, 0.2, &clamps, None));
+        assert_eq!(output_value(&mut rx).1, 0.5);
+        link.interval = Interval::Fixed(20);
+        assert!(!tick(&mut link, 0.4, &clamps, None));
+        assert!(tick(&mut link, 0.6, &clamps, None));
+        assert_eq!(output_value(&mut rx).1, 0.3);
+        link.interval = Interval::Points;
+        let point = Some(Point { at_ms: 500.0, value: 0.8 });
+        assert!(tick(&mut link, 0.7, &clamps, point));
+        assert_eq!(output_value(&mut rx).1, 0.4);
+        assert!(!tick(&mut link, 0.7, &clamps, point));
         clamps[Axis::V0.index()].enabled = false;
-        link.send(&[0.6; Axis::COUNT], &clamps, 100, &[true; Axis::COUNT])
-            .unwrap();
+        assert!(tick(&mut link, 0.7, &clamps, point));
         assert_eq!(output_value(&mut rx).1, 0.0);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

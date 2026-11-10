@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 
+use crate::interval::{Interval, Pacer, Point};
 use crate::intiface;
 use crate::output::{CONNECT_GLIDE_MS, Keyframe};
 use crate::tcode::AxisClamp;
@@ -25,6 +26,7 @@ struct Device {
     last: [Option<u16>; 3],
     glide_until: Option<Instant>,
     keyframe: Option<(f64, Instant)>,
+    pacer: Pacer,
 }
 
 impl Device {
@@ -81,6 +83,7 @@ pub struct Buttplug {
     max_ping: Duration,
     last_ping: Instant,
     since_send_ms: f64,
+    pub interval: Interval,
 }
 
 impl Buttplug {
@@ -94,6 +97,7 @@ impl Buttplug {
             device.last[1] = None;
             device.last[2] = None;
             device.keyframe = None;
+            device.pacer = Pacer::default();
         }
         Ok(())
     }
@@ -109,6 +113,7 @@ impl Buttplug {
             max_ping: Duration::ZERO,
             last_ping: Instant::now(),
             since_send_ms: 0.0,
+            interval: Interval::default(),
         };
         bp.send_msg(
             "RequestServerInfo",
@@ -240,6 +245,7 @@ impl Buttplug {
         interval_ms: u32,
         active: &[bool; Axis::COUNT],
         keyframe: Option<Keyframe>,
+        vibrate_point: Option<Point>,
     ) -> io::Result<bool> {
         self.since_send_ms += interval_ms as f64;
         let due = self.since_send_ms >= SEND_EVERY_MS;
@@ -256,6 +262,8 @@ impl Buttplug {
         let stroke = clamped(Axis::L0);
         let keyframe = keyframe.and_then(|k| Some((ranged(Axis::L0, k.pos)?, k)));
         let vibrate = level(Axis::V0, 0.0);
+        let vibrate_point = vibrate_point.and_then(|p| Some(Point { value: ranged(Axis::V0, p.value)?, ..p }));
+        let interval = self.interval;
         let twist = level(Axis::R0, 0.5);
         let mut batch = Vec::new();
         let now = Instant::now();
@@ -270,13 +278,17 @@ impl Buttplug {
                     json!({ "DeviceIndex": d.index, "Vectors": vectors }),
                 ));
             }
-            if !due {
-                continue;
-            }
-            if let Some(v) = vibrate
-                .filter(|_| !d.vibrate.is_empty())
-                .filter(|v| d.last[1] != Some(unit(*v)))
-            {
+            let paced = match vibrate.filter(|_| !d.vibrate.is_empty()) {
+                Some(v) if active[Axis::V0.index()] => {
+                    let sent = d.last[1].map(|sent| sent as f64 / 1000.0);
+                    d.pacer.step(interval, v, vibrate_point, sent, interval_ms as f64)
+                }
+                rest => {
+                    d.pacer = Pacer::default();
+                    rest
+                }
+            };
+            if let Some(v) = paced.filter(|v| d.last[1] != Some(unit(*v))) {
                 d.last[1] = Some(unit(v));
                 let scalars: Vec<Value> = d
                     .vibrate
@@ -287,6 +299,9 @@ impl Buttplug {
                     "ScalarCmd",
                     json!({ "DeviceIndex": d.index, "Scalars": scalars }),
                 ));
+            }
+            if !due {
+                continue;
             }
             if let Some(v) = twist
                 .filter(|_| d.rotate > 0)
@@ -352,6 +367,7 @@ fn parse_device(v: &Value) -> Option<Device> {
         last: [None; 3],
         glide_until: None,
         keyframe: None,
+        pacer: Pacer::default(),
     })
 }
 
@@ -359,8 +375,7 @@ fn parse_device(v: &Value) -> Option<Device> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn stop_cancels_pending_linear_commands_and_resume_resends_a_sample() {
+    fn pair(device: Device) -> (Buttplug, WebSocket<TcpStream>) {
         use std::net::TcpListener;
         use tungstenite::protocol::Role;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -368,23 +383,53 @@ mod tests {
         let (server, _) = listener.accept().unwrap();
         server.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
         let ws = WebSocket::from_raw_socket(MaybeTlsStream::Plain(client), Role::Client, None);
-        let mut receiver = WebSocket::from_raw_socket(server, Role::Server, None);
+        let link = Buttplug { ws, next_id: 1, devices: vec![device], changed: false, log: VecDeque::new(), max_ping: Duration::ZERO, last_ping: Instant::now(), since_send_ms: 0.0, interval: Interval::default() };
+        (link, WebSocket::from_raw_socket(server, Role::Server, None))
+    }
+
+    fn received(receiver: &mut WebSocket<TcpStream>) -> Value {
+        serde_json::from_str(receiver.read().unwrap().to_text().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn stop_cancels_pending_linear_commands_and_resume_resends_a_sample() {
         let mut device = parse_device(&json!({ "DeviceIndex": 1, "DeviceName": "Stroker", "DeviceMessages": { "LinearCmd": [{}] } })).unwrap();
         device.last[0] = Some(500);
         device.glide_until = Some(Instant::now() - Duration::from_secs(1));
-        let mut link = Buttplug { ws, next_id: 1, devices: vec![device], changed: false, log: VecDeque::new(), max_ping: Duration::ZERO, last_ping: Instant::now(), since_send_ms: 0.0 };
+        let (mut link, mut receiver) = pair(device);
         let clamps = [AxisClamp::default(); Axis::COUNT];
         let active = [true; Axis::COUNT];
-        link.send(&[0.5; Axis::COUNT], &clamps, 100, &active, Some(Keyframe { at_ms: 2000.0, pos: 0.9, in_ms: 2000.0 })).unwrap();
-        let move_cmd: Value = serde_json::from_str(receiver.read().unwrap().to_text().unwrap()).unwrap();
-        assert_eq!(move_cmd[0]["LinearCmd"]["Vectors"][0]["Duration"], 2000);
+        link.send(&[0.5; Axis::COUNT], &clamps, 100, &active, Some(Keyframe { at_ms: 2000.0, pos: 0.9, in_ms: 2000.0 }), None).unwrap();
+        assert_eq!(received(&mut receiver)[0]["LinearCmd"]["Vectors"][0]["Duration"], 2000);
         link.stop().unwrap();
-        let stop_cmd: Value = serde_json::from_str(receiver.read().unwrap().to_text().unwrap()).unwrap();
-        assert!(stop_cmd[0].get("StopAllDevices").is_some());
+        assert!(received(&mut receiver)[0].get("StopAllDevices").is_some());
         assert!(link.devices[0].keyframe.is_none());
-        link.send(&[0.5; Axis::COUNT], &clamps, 100, &active, None).unwrap();
-        let resume_cmd: Value = serde_json::from_str(receiver.read().unwrap().to_text().unwrap()).unwrap();
-        assert_eq!(resume_cmd[0]["LinearCmd"]["Vectors"][0]["Duration"], 100);
+        link.send(&[0.5; Axis::COUNT], &clamps, 100, &active, None, None).unwrap();
+        assert_eq!(received(&mut receiver)[0]["LinearCmd"]["Vectors"][0]["Duration"], 100);
+    }
+
+    #[test]
+    fn a_vibrator_follows_the_interval_within_the_range_of_v0() {
+        let device = parse_device(&json!({ "DeviceIndex": 1, "DeviceName": "Vibe", "DeviceMessages": { "ScalarCmd": [{ "ActuatorType": "Vibrate" }] } })).unwrap();
+        let (mut link, mut receiver) = pair(device);
+        let mut clamps = [AxisClamp::default(); Axis::COUNT];
+        clamps[Axis::V0.index()].max = 0.5;
+        let on = [true; Axis::COUNT];
+        let scalar = |receiver: &mut WebSocket<TcpStream>| received(receiver)[0]["ScalarCmd"]["Scalars"][0]["Scalar"].as_f64().unwrap();
+        link.interval = Interval::Points;
+        let point = |at_ms: f64, value: f64| Some(Point { at_ms, value });
+        assert!(link.send(&[0.1; Axis::COUNT], &clamps, 10, &on, None, point(0.0, 0.0)).unwrap());
+        assert_eq!(scalar(&mut receiver), 0.0);
+        assert!(link.send(&[0.7; Axis::COUNT], &clamps, 10, &on, None, point(15.0, 1.0)).unwrap());
+        assert_eq!(scalar(&mut receiver), 0.5);
+        assert!(!link.send(&[0.6; Axis::COUNT], &clamps, 10, &on, None, point(15.0, 1.0)).unwrap());
+        link.interval = Interval::Fixed(20);
+        assert!(link.send(&[0.2; Axis::COUNT], &clamps, 10, &on, None, None).unwrap());
+        assert_eq!(scalar(&mut receiver), 0.1);
+        let mut paused = on;
+        paused[Axis::V0.index()] = false;
+        assert!(link.send(&[0.2; Axis::COUNT], &clamps, 10, &paused, None, None).unwrap());
+        assert_eq!(scalar(&mut receiver), 0.0);
     }
 
     #[test]
@@ -406,7 +451,7 @@ mod tests {
     }
 
     fn linear() -> Device {
-        Device { index: 0, name: "Handy".into(), linear: 1, vibrate: Vec::new(), rotate: 0, last: [None; 3], glide_until: None, keyframe: None }
+        Device { index: 0, name: "Handy".into(), linear: 1, vibrate: Vec::new(), rotate: 0, last: [None; 3], glide_until: None, keyframe: None, pacer: Pacer::default() }
     }
 
     #[test]

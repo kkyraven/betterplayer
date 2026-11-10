@@ -159,6 +159,15 @@ export const VIBRATION_SOURCES: readonly AxisId[] = TCODE_AXES.map((a) => a.id).
 export const VIBRATION_DEPTH_MAX = 0.25
 export const OUTPUT_DELAY_MAX = 500
 
+export type OutputInterval = 'points' | number
+export const OUTPUT_INTERVAL_MIN = 20
+export const OUTPUT_INTERVAL_MAX = 1000
+export const OUTPUT_INTERVAL_DEFAULT = 50
+
+export function clampOutputInterval(ms: number): number {
+  return Math.max(OUTPUT_INTERVAL_MIN, Math.min(OUTPUT_INTERVAL_MAX, Math.round(ms / 10) * 10))
+}
+
 export interface FeatureLevel {
   from: number
   to: number
@@ -382,6 +391,7 @@ export interface OutputConfig {
   params?: Partial<Record<ParamAxisId, ParamSourceSettings>>
   vibration?: VibrationSettings
   delayMs?: number
+  interval?: OutputInterval
   volume?: number
   token?: string
   shocker?: string

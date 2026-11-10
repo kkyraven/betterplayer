@@ -3,13 +3,15 @@ import type { AxisClamp, OutputState } from 'bp-engine'
 import { useState } from 'react'
 import { AXES, AXIS_LABEL, AXIS_NAME, TCODE_AXES, axesForProfile, isAxisId, type AxisId } from '@shared/axes'
 import type { MessageKey } from '@shared/i18n'
-import { OUTPUT_DELAY_MAX, OUTPUT_PROFILES, VIBRATION_DEPTH_MAX, VIBRATION_SOURCES, defaultFeatureLevel, defaultVibration, featureLevelOutput, vibrationHzMax, type FeatureLevel, type OutputProfile } from '@shared/settings'
+import { OUTPUT_DELAY_MAX, OUTPUT_INTERVAL_DEFAULT, OUTPUT_INTERVAL_MAX, OUTPUT_INTERVAL_MIN, OUTPUT_PROFILES, VIBRATION_DEPTH_MAX, VIBRATION_SOURCES, clampOutputInterval, defaultFeatureLevel, defaultVibration, featureLevelOutput, vibrationHzMax, type FeatureLevel, type OutputProfile } from '@shared/settings'
 import { Button } from '@/components/ui/Button'
+import { NumberInput } from '@/components/ui/NumberInput'
 import { Segmented } from '@/components/ui/Segmented'
 import { Slider } from '@/components/ui/Slider'
 import { Switch } from '@/components/ui/Switch'
 import { engine } from '@/engine/client'
 import { cx } from '@/lib/cx'
+import { fmtNum } from '@/lib/format'
 import { isEngineOutput, outputName, setStopOnPause, useDevices, useOutputStats, usePlayerAxes, type ConfiguredOutput } from '@/state/devices'
 import { useT } from '@/state/i18n'
 import { useSettings } from '@/state/settings'
@@ -19,11 +21,10 @@ import { OpenShockPanel } from './OpenShockPanel'
 import { RestimPanel } from './RestimPanel'
 import { featureName, ossmText, statusDot, statusText } from './status'
 
-const SAFETY: ReadonlyArray<[MessageKey, string]> = [
-  ['devices.output.syncRamp', '4 s'],
-  ['devices.output.connectGlide', '1.5 s'],
-  ['devices.output.speedLimit', '10/s'],
-  ['devices.output.autoHome', '5 s'],
+const INTERVAL_MODES: ReadonlyArray<{ value: 'auto' | 'points' | 'custom'; label: MessageKey }> = [
+  { value: 'auto', label: 'common.auto' },
+  { value: 'points', label: 'devices.output.everyPoint' },
+  { value: 'custom', label: 'session.pacing.custom' },
 ]
 
 const PROFILE_OPTIONS: ReadonlyArray<{ value: OutputProfile; label: MessageKey }> = OUTPUT_PROFILES.map((p) => ({ value: p, label: p === 'stroker' ? 'devices.output.stroker' : 'devices.output.restim' }))
@@ -38,6 +39,7 @@ export function OutputDetail({ output, state }: { output: ConfiguredOutput; stat
   const setFeatureLevel = useDevices((s) => s.setFeatureLevel)
   const setVibration = useDevices((s) => s.setVibration)
   const setDelay = useDevices((s) => s.setDelay)
+  const setSendInterval = useDevices((s) => s.setSendInterval)
   const stopOnPause = useSettings((s) => s.settings?.devices.stopOnPause ?? true)
   const [clamps, setClamps] = useState<AxisClamp[]>(() => (isEngineOutput(output) ? engine.outputClamps(output.id) : null) ?? AXES.map(() => ({ enabled: true, min: 0, max: 1 })))
   const [name, setName] = useState(output.config.name ?? '')
@@ -58,6 +60,21 @@ export function OutputDetail({ output, state }: { output: ConfiguredOutput; stat
   const isOpenShock = output.config.kind === 'openshock' || kind === 'pishock'
   const hasDelay = kind !== 'handy' && !isHowl
   const delay = output.config.delayMs ?? 0
+  const hasInterval = kind === 'buttplug' || (isToy && (state?.features.some((f) => f.level) ?? false))
+  const interval = output.config.interval
+  const [customMs, setCustomMs] = useState(typeof interval === 'number' ? interval : OUTPUT_INTERVAL_DEFAULT)
+  const setCustom = (ms: number) => {
+    const next = clampOutputInterval(ms)
+    setCustomMs(next)
+    setSendInterval(output.id, next)
+  }
+  const lead = useSettings((s) => s.settings?.axesDefault[axes[0]?.id ?? 'L0'])
+  const safety: ReadonlyArray<[MessageKey, string]> = [
+    ['devices.output.syncRamp', '4 s'],
+    ['devices.output.connectGlide', '1.5 s'],
+    ['devices.output.speedLimit', lead?.speedLimit ? t('settings.axes.perSecond', { value: fmtNum(lead.speedLimit) }) : t('common.off')],
+    ['devices.output.autoHome', lead?.autoHomeDelayMs ? t('common.secondsShort', { value: fmtNum(lead.autoHomeDelayMs / 1000) }) : t('common.off')],
+  ]
   const hasLevels = isToy || kind === 'buttplug' || (profile === 'stroker' && (isSocket || kind === 'serial' || kind === 'ble'))
 
   const setClamp = (index: number, clamp: AxisClamp) => {
@@ -391,6 +408,19 @@ export function OutputDetail({ output, state }: { output: ConfiguredOutput; stat
               </div>
               <span className="val">{delay === 0 ? t('devices.output.ms', { value: 0 }) : t(delay < 0 ? 'devices.output.msEarly' : 'devices.output.msLate', { value: Math.abs(delay) })}</span>
             </div>
+            {hasInterval && (
+              <div className="prow">
+                <span className="lbl">{t('devices.output.interval')}</span>
+                <span className="spacer" />
+                {typeof interval === 'number' && <NumberInput value={interval} min={OUTPUT_INTERVAL_MIN} max={OUTPUT_INTERVAL_MAX} unit="ms" digits={4} label={t('devices.output.intervalMs')} onChange={setCustom} />}
+                <Segmented
+                  options={INTERVAL_MODES.map((o) => ({ value: o.value, label: t(o.label) }))}
+                  value={interval === undefined ? 'auto' : interval === 'points' ? 'points' : 'custom'}
+                  onChange={(mode) => (mode === 'custom' ? setCustom(customMs) : setSendInterval(output.id, mode === 'points' ? 'points' : null))}
+                  label={t('devices.output.interval')}
+                />
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -409,7 +439,7 @@ export function OutputDetail({ output, state }: { output: ConfiguredOutput; stat
               <Switch label={t('devices.output.stopLevelsOnPause')} checked={stopOnPause} onCheckedChange={setStopOnPause} />
             </div>
           )}
-          {SAFETY.map(([label, value]) => (
+          {safety.map(([label, value]) => (
             <div key={label} className="prow">
               <span className="lbl">{t(label)}</span>
               <span className="spacer" />

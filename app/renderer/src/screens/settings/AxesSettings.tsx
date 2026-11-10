@@ -1,3 +1,4 @@
+import { fmtNum } from '@/lib/format'
 import { useState } from 'react'
 import { Prompt } from '@/components/ui/Prompt'
 import { settingTarget } from './navigation'
@@ -44,8 +45,6 @@ function isDefault(id: AxisId, s: AxisSettings): boolean {
   const keys = new Set([...Object.keys(s), ...Object.keys(d)] as (keyof AxisSettings)[])
   return [...keys].every((k) => s[k] === d[k])
 }
-
-const fmtNum = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(1))
 
 export function AxesSettings({ estim = false }: { estim?: boolean }) {
   const t = useT()

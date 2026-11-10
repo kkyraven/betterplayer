@@ -100,6 +100,13 @@ describe('delay', () => {
   })
 })
 
+describe('interval', () => {
+  it('keeps a points or typed interval, in range and 10 ms steps, and drops junk', () => {
+    const outputs = migrate({ version: 1, devices: { outputs: ['points', 47, 5, 4000, 'fast', undefined].map((interval) => ({ ...buttplug, interval })) } }).devices.outputs
+    expect(outputs.map((o) => o.interval)).toEqual(['points', 50, 20, 1000, undefined, undefined])
+  })
+})
+
 describe('estim audio', () => {
   it('keeps one audio device with its label and volume in hundredths, never as restim, and drops one with no sound output', () => {
     const audio = { kind: 'audio', profile: 'stroker', device: 'wasapi/{x}', label: 'USB Audio' }

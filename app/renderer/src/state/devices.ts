@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { create } from 'zustand'
 import { track } from '@/state/usage'
 import type { EstimAudioState, OutputState, OutputStats, RampConfig } from 'bp-engine'
-import { OPENSHOCK_PULSE_MS, type FeatureLevel, type OpenShockTrigger, type OutputConfig, type OutputProfile, type ParamAxisId, type ParamSourceSettings, type RampSettings, type Settings, type VibrationSettings } from '@shared/settings'
+import { OPENSHOCK_PULSE_MS, type FeatureLevel, type OpenShockTrigger, type OutputConfig, type OutputInterval, type OutputProfile, type ParamAxisId, type ParamSourceSettings, type RampSettings, type Settings, type VibrationSettings } from '@shared/settings'
 import { AXIS_IDS, type AxisId } from '@shared/axes'
 import { engine } from '@/engine/client'
 import { t } from '@/state/i18n'
@@ -33,6 +33,7 @@ interface DevicesState {
   setTrigger: (id: number, trigger: OpenShockTrigger) => Promise<void>
   setVibration: (id: number, vibration: VibrationSettings | null) => Promise<void>
   setDelay: (id: number, ms: number) => void
+  setSendInterval: (id: number, interval: OutputInterval | null) => void
   setVolume: (id: number, volume: number) => void
   setAudioDevice: (id: number, device: { name: string; label: string }) => Promise<void>
   setRamp: (id: number, ramp: RampSettings) => Promise<void>
@@ -98,6 +99,7 @@ function connect(config: OutputConfig): ConfiguredOutput {
   pushFeatureAxes(id, config)
   if (config.vibration) engine.setOutputVibration(id, config.vibration)
   if (config.delayMs) engine.setOutputDelay(id, config.delayMs)
+  if (config.interval !== undefined) engine.setOutputInterval(id, config.interval)
   return { id, config }
 }
 
@@ -256,6 +258,11 @@ export const useDevices = create<DevicesState>()((set, get) => {
       const output = get().outputs.find((o) => o.id === id)
       if (output?.config.kind === 'audio') pushAudio(output.config)
       else engine.setOutputDelay(id, ms)
+      persistDebounced()
+    },
+    setSendInterval: (id, interval) => {
+      engine.setOutputInterval(id, interval)
+      set((s) => ({ outputs: s.outputs.map((o) => (o.id === id ? { ...o, config: { ...o.config, interval: interval ?? undefined } } : o)) }))
       persistDebounced()
     },
     setVolume: (id, volume) => {

@@ -50,6 +50,7 @@ fn sr6_stream_output_preserves_all_six_axes_ranges_and_timed_moves() {
     let mut context = TickContext {
         media_ms: 0.0,
         stroke_next: None,
+        points: [None; Axis::COUNT],
         playing: true,
         manual_axes: [false; Axis::COUNT],
         estim_manual: false,

@@ -22,7 +22,7 @@ export function NumberInput({ value, onChange, min = 0, max = Number.MAX_SAFE_IN
   const commit = () => {
     setEditing(false)
     const n = Number(text.trim())
-    if (!Number.isFinite(n)) return setText(String(value))
+    if (!text.trim() || !Number.isFinite(n)) return setText(String(value))
     const next = Math.min(max, Math.max(min, n))
     setText(String(next))
     if (next !== value) onChange(next)

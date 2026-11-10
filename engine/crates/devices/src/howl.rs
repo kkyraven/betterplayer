@@ -587,6 +587,7 @@ mod tests {
             estim_volume: crate::ramp::VolumeSettings::default(),
             media_ms,
             stroke_next: None,
+            points: [None; bp_script::Axis::COUNT],
             playing: !paused,
             rate: 1.0,
             interval_ms: 10,

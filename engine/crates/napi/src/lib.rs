@@ -2247,6 +2247,19 @@ impl Engine {
         Ok(self.inner.set_output_delay(id, ms.clamp(-5000.0, 5000.0)))
     }
 
+    #[napi(ts_args_type = "id: number, interval: 'points' | number | null")]
+    pub fn set_output_interval(&self, id: u32, interval: Option<Either<String, f64>>) -> Result<bool> {
+        let interval = match interval {
+            None => bp_devices::Interval::Auto,
+            Some(Either::A(mode)) if mode == "points" => bp_devices::Interval::Points,
+            Some(Either::B(ms)) if ms.is_finite() => {
+                bp_devices::Interval::Fixed((ms.round() as u32).clamp(bp_devices::FIXED_MIN_MS, bp_devices::FIXED_MAX_MS))
+            }
+            _ => return Err(err("unknown output interval".into())),
+        };
+        Ok(self.inner.set_output_interval(id, interval))
+    }
+
     #[napi]
     pub fn set_coyote_strength(&self, id: u32, a: u8, b: u8) -> bool {
         self.inner.set_coyote_strength(id, a, b)

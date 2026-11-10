@@ -26,8 +26,8 @@ use std::time::{Duration, Instant};
 
 use bp_axes::{AxisSettings, Fallback, Frame, ScriptTable};
 use bp_devices::{
-    AxisClamp, IntifaceServer, IntifaceStatus, Media, OpenShockTrigger, Output, OutputSnapshot,
-    Keyframe, OutputStats, Pace, PercentilesUs, Profile, TickContext, Transport, Vibration, deadline,
+    AxisClamp, Interval, IntifaceServer, IntifaceStatus, Media, OpenShockTrigger, Output, OutputSnapshot,
+    Keyframe, OutputStats, Pace, PercentilesUs, Point, Profile, TickContext, Transport, Vibration, deadline,
     percentiles,
 };
 use bp_player::{Player, PlayerEvent, PlayerOptions};
@@ -482,6 +482,12 @@ struct History {
 
 const JUMP_MS: f64 = 100.0;
 const DELAY_MAX_MS: f64 = 5000.0;
+
+#[derive(Clone, Copy)]
+struct Keyed {
+    stroke_next: Option<Keyframe>,
+    points: [Option<Point>; Axis::COUNT],
+}
 
 fn frame_back(history: &VecDeque<Mixed>, now: Instant, delay: Duration) -> Option<&Mixed> {
     history
@@ -1888,6 +1894,14 @@ impl Engine {
             .is_some_and(|o| o.set_vibration(vibration))
     }
 
+    pub fn set_output_interval(&self, id: u32, interval: Interval) -> bool {
+        let mut outputs = self.shared.outputs.lock().unwrap();
+        outputs
+            .iter_mut()
+            .find(|o| o.id == id)
+            .is_some_and(|o| o.set_interval(interval))
+    }
+
     pub fn set_output_delay(&self, id: u32, ms: f64) -> bool {
         if !ms.is_finite() {
             return false;
@@ -2879,10 +2893,11 @@ impl Shared {
             (now, clock.running(), clock.speed())
         };
         let video_ms = media_ms;
-        let mut delays: Vec<f64> = if playing {
-            self.outputs.lock().unwrap().iter().filter(|o| o.connected()).map(|o| o.delay_ms).collect()
+        let (mut delays, wants_points): (Vec<f64>, bool) = if playing {
+            let outputs = self.outputs.lock().unwrap();
+            (outputs.iter().filter(|o| o.connected()).map(|o| o.delay_ms).collect(), outputs.iter().any(|o| o.wants_points()))
         } else {
-            Vec::new()
+            (Vec::new(), false)
         };
         delays.sort_by(f64::total_cmp);
         delays.dedup();
@@ -3034,17 +3049,25 @@ impl Shared {
             {
                 from_live[i] = from_live[Axis::L0.index()];
             }
-            let keyframes: Vec<(f64, [Option<Keyframe>; 2])> = delays
+            let keyframes: Vec<(f64, [Keyed; 2])> = delays
                 .iter()
                 .filter(|_| rate > 0.0)
                 .map(|d| {
                     let at = video_ms - d * rate;
                     let keys = [false, true].map(|multi| {
-                        mixer.for_output(multi).next_keyframe(Axis::L0, at).map(|k| Keyframe {
+                        let mixer = mixer.for_output(multi);
+                        let stroke_next = mixer.next_keyframe(Axis::L0, at).map(|k| Keyframe {
                             at_ms: k.at,
                             pos: k.pos,
                             in_ms: ((k.at - at) / rate).max(0.0),
-                        })
+                        });
+                        let points = std::array::from_fn(|i| {
+                            wants_points
+                                .then(|| mixer.next_keyframe(Axis::ALL[i], at))
+                                .flatten()
+                                .map(|k| Point { at_ms: k.at, value: k.pos })
+                        });
+                        Keyed { stroke_next, points }
                     });
                     (*d, keys)
                 })
@@ -3068,6 +3091,7 @@ impl Shared {
             manual_axes: std::array::from_fn(|i| flags[i] & (FLAG_LIVE | FLAG_TRACKED) != 0),
             media_ms: video_ms,
             stroke_next: None,
+            points: [None; Axis::COUNT],
             playing,
             estim_manual: [Axis::EA, Axis::EB, Axis::EV, Axis::E1, Axis::E2, Axis::E3, Axis::E4]
                 .into_iter().any(|a| flags[a.index()] & FLAG_LIVE != 0 && driven[a.index()]),
@@ -3106,8 +3130,8 @@ impl Shared {
                 let mode = script_modes.iter().find(|(id, _)| *id == o.id).map_or(OutputScriptMode::Auto, |(_, mode)| *mode);
                 let multi = multi_axis_output(&o.transport, o.profile, &o.clamps, mode);
                 let (output_frame, output_driven) = if multi { (multi_frame, multi_driven) } else { (frame, driven) };
-                let stroke_next = keyframes.iter().find(|(d, _)| *d == o.delay_ms).and_then(|(_, k)| k[usize::from(multi)]);
-                let ctx = TickContext { stroke_next, ..ctx };
+                let keyed = keyframes.iter().find(|(d, _)| *d == o.delay_ms).map(|(_, k)| k[usize::from(multi)]);
+                let ctx = TickContext { stroke_next: keyed.and_then(|k| k.stroke_next), points: keyed.map_or(ctx.points, |k| k.points), ..ctx };
                 wrote |= match back(o.delay_ms - earliest) {
                     Some(m) => {
                         let (mut f, mut d) = if multi { (m.multi_frame, m.multi_driven) } else { (m.frame, m.driven) };

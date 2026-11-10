@@ -9,6 +9,10 @@ export function fmtDuration(ms: number): string {
 
 import { t } from '@/state/i18n'
 
+export function fmtNum(n: number): string {
+  return Number.isInteger(n) ? String(n) : n.toFixed(1)
+}
+
 export function fmtSpeed(unitsPerSecond: number): string {
   return t('format.speed', { value: Math.round(unitsPerSecond) })
 }
