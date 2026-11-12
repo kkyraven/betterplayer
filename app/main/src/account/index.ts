@@ -19,6 +19,7 @@ import { isFeatureName, type AdminStats, type UsagePing } from '@shared/usage'
 import { randomUUID } from 'node:crypto'
 import type { Library } from '../library'
 import { contentHash, fileStamp } from './hash'
+import { openLoopback } from './loopback'
 import { AccountDb } from './store'
 
 const isUrl = (path: string) => /^https?:\/\//i.test(path)
@@ -70,6 +71,7 @@ export class Account {
   private hashRun = 0
   private hashed = false
   private loginRun = 0
+  private stopLogin: (() => void) | null = null
   private itchRun = 0
   private pulling: Promise<void> | null = null
   private stopped = false
@@ -149,35 +151,84 @@ export class Account {
     const run = ++this.loginRun
     this.set({ ...SIGNED_OUT, state: 'signingIn' })
     try {
-      const start = await this.request<{ attempt: string; secret: string; url: string }>('POST', '/auth/start', undefined, 'none')
-      await shell.openExternal(start.url)
-      const until = Date.now() + LOGIN_TIMEOUT_MS
-      while (Date.now() < until && run === this.loginRun) {
-        await new Promise((r) => setTimeout(r, LOGIN_POLL_MS))
-        if (run !== this.loginRun) return
-        const poll = await this.request<Poll>('POST', '/auth/poll', { attempt: start.attempt, secret: start.secret }, 'none').catch((e: unknown): Poll => {
-          if (e instanceof ServerError && e.status === 429) return { status: 'pending' }
-          throw e
-        })
-        if (poll.status === 'pending') continue
-        if (poll.status === 'done' && poll.token) {
-          this.setToken(poll.token)
-          this.set({ ...SIGNED_OUT, state: 'in' })
-          await this.refresh()
-          return
-        }
-        this.set({ ...SIGNED_OUT, state: 'error', error: poll.status === 'cancelled' ? t('account.error.cancelled') : t('account.error.signInFailed') })
-        return
-      }
-      if (run === this.loginRun) this.set({ ...SIGNED_OUT, state: 'error', error: t('account.error.timedOut') })
+      if (!(await this.loginLoopback(run)) && run === this.loginRun) await this.loginPolled(run)
     } catch (e) {
       if (run === this.loginRun) this.set({ ...SIGNED_OUT, state: 'error', error: describe(e) })
     }
   }
 
+  private async loginLoopback(run: number): Promise<boolean> {
+    type Outcome = { token: string } | 'cancelled' | 'failed' | 'timedOut' | 'stopped'
+    let finish!: (outcome: Outcome) => void
+    const outcome = new Promise<Outcome>((resolve) => (finish = resolve))
+    const loopback = await openLoopback(async (redirect) => {
+      const result: Outcome =
+        'code' in redirect
+          ? await this.request<{ token: string }>('POST', '/auth/exchange', { code: redirect.code, redirectUri: loopback.redirectUri, codeVerifier: loopback.codeVerifier }, 'none').catch(() => 'failed' as const)
+          : 'cancelled'
+      finish(result)
+      return `${this.baseUrl}/auth/done?status=${typeof result === 'string' ? result : 'ok'}`
+    })
+    const timer = setTimeout(() => finish('timedOut'), LOGIN_TIMEOUT_MS)
+    const stop = () => finish('stopped')
+    try {
+      if (run !== this.loginRun) return true
+      this.stopLogin = stop
+      const { redirectUri, state, codeChallenge } = loopback
+      const start = await this.request<{ url: string }>('POST', '/auth/authorize', { redirectUri, state, codeChallenge }, 'none').catch((e: unknown) => {
+        if (e instanceof ServerError && e.status === 404) return null
+        throw e
+      })
+      if (!start) return false
+      if (run !== this.loginRun) return true
+      await shell.openExternal(start.url)
+      const result = await outcome
+      if (run !== this.loginRun) return true
+      if (typeof result === 'string') {
+        const error = result === 'cancelled' ? t('account.error.cancelled') : result === 'timedOut' ? t('account.error.timedOut') : t('account.error.signInFailed')
+        this.set({ ...SIGNED_OUT, state: 'error', error })
+        return true
+      }
+      this.setToken(result.token)
+      this.set({ ...SIGNED_OUT, state: 'in' })
+      await this.refresh()
+      return true
+    } finally {
+      clearTimeout(timer)
+      if (this.stopLogin === stop) this.stopLogin = null
+      loopback.close()
+    }
+  }
+
+  private async loginPolled(run: number): Promise<void> {
+    const start = await this.request<{ attempt: string; secret: string; url: string }>('POST', '/auth/start', undefined, 'none')
+    if (run !== this.loginRun) return
+    await shell.openExternal(start.url)
+    const until = Date.now() + LOGIN_TIMEOUT_MS
+    while (Date.now() < until && run === this.loginRun) {
+      await new Promise((r) => setTimeout(r, LOGIN_POLL_MS))
+      if (run !== this.loginRun) return
+      const poll = await this.request<Poll>('POST', '/auth/poll', { attempt: start.attempt, secret: start.secret }, 'none').catch((e: unknown): Poll => {
+        if (e instanceof ServerError && e.status === 429) return { status: 'pending' }
+        throw e
+      })
+      if (poll.status === 'pending') continue
+      if (poll.status === 'done' && poll.token) {
+        this.setToken(poll.token)
+        this.set({ ...SIGNED_OUT, state: 'in' })
+        await this.refresh()
+        return
+      }
+      this.set({ ...SIGNED_OUT, state: 'error', error: poll.status === 'cancelled' ? t('account.error.cancelled') : t('account.error.signInFailed') })
+      return
+    }
+    if (run === this.loginRun) this.set({ ...SIGNED_OUT, state: 'error', error: t('account.error.timedOut') })
+  }
+
   cancelLogin() {
     if (this.status.state !== 'signingIn') return
     this.loginRun++
+    this.stopLogin?.()
     this.set(SIGNED_OUT)
   }
 
