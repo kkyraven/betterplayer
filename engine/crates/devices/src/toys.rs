@@ -899,11 +899,13 @@ fn rest(f: &ToyFeature) -> Option<f64> {
 fn command(f: &ToyFeature, v: f64, duration: u32) -> (i32, ClientDeviceOutputCommand) {
     use ClientDeviceCommandValue::Percent;
     use ClientDeviceOutputCommand as C;
+    let snap = |v: f64| per_mille(v) as f64 / 1000.0;
+    let v = snap(v);
     let cmd = match f.kind {
         FeatureKind::TimedPosition => C::HwPositionWithDuration(Percent(v), duration),
         FeatureKind::Position => C::Position(Percent(v)),
         FeatureKind::Rotate if f.signed => {
-            let s = ((v - 0.5) * 2.0).clamp(-1.0, 1.0);
+            let s = snap(((v - 0.5) * 2.0).clamp(-1.0, 1.0));
             return (per_mille(s), C::Rotate(Percent(s)));
         }
         FeatureKind::Rotate => C::Rotate(Percent(v)),
@@ -1359,6 +1361,7 @@ pub(crate) mod tests {
         assert_eq!(output_value(&mut rx).1, 0.3);
         link.interval = Interval::Points;
         let point = Some(Point { at_ms: 500.0, value: 0.8 });
+        assert!(!tick(&mut link, 0.7, &clamps, point));
         assert!(tick(&mut link, 0.7, &clamps, point));
         assert_eq!(output_value(&mut rx).1, 0.4);
         assert!(!tick(&mut link, 0.7, &clamps, point));

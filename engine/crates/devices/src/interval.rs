@@ -37,18 +37,30 @@ impl Pacer {
         if let Interval::Fixed(ms) = interval {
             self.held = None;
             self.point_ms = None;
-            if self.since_ms < ms as f64 {
+            let ms = ms as f64;
+            if self.since_ms < ms {
                 return None;
             }
-            self.since_ms = 0.0;
+            self.since_ms = if self.since_ms.is_finite() {
+                (self.since_ms - ms).clamp(0.0, (ms - FIXED_MIN_MS as f64).max(0.0))
+            } else {
+                0.0
+            };
             return changed(level).then_some(level);
         }
         let level = match point.filter(|_| interval == Interval::Points) {
             Some(p) => {
-                if self.point_ms.replace(p.at_ms) != Some(p.at_ms) {
+                if self.point_ms != Some(p.at_ms) {
+                    if self.since_ms < FIXED_MIN_MS as f64 {
+                        return None;
+                    }
+                    self.point_ms = Some(p.at_ms);
                     self.held = None;
+                    if !changed(p.value) {
+                        return None;
+                    }
                     self.since_ms = 0.0;
-                    return changed(p.value).then_some(p.value);
+                    return Some(p.value);
                 }
                 p.value
             }
@@ -108,6 +120,7 @@ mod tests {
             assert_eq!(pacer.step(Interval::Points, 0.3, None, Some(1.0), 10.0), None);
         }
         assert_eq!(pacer.step(Interval::Points, 0.3, None, Some(1.0), 10.0), Some(0.3));
+        assert_eq!(pacer.step(Interval::Points, 0.3, None, Some(0.3), 10.0), None);
         assert_eq!(pacer.step(Interval::Points, 0.3, p(15.0, 1.0), Some(0.3), 10.0), Some(1.0));
         for _ in 0..7 {
             assert_eq!(pacer.step(Interval::Points, 0.3, p(15.0, 0.6), Some(1.0), 10.0), None);
@@ -120,5 +133,26 @@ mod tests {
         let levels = [0.0, 0.33, 0.67, 1.0, 0.67, 0.33, 0.0, 0.0, 0.0];
         assert_eq!(run(Interval::Fixed(30), &levels, &[]), vec![(0, 0.0), (30, 1.0), (60, 0.0)]);
         assert_eq!(run(Interval::Fixed(40), &levels, &[]), vec![(0, 0.0), (40, 0.67), (80, 0.0)]);
+        let mut pacer = Pacer::default();
+        let sends = (0..100).filter(|_| pacer.step(Interval::Fixed(50), 0.5, None, None, 11.0).is_some()).count();
+        assert_eq!(sends, 22);
+        let mut pacer = Pacer::default();
+        let (mut at, mut last) = (0.0, None::<f64>);
+        for i in 0..200 {
+            let dt = [10.0, 11.0, 16.0][i % 3];
+            at += dt;
+            if pacer.step(Interval::Fixed(20), 0.5, None, None, dt).is_some() {
+                assert!(last.is_none_or(|l| at - l >= FIXED_MIN_MS as f64), "{last:?} then {at}");
+                last = Some(at);
+            }
+        }
+    }
+
+    #[test]
+    fn points_keep_the_shortest_fixed_interval_apart() {
+        let p = |at_ms: f64, value: f64| Some(Point { at_ms, value });
+        let levels = [0.0; 4];
+        let points = [p(0.0, 0.2), p(10.0, 0.9), p(20.0, 0.5), p(20.0, 0.5)];
+        assert_eq!(run(Interval::Points, &levels, &points), vec![(0, 0.2), (20, 0.5)]);
     }
 }

@@ -307,6 +307,11 @@ impl Mixer {
         self.live[axis.index()] = value.map(|v| v.clamp(0.0, 1.0));
     }
 
+    pub fn ramping(&self, axis: Axis) -> bool {
+        let st = &self.state[axis.index()];
+        axis != Axis::EV && st.ramp_ms < st.ramp_len_ms
+    }
+
     pub fn resync(&mut self) {
         for s in &mut self.state {
             s.ramp_from = s.last;
@@ -694,6 +699,9 @@ mod tests {
             m.tick(0.0, 10.0);
         }
         assert!((m.tick(0.0, 10.0)[0] - 1.0).abs() < 1e-6);
+        assert!(!m.ramping(Axis::L0));
+        m.resync();
+        assert!(m.ramping(Axis::L0));
     }
 
     #[test]

@@ -3062,7 +3062,7 @@ impl Shared {
                             in_ms: ((k.at - at) / rate).max(0.0),
                         });
                         let points = std::array::from_fn(|i| {
-                            wants_points
+                            (wants_points && !mixer.ramping(Axis::ALL[i]))
                                 .then(|| mixer.next_keyframe(Axis::ALL[i], at))
                                 .flatten()
                                 .map(|k| Point { at_ms: k.at, value: k.pos })

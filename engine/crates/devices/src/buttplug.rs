@@ -257,6 +257,7 @@ impl Buttplug {
             let c = clamps[axis.index()];
             c.enabled.then(|| (c.min + v.clamp(0.0, 1.0) * (c.max - c.min)).clamp(0.0, 1.0))
         };
+        let off = |axis: Axis| !clamps[axis.index()].enabled;
         let clamped = |axis: Axis| ranged(axis, values[axis.index()]);
         let level = |axis: Axis, rest: f64| clamped(axis).map(|v| if active[axis.index()] { v } else { rest });
         let stroke = clamped(Axis::L0);
@@ -285,11 +286,12 @@ impl Buttplug {
                 }
                 rest => {
                     d.pacer = Pacer::default();
-                    rest
+                    rest.or_else(|| (off(Axis::V0) && d.last[1].is_some()).then_some(0.0))
                 }
             };
             if let Some(v) = paced.filter(|v| d.last[1] != Some(unit(*v))) {
                 d.last[1] = Some(unit(v));
+                let v = unit(v) as f64 / 1000.0;
                 let scalars: Vec<Value> = d
                     .vibrate
                     .iter()
@@ -304,10 +306,12 @@ impl Buttplug {
                 continue;
             }
             if let Some(v) = twist
+                .or_else(|| (off(Axis::R0) && d.last[2].is_some()).then_some(0.5))
                 .filter(|_| d.rotate > 0)
                 .filter(|v| d.last[2] != Some(unit(*v)))
             {
                 d.last[2] = Some(unit(v));
+                let v = unit(v) as f64 / 1000.0;
                 let speed = ((v - 0.5).abs() * 2.0).min(1.0);
                 let rotations: Vec<Value> = (0..d.rotate)
                     .map(|i| json!({ "Index": i, "Speed": speed, "Clockwise": v >= 0.5 }))
@@ -420,6 +424,7 @@ mod tests {
         let point = |at_ms: f64, value: f64| Some(Point { at_ms, value });
         assert!(link.send(&[0.1; Axis::COUNT], &clamps, 10, &on, None, point(0.0, 0.0)).unwrap());
         assert_eq!(scalar(&mut receiver), 0.0);
+        assert!(!link.send(&[0.1; Axis::COUNT], &clamps, 10, &on, None, point(0.0, 0.0)).unwrap());
         assert!(link.send(&[0.7; Axis::COUNT], &clamps, 10, &on, None, point(15.0, 1.0)).unwrap());
         assert_eq!(scalar(&mut receiver), 0.5);
         assert!(!link.send(&[0.6; Axis::COUNT], &clamps, 10, &on, None, point(15.0, 1.0)).unwrap());
@@ -429,6 +434,18 @@ mod tests {
         let mut paused = on;
         paused[Axis::V0.index()] = false;
         assert!(link.send(&[0.2; Axis::COUNT], &clamps, 10, &paused, None, None).unwrap());
+        assert_eq!(scalar(&mut receiver), 0.0);
+        assert!(link.send(&[0.8; Axis::COUNT], &clamps, 10, &on, None, None).unwrap());
+        assert_eq!(scalar(&mut receiver), 0.4);
+        clamps[Axis::V0.index()].enabled = false;
+        assert!(link.send(&[0.8; Axis::COUNT], &clamps, 10, &on, None, None).unwrap());
+        assert_eq!(scalar(&mut receiver), 0.0);
+        assert!(!link.send(&[0.8; Axis::COUNT], &clamps, 10, &on, None, None).unwrap());
+        clamps[Axis::V0.index()].enabled = true;
+        assert!(link.send(&[0.6; Axis::COUNT], &clamps, 10, &on, None, None).unwrap());
+        assert_eq!(scalar(&mut receiver), 0.3);
+        assert!(!link.send(&[0.0008; Axis::COUNT], &clamps, 10, &on, None, None).unwrap());
+        assert!(link.send(&[0.0008; Axis::COUNT], &clamps, 10, &on, None, None).unwrap());
         assert_eq!(scalar(&mut receiver), 0.0);
     }
 
