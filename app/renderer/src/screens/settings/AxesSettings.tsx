@@ -170,7 +170,7 @@ function AxisSection({ id, name, page }: { id: AxisId; name: string; page: 'axes
         <Slider value={[Math.round(s.amplitude * 100)]} max={200} label={t('settings.axes.amplitudeLabel', { name })} onValueChange={([v]) => slide({ amplitude: (v ?? 100) / 100 })} />
       </Row>
       <Row k={t('settings.axes.speedLimit')} v={s.speedLimit === 0 ? t('common.off') : t('settings.axes.perSecond', { value: fmtNum(s.speedLimit) })} hint={t('settings.axes.speedLimitHint')}>
-        <Slider value={[s.speedLimit]} max={20} step={0.5} label={t('settings.axes.speedLimitLabel', { name })} onValueChange={([v]) => slide({ speedLimit: v ?? 0 })} />
+        <Slider value={[s.speedLimit]} max={20} step={0.1} label={t('settings.axes.speedLimitLabel', { name })} onValueChange={([v]) => slide({ speedLimit: v ?? 0 })} />
       </Row>
       <SettingsAdvanced page={page} id={id} custom={custom}>
         <Row k={t('settings.axes.rangeExtender')}>

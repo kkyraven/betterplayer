@@ -1,5 +1,9 @@
 # Release notes
 
+## 1.7.0
+
+- Set the speed limit in steps of 0.1
+
 ## 1.6.0
 
 - Safer sign-in
