@@ -1,5 +1,10 @@
 # Release notes
 
+## 1.6.0
+
+- Safer sign-in
+- Keep your account when you change your email
+
 ## 1.5.2
 
 - Add vibration interval setting
