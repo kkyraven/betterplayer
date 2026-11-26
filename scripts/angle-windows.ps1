@@ -32,10 +32,16 @@ if (-not (Test-Path (Join-Path $bin 'libEGL.dll'))) {
   if ($LASTEXITCODE -ne 0) { throw 'vcpkg install angle failed' }
 }
 
-New-Item -ItemType Directory -Force -Path $Out | Out-Null
-foreach ($name in 'libEGL.dll', 'libGLESv2.dll', 'z.dll') {
-  $src = Join-Path $bin $name
-  if (-not (Test-Path $src)) { throw "$src is missing from the vcpkg build" }
-  Copy-Item $src (Join-Path $Out $name) -Force
+$names = @('libEGL.dll', 'libGLESv2.dll')
+foreach ($name in $names) {
+  if (-not (Test-Path (Join-Path $bin $name))) { throw "$name is missing from the vcpkg build in $bin" }
 }
-Say "ANGLE staged in $((Resolve-Path $Out).Path)"
+$imports = @(& dumpbin /nologo /dependents (Join-Path $bin 'libGLESv2.dll') |
+  ForEach-Object { $_.Trim() } |
+  Where-Object { $_ -match '^[\w.+-]+\.dll$' -and $names -notcontains $_ -and (Test-Path (Join-Path $bin $_)) })
+if ($LASTEXITCODE -ne 0) { throw 'dumpbin could not read libGLESv2.dll; run this from a Developer PowerShell' }
+New-Item -ItemType Directory -Force -Path $Out | Out-Null
+foreach ($name in $names + $imports) {
+  Copy-Item (Join-Path $bin $name) (Join-Path $Out $name) -Force
+}
+Say "ANGLE ($(($names + $imports) -join ', ')) staged in $((Resolve-Path $Out).Path)"
