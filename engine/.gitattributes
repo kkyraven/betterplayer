@@ -1,2 +1,4 @@
 dlss5/**/*.dll filter=lfs diff=lfs merge=lfs -text
 dlss5/**/*.addon64 filter=lfs diff=lfs merge=lfs -text
+NvOFFRUC.dll filter=lfs diff=lfs merge=lfs -text
+cudart64_110.dll filter=lfs diff=lfs merge=lfs -text

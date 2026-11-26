@@ -4,6 +4,8 @@ node_modules/
 index.js
 index.d.ts
 *.dll
+!/NvOFFRUC.dll
+!/cudart64_110.dll
 !dlss5/
 !dlss5/**
 dlss5/host/ReShade.ini

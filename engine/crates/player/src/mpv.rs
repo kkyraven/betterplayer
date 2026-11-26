@@ -156,6 +156,7 @@ pub struct Mpv {
     pub observed_time: AtomicU64,
     pub picture_ready: AtomicBool,
     pub observed_size: AtomicU64,
+    pub picture_lag: AtomicU64,
 }
 unsafe impl Send for Mpv {}
 unsafe impl Sync for Mpv {}
@@ -185,7 +186,7 @@ impl Mpv {
         if handle.is_null() {
             return Err("mpv_create failed (check LC_NUMERIC)".into());
         }
-        Ok(Mpv { handle, observed_time: AtomicU64::new(0.0f64.to_bits()), picture_ready: AtomicBool::new(false), observed_size: AtomicU64::new(0) })
+        Ok(Mpv { handle, observed_time: AtomicU64::new(0.0f64.to_bits()), picture_ready: AtomicBool::new(false), observed_size: AtomicU64::new(0), picture_lag: AtomicU64::new(0) })
     }
 
     pub fn set_option(&self, name: &str, value: &str) -> Result<(), String> {

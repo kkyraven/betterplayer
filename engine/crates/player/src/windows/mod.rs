@@ -2,6 +2,7 @@ pub mod controllers;
 pub mod dlss;
 pub mod dlss5;
 pub mod egl;
+pub mod framegen;
 pub mod fruc;
 pub mod portals;
 pub mod probe;
@@ -9,6 +10,7 @@ mod share;
 pub mod vr;
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use libloading::Library;
 use libloading::os::windows::{LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, Library as WinLibrary};
@@ -65,6 +67,19 @@ fn describe(e: &libloading::Error) -> String {
     }
 }
 
+fn frame_gen(gpu: &str) -> Result<(), String> {
+    static PROBE: OnceLock<Result<(), String>> = OnceLock::new();
+    PROBE
+        .get_or_init(|| {
+            fruc::available().map_err(|e| {
+                let missing: Vec<&str> = [fruc::DLL, fruc::CUDA_DLL].into_iter().filter(|name| !module_dir().is_some_and(|d| d.join(name).exists())).collect();
+                if missing.is_empty() { e } else { format!("{} not found next to the engine", missing.join(" and ")) }
+            })?;
+            if gpu.contains("RTX") { Ok(()) } else { fruc::probe() }
+        })
+        .clone()
+}
+
 pub fn capabilities() -> EnhanceCapabilities {
     let gpu = match probe::gpu() {
         Ok(g) => g,
@@ -77,13 +92,16 @@ pub fn capabilities() -> EnhanceCapabilities {
         let reason = format!("NVIDIA driver {:.2} is below {:.2}", gpu.driver, probe::VSR_MIN_DRIVER);
         return EnhanceCapabilities { gpu: Some(gpu.name.clone()), ..EnhanceCapabilities::none(&reason) };
     }
-    let frame_gen_reason = match fruc::available() {
-        Ok(()) => "frame generation needs the D3D11 render path, not built yet".to_string(),
-        Err(_) => format!("{} not found next to the engine", fruc::DLL),
-    };
-    let (dlss, dlss_reason) = match dlss5::available() {
-        Ok(_) => (true, None),
-        Err(e) => (false, Some(e)),
-    };
-    EnhanceCapabilities { vsr: true, dlss, vsr_reason: None, dlss_reason, gpu: Some(gpu.name), ..EnhanceCapabilities::none(&frame_gen_reason) }
+    let frame_gen_reason = frame_gen(&gpu.name).err();
+    let dlss_reason = dlss5::available().err();
+    EnhanceCapabilities {
+        vsr: true,
+        frame_gen: frame_gen_reason.is_none(),
+        dlss: dlss_reason.is_none(),
+        vsr_reason: None,
+        frame_gen_reason,
+        dlss_reason,
+        gpu: Some(gpu.name),
+        ..EnhanceCapabilities::none("")
+    }
 }

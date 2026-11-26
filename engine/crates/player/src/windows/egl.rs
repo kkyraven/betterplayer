@@ -180,6 +180,40 @@ impl Gpu {
     }
 }
 
+impl Gpu {
+    pub fn wrap_d3d11(&self, texture: &ID3D11Texture2D) -> Result<D3dImage, String> {
+        let Some(h) = self.0 else { return Err("no GL context".into()) };
+        let get = |name: &CStr| unsafe { (h.egl.get_proc_address)(name.as_ptr()) };
+        let (create, destroy, target) = (get(c"eglCreateImageKHR"), get(c"eglDestroyImageKHR"), get(c"glEGLImageTargetTexture2DOES"));
+        if create.is_null() || destroy.is_null() || target.is_null() {
+            return Err("ANGLE without EGL images".into());
+        }
+        let (create, destroy, target): (CreateImageFn, DestroyImageFn, ImageTargetTexture2DFn) =
+            unsafe { (std::mem::transmute(create), std::mem::transmute(destroy), std::mem::transmute(target)) };
+        let attribs = [EGL_NONE];
+        let image = unsafe { create(h.display, ptr::null_mut(), EGL_D3D11_TEXTURE_ANGLE, texture.as_raw(), attribs.as_ptr()) };
+        if image.is_null() {
+            return Err(h.egl.err("eglCreateImageKHR for a D3D11 texture"));
+        }
+        let mut out = D3dImage { tex: 0, fbo: 0, image, display: h.display, destroy, gpu: *self };
+        unsafe {
+            gl::GenTextures(1, &mut out.tex);
+            gl::BindTexture(gl::TEXTURE_2D, out.tex);
+            target(gl::TEXTURE_2D, image);
+            gl::GenFramebuffers(1, &mut out.fbo);
+            gl::BindFramebuffer(gl::FRAMEBUFFER, out.fbo);
+            gl::FramebufferTexture2D(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, gl::TEXTURE_2D, out.tex, 0);
+            let status = gl::CheckFramebufferStatus(gl::FRAMEBUFFER);
+            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+            gl::BindTexture(gl::TEXTURE_2D, 0);
+            if status != gl::FRAMEBUFFER_COMPLETE {
+                return Err(format!("D3D11 texture framebuffer incomplete: 0x{status:x}"));
+            }
+        }
+        Ok(out)
+    }
+}
+
 impl Drop for Section {
     fn drop(&mut self) {
         DEPTH.with(|d| d.set(d.get() - 1));
@@ -301,34 +335,7 @@ impl Context {
     }
 
     pub fn wrap_d3d11(&self, texture: &ID3D11Texture2D) -> Result<D3dImage, String> {
-        let get = |name: &CStr| self.get_proc_address(name);
-        let (create, destroy, target) = (get(c"eglCreateImageKHR"), get(c"eglDestroyImageKHR"), get(c"glEGLImageTargetTexture2DOES"));
-        if create.is_null() || destroy.is_null() || target.is_null() {
-            return Err("ANGLE without EGL images".into());
-        }
-        let (create, destroy, target): (CreateImageFn, DestroyImageFn, ImageTargetTexture2DFn) =
-            unsafe { (std::mem::transmute(create), std::mem::transmute(destroy), std::mem::transmute(target)) };
-        let attribs = [EGL_NONE];
-        let image = unsafe { create(self.display, ptr::null_mut(), EGL_D3D11_TEXTURE_ANGLE, texture.as_raw(), attribs.as_ptr()) };
-        if image.is_null() {
-            return Err(self.egl.err("eglCreateImageKHR for a D3D11 texture"));
-        }
-        let mut out = D3dImage { tex: 0, fbo: 0, image, display: self.display, destroy, gpu: self.gpu() };
-        unsafe {
-            gl::GenTextures(1, &mut out.tex);
-            gl::BindTexture(gl::TEXTURE_2D, out.tex);
-            target(gl::TEXTURE_2D, image);
-            gl::GenFramebuffers(1, &mut out.fbo);
-            gl::BindFramebuffer(gl::FRAMEBUFFER, out.fbo);
-            gl::FramebufferTexture2D(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, gl::TEXTURE_2D, out.tex, 0);
-            let status = gl::CheckFramebufferStatus(gl::FRAMEBUFFER);
-            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
-            gl::BindTexture(gl::TEXTURE_2D, 0);
-            if status != gl::FRAMEBUFFER_COMPLETE {
-                return Err(format!("D3D11 texture framebuffer incomplete: 0x{status:x}"));
-            }
-        }
-        Ok(out)
+        self.gpu().wrap_d3d11(texture)
     }
 }
 

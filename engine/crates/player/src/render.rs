@@ -21,12 +21,13 @@ pub struct RenderConfig {
 }
 
 pub enum Msg {
-    Update,
+    Update(Instant),
     #[cfg(any(target_os = "macos", windows))]
     Redraw,
     Resize(u32, u32, Option<External>, Option<Half>, Arc<ResizeReply>),
     Presenting(bool),
     PictureBack,
+    Wanted,
     VrStart(Sender<Result<(), String>>),
     VrStop(Sender<Result<(), String>>),
     VrEnded,
@@ -127,7 +128,7 @@ impl FeedPace {
 
 unsafe extern "C" fn on_update(ctx: *mut c_void) {
     let tx = unsafe { &*(ctx as *const Sender<Msg>) };
-    let _ = tx.send(Msg::Update);
+    let _ = tx.send(Msg::Update(Instant::now()));
 }
 
 unsafe extern "C" fn get_proc(ctx: *mut c_void, name: *const c_char) -> *mut c_void {
@@ -344,6 +345,7 @@ pub fn spawn(
     vr: Arc<Mutex<Option<VrStatus>>>,
     #[cfg(target_os = "macos")] apple: Arc<std::sync::Mutex<crate::enhance::AppleUpscaling>>,
     #[cfg(windows)] dlss: Arc<std::sync::Mutex<crate::enhance::DlssShared>>,
+    #[cfg(windows)] frame_gen: Arc<std::sync::Mutex<crate::enhance::FrameGenShared>>,
 ) -> Result<(Sender<Msg>, JoinHandle<()>, String), String> {
     let (tx, rx) = channel::<Msg>();
     let callback = Box::new(tx.clone());
@@ -368,6 +370,8 @@ pub fn spawn(
                 crate::macos::Upscaler::new(apple, wake),
                 #[cfg(windows)]
                 crate::windows::dlss::DlssRender::new(dlss, wake),
+                #[cfg(windows)]
+                frame_gen,
             )
         })
         .map_err(|e| e.to_string())?;
@@ -397,6 +401,7 @@ fn run(
     ready: Sender<Result<String, String>>,
     #[cfg(target_os = "macos")] mut apple: crate::macos::Upscaler,
     #[cfg(windows)] mut dlss: crate::windows::dlss::DlssRender,
+    #[cfg(windows)] frame_gen: Arc<Mutex<crate::enhance::FrameGenShared>>,
 ) {
     let gl = match GlContext::new() {
         Ok(g) => Box::new(g),
@@ -427,6 +432,8 @@ fn run(
         mpv_render_param { type_: MPV_RENDER_PARAM_INVALID, data: ptr::null_mut() },
     ];
     let gpu = gl.gpu();
+    #[cfg(windows)]
+    let mut generate = crate::windows::framegen::FrameGen::new(frame_gen, mpv.clone(), gpu, gl.angle().d3d11().clone());
     let mut ctx: *mut mpv_render_context = ptr::null_mut();
     let r = unsafe { mpv_render_context_create(&mut ctx, mpv.handle, params.as_mut_ptr()) };
     if r < 0 {
@@ -499,7 +506,8 @@ fn run(
             }
         };
         match msg {
-            Some(Msg::Update) => {
+            #[cfg_attr(not(windows), allow(unused_variables))]
+            Some(Msg::Update(since)) => {
                 let flags = {
                     let _gpu = gpu.section();
                     unsafe { mpv_render_context_update(ctx) }
@@ -515,12 +523,15 @@ fn run(
                     let decoded = info.flags & MPV_RENDER_FRAME_INFO_PRESENT != 0
                         && info.flags & (MPV_RENDER_FRAME_INFO_REDRAW | MPV_RENDER_FRAME_INFO_REPEAT) == 0;
                     if decoded {
-                        mpv.picture_ready.store(true, Ordering::Relaxed);
                         #[cfg(windows)]
                         {
                             let _gpu = gpu.section();
                             dlss.new_frame();
+                            if !mpv.picture_ready.load(Ordering::Relaxed) {
+                                generate.restart();
+                            }
                         }
+                        mpv.picture_ready.store(true, Ordering::Relaxed);
                     }
                     if let Some(h) = headset.as_mut().filter(|_| wanted(true)) {
                         skipped_frame = false;
@@ -556,6 +567,8 @@ fn run(
                                 &mut apple,
                                 #[cfg(windows)]
                                 &mut dlss,
+                                #[cfg(windows)]
+                                (&mut generate, decoded.then_some(since)),
                             );
                         }
                     } else {
@@ -588,6 +601,8 @@ fn run(
                         &mut apple,
                         #[cfg(windows)]
                         &mut dlss,
+                        #[cfg(windows)]
+                        (&mut generate, None),
                     );
                 }
             }
@@ -614,6 +629,8 @@ fn run(
                         &mut apple,
                         #[cfg(windows)]
                         &mut dlss,
+                        #[cfg(windows)]
+                        (&mut generate, None),
                     );
                 }
             }
@@ -639,6 +656,8 @@ fn run(
                         &mut apple,
                         #[cfg(windows)]
                         &mut dlss,
+                        #[cfg(windows)]
+                        (&mut generate, None),
                     );
                 }
             }
@@ -662,6 +681,8 @@ fn run(
                         &mut apple,
                         #[cfg(windows)]
                         &mut dlss,
+                        #[cfg(windows)]
+                        (&mut generate, None),
                     );
                 }
             }
@@ -671,6 +692,7 @@ fn run(
                     {
                         let _gpu = gpu.section();
                         dlss.suspend();
+                        generate.suspend();
                     }
                     match Headset::start(&gl, view, vr.clone(), (*callback).clone()) {
                         Ok(mut h) => {
@@ -700,6 +722,8 @@ fn run(
                         &mut apple,
                         #[cfg(windows)]
                         &mut dlss,
+                        #[cfg(windows)]
+                        (&mut generate, None),
                     );
                 }
                 *vr.lock().unwrap() = None;
@@ -717,6 +741,12 @@ fn run(
                 }
             }
             Some(Msg::VrEnded) => {}
+            Some(Msg::Wanted) => {
+                #[cfg(windows)]
+                if headset.is_none() && wanted(presenting) {
+                    generated(ctx, &mut target, &frames, &stats, &mut generate);
+                }
+            }
             Some(Msg::Stop) => break,
             None => {}
         }
@@ -740,6 +770,8 @@ fn run(
                     &mut apple,
                     #[cfg(windows)]
                     &mut dlss,
+                    #[cfg(windows)]
+                    (&mut generate, None),
                 );
             }
         }
@@ -756,6 +788,8 @@ fn run(
     drop(apple);
     #[cfg(windows)]
     drop(dlss);
+    #[cfg(windows)]
+    drop(generate);
     drop(gl);
 }
 
@@ -767,6 +801,7 @@ fn render_one(
     pts: Option<f64>,
     #[cfg(target_os = "macos")] apple: &mut crate::macos::Upscaler,
     #[cfg(windows)] dlss: &mut crate::windows::dlss::DlssRender,
+    #[cfg(windows)] (generate, arrived): (&mut crate::windows::framegen::FrameGen, Option<Instant>),
 ) {
     let t0 = Instant::now();
     let gpu = target.gpu.section();
@@ -795,13 +830,45 @@ fn render_one(
         stats.gl_error(e);
         return;
     }
+    #[cfg(windows)]
+    if !target.cfg.stamp {
+        if arrived.is_some_and(|at| !generate.frame(target.fbo, target.read, at)) {
+            unsafe { mpv_render_context_report_swap(ctx) };
+            return;
+        }
+        generate.caught_up();
+    }
     let done = target.readback(ctx, frames, stats, ms(t0.elapsed()), pts);
     drop(gpu);
+    publish(ctx, frames, stats, done);
+}
+
+fn publish(ctx: *mut mpv_render_context, frames: &Frames, stats: &RenderStats, done: Option<Done>) {
     if let Some(d) = done {
         let dropped = frames.publish(d.pts);
         unsafe { mpv_render_context_report_swap(ctx) };
         stats.record(d.render_ms, ms(d.t0.elapsed()), dropped);
     }
+}
+
+#[cfg(windows)]
+fn generated(ctx: *mut mpv_render_context, target: &mut Target, frames: &Frames, stats: &RenderStats, generate: &mut crate::windows::framegen::FrameGen) {
+    let t0 = Instant::now();
+    let Some(position) = generate.asked(t0) else { return };
+    if target.inflight.len() >= 2 {
+        return;
+    }
+    let gpu = target.gpu.section();
+    if !generate.picture(position, target.fbo, target.read, t0) {
+        return;
+    }
+    if let Some(e) = take_gl_error() {
+        stats.gl_error(e);
+        return;
+    }
+    let done = target.readback(ctx, frames, stats, ms(t0.elapsed()), None);
+    drop(gpu);
+    publish(ctx, frames, stats, done);
 }
 
 fn feed(h: &mut Headset, ctx: *mut mpv_render_context, target: &mut Target, frames: &Frames, stats: &RenderStats) -> bool {

@@ -346,6 +346,13 @@ pub(crate) struct DlssShared {
     pub reason: Option<String>,
 }
 
+#[derive(Default)]
+pub(crate) struct FrameGenShared {
+    pub target_fps: f64,
+    pub active: bool,
+    pub reason: Option<String>,
+}
+
 pub struct Enhance {
     options: EnhanceOptions,
     caps: EnhanceCapabilities,
@@ -354,6 +361,7 @@ pub struct Enhance {
     applied: Applied,
     apple: Arc<Mutex<AppleUpscaling>>,
     dlss: Arc<Mutex<DlssShared>>,
+    frame_gen: Arc<Mutex<FrameGenShared>>,
     vr: bool,
 }
 
@@ -367,6 +375,7 @@ impl Enhance {
             applied: Applied::plain(),
             apple: Arc::default(),
             dlss: Arc::default(),
+            frame_gen: Arc::default(),
             vr: false,
         }
     }
@@ -379,6 +388,11 @@ impl Enhance {
     #[cfg(windows)]
     pub(crate) fn dlss(&self) -> Arc<Mutex<DlssShared>> {
         self.dlss.clone()
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn frame_gen(&self) -> Arc<Mutex<FrameGenShared>> {
+        self.frame_gen.clone()
     }
 
     #[cfg(target_os = "linux")]
@@ -429,6 +443,13 @@ impl Enhance {
                 *dlss = DlssShared { request, ..DlssShared::default() };
             }
         }
+        {
+            let target_fps = self.frame_gen_target();
+            let mut frame_gen = self.frame_gen.lock().unwrap();
+            if frame_gen.target_fps != target_fps {
+                *frame_gen = FrameGenShared { target_fps, ..FrameGenShared::default() };
+            }
+        }
         let want = self.desired();
         if want.scale != self.applied.scale {
             mpv.set_property("scale", &want.scale)?;
@@ -458,6 +479,13 @@ impl Enhance {
         };
         let glsl_shaders = if fsr { fsr_shader_path().unwrap_or_default().to_owned() } else { String::new() };
         Applied { scale: scale.into(), vf, glsl_shaders }
+    }
+
+    fn frame_gen_target(&self) -> f64 {
+        if self.vr || !self.caps.frame_gen || self.options.upscaler == Upscaler::Dlss {
+            return 0.0;
+        }
+        self.options.target_fps.unwrap_or(0.0)
     }
 
     fn vsr_factor(&self) -> Option<f64> {
@@ -514,9 +542,15 @@ impl Enhance {
             Upscaler::Sharp | Upscaler::Fsr if self.source.1 > 0 && self.output.1 > self.source.1 => self.output.1 as f64 / self.source.1 as f64,
             _ => 0.0,
         };
-        let frame_gen_wanted = self.options.target_fps.is_some();
-        if frame_gen_wanted && !self.caps.frame_gen && reason.is_none() {
-            reason = self.caps.frame_gen_reason.clone();
+        let frame_gen = self.frame_gen.lock().unwrap();
+        if self.options.target_fps.is_some() && !frame_gen.active && reason.is_none() {
+            reason = if !self.caps.frame_gen {
+                self.caps.frame_gen_reason.clone()
+            } else if self.options.upscaler == Upscaler::Dlss {
+                Some("frame generation is off with DLSS 5".into())
+            } else {
+                frame_gen.reason.clone()
+            };
         }
         EnhanceState {
             upscaler,
@@ -524,7 +558,7 @@ impl Enhance {
             factor,
             source: self.source,
             output: self.output,
-            frame_gen: frame_gen_wanted && self.caps.frame_gen,
+            frame_gen: frame_gen.active,
             target_fps: self.options.target_fps.unwrap_or(0.0),
             reason,
         }
@@ -685,6 +719,26 @@ mod tests {
         assert_eq!(s.upscaler, Upscaler::Off);
         assert!(!s.frame_gen);
         assert_eq!(s.reason.as_deref(), Some("Windows only"));
+    }
+
+    #[test]
+    fn frame_generation_is_asked_of_the_stage_and_reported_from_it() {
+        let mut e = Enhance::new(EnhanceCapabilities { frame_gen: true, frame_gen_reason: None, dlss: true, dlss_reason: None, ..rtx() }, (2560, 1440));
+        e.options.target_fps = Some(120.0);
+        assert_eq!(e.frame_gen_target(), 120.0);
+        assert!(!e.state().frame_gen, "not until the stage has a pair of frames");
+        e.frame_gen.lock().unwrap().active = true;
+        assert!(e.state().frame_gen);
+        e.frame_gen.lock().unwrap().active = false;
+        e.frame_gen.lock().unwrap().reason = Some("this GPU has no optical flow".into());
+        assert_eq!(e.state().reason.as_deref(), Some("this GPU has no optical flow"));
+        e.vr = true;
+        assert_eq!(e.frame_gen_target(), 0.0);
+        e.vr = false;
+        e.options.upscaler = Upscaler::Dlss;
+        e.dlss.lock().unwrap().factor = 1.5;
+        assert_eq!(e.frame_gen_target(), 0.0);
+        assert_eq!(e.state().reason.as_deref(), Some("frame generation is off with DLSS 5"));
     }
 
     #[test]

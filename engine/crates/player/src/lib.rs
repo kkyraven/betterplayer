@@ -383,6 +383,7 @@ impl Player {
                     let mut behind = Behind::default();
                     let framedrop = mpv.get_string("framedrop").unwrap_or_default();
                     let (mut idle, mut speed) = (true, 1.0);
+                    let mut late = 0.0;
                     while !stop.load(Ordering::Relaxed) {
                         let now_in_vr = vr.lock().unwrap().as_ref().is_some_and(|s| s.active);
                         if now_in_vr != in_vr {
@@ -428,7 +429,14 @@ impl Player {
                                         push_log(&log, "decoding is slower than real time: frame dropping off for this file".into());
                                         let _ = mpv.set_property("framedrop", "no");
                                     }
-                                    emit(PlayerEvent::TimePos(t));
+                                    let now_late = picture_lag(late, f64::from_bits(mpv.picture_lag.load(Ordering::Relaxed)), speed);
+                                    if now_late != late {
+                                        late = now_late;
+                                        if let Err(e) = mpv.set_property("audio-delay", &format!("{late:.4}")) {
+                                            push_log(&log, format!("audio delay for frame generation: {e}"));
+                                        }
+                                    }
+                                    emit(PlayerEvent::TimePos(if idle { t } else { (t - late).max(0.0) }));
                                 }
                                 ("duration", Some(Property::Double(d))) => emit(PlayerEvent::Duration(d)),
                                 ("pause", Some(Property::Flag(p))) => emit(PlayerEvent::Pause(p)),
@@ -436,6 +444,9 @@ impl Player {
                                 ("core-idle", Some(Property::Flag(i))) => {
                                     idle = i;
                                     behind.reset();
+                                    if idle && late > 0.0 {
+                                        emit(PlayerEvent::TimePos(f64::from_bits(mpv.observed_time.load(Ordering::Relaxed))));
+                                    }
                                     emit(PlayerEvent::Idle(i))
                                 }
                                 ("speed", Some(Property::Double(s))) => {
@@ -484,6 +495,11 @@ impl Player {
         let frames = Arc::new(Frames::new(width, height, opts.hold_frames));
         let stats = Arc::new(RenderStats::new());
         let cfg = RenderConfig { bgra: opts.bgra, async_readback: opts.async_readback, stamp: opts.stamp_frames };
+        #[cfg(windows)]
+        let (dlss, frame_gen) = {
+            let enhance = enhance.lock().unwrap();
+            (enhance.dlss(), enhance.frame_gen())
+        };
         let (tx, render, context) = match render::spawn(
             mpv.clone(),
             frames.clone(),
@@ -494,7 +510,9 @@ impl Player {
             #[cfg(target_os = "macos")]
             enhance.lock().unwrap().apple(),
             #[cfg(windows)]
-            enhance.lock().unwrap().dlss(),
+            dlss,
+            #[cfg(windows)]
+            frame_gen,
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -786,6 +804,11 @@ impl Player {
     }
 
     pub fn acquire(&self) -> Option<usize> {
+        if self.mpv.picture_lag.load(Ordering::Relaxed) != 0 {
+            if let Some(tx) = &self.tx {
+                let _ = tx.send(Msg::Wanted);
+            }
+        }
         let a = self.frames.acquire()?;
         self.stats.acquired(a.waited);
         self.acquired_serial.store(a.serial, Ordering::Relaxed);
@@ -838,6 +861,11 @@ impl Drop for Player {
     fn drop(&mut self) {
         self.close();
     }
+}
+
+fn picture_lag(applied: f64, interval: f64, speed: f64) -> f64 {
+    let lag = interval * speed;
+    if lag > 0.0 && (lag - applied).abs() < 0.002 { applied } else { lag }
 }
 
 #[cfg(windows)]
@@ -931,6 +959,16 @@ mod tests {
         assert!(VrKey::parse("colour", 0, "soft", 2.0).is_err());
         assert!(VrKey::parse("colour", 0x100_0000, "edges", 2.0).is_err());
         assert!(VrKey::parse("colour", 0, "edges", f64::NAN).is_err());
+    }
+
+    #[test]
+    fn the_picture_lag_is_one_frame_of_media_time_and_ignores_jitter() {
+        assert_eq!(picture_lag(0.0, 0.0, 1.0), 0.0);
+        assert_eq!(picture_lag(0.0, 1.0 / 24.0, 1.0), 1.0 / 24.0);
+        assert_eq!(picture_lag(0.0, 1.0 / 48.0, 2.0), 1.0 / 24.0);
+        assert_eq!(picture_lag(1.0 / 24.0, 1.0 / 24.0 + 0.0008, 1.0), 1.0 / 24.0, "the measured interval moves a little");
+        assert_eq!(picture_lag(1.0 / 24.0, 1.0 / 30.0, 1.0), 1.0 / 30.0, "another file");
+        assert_eq!(picture_lag(1.0 / 24.0, 0.0, 1.0), 0.0, "generation stopped");
     }
 
     #[test]

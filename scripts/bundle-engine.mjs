@@ -112,6 +112,13 @@ switch (process.platform) {
     if (!dlls.some((f) => f.toLowerCase() === 'openvr_api.dll')) {
       fail('openvr_api.dll is not next to the addon in engine/; take bin/win64/openvr_api.dll from ValveSoftware/openvr v2.15.6')
     }
+    const fruc = ['NvOFFRUC.dll', 'cudart64_110.dll']
+    const has = (name) => dlls.some((f) => f.toLowerCase() === name.toLowerCase())
+    if (fruc.some(has)) {
+      const bad = fruc.filter((name) => !has(name) || statSync(join(engine, name)).size < 4096)
+      if (bad.length) fail(`engine/ is missing ${bad.join(', ')} or holds Git LFS pointers; run git lfs pull`)
+      copyFileSync(join(engine, 'NvOFFRUC-LICENSE.txt'), join(out, 'NvOFFRUC-LICENSE.txt'))
+    }
     for (const f of dlls) copyFileSync(join(engine, f), join(out, f))
     copyFileSync(join(engine, 'openvr-LICENSE.txt'), join(out, 'openvr-LICENSE.txt'))
     console.log(`bundle-engine: bundled ${dlls.join(', ')}`)
