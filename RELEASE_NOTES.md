@@ -1,5 +1,9 @@
 # Release notes
 
+## 1.7.2
+
+- Fix frame generation not working on Windows
+
 ## 1.7.1
 
 - Fix frame generation not working on Windows
